@@ -8,7 +8,6 @@ broadcast/
 .env.*
 
 # Dependencies
-lib/
 node_modules/
 
 # IDE configurations
