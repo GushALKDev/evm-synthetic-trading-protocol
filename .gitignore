@@ -1,0 +1,27 @@
+# Compiler artifacts and cache
+cache/
+out/
+broadcast/
+
+# Environment variables (Critical)
+.env
+.env.*
+
+# Dependencies
+lib/
+node_modules/
+
+# IDE configurations
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Operating System files
+.DS_Store
+Thumbs.db
+
+# Documentation generation
+docs/book/
+code-style-guide.md
+es/
