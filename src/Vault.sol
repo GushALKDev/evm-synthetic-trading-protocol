@@ -30,14 +30,15 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
     address public immutable ASSET;
 
     /**
-     * @notice Whether the vault is paused
-     */
-    bool private _paused;
-
-    /**
      * @notice The trading protocol address authorized to request payouts
+     * @dev Packed with _paused in the same slot (address = 20 bytes + bool = 1 byte = 21 bytes < 32)
      */
     address public tradingProtocol;
+
+    /**
+     * @notice Whether the vault is paused (packed with tradingProtocol)
+     */
+    bool private _paused;
 
     /**
      * @notice The solvency manager address authorized to inject funds
@@ -50,7 +51,6 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
     struct WithdrawalRequest {
         uint256 shares;
         uint256 requestEpoch;
-        address receiver;
     }
 
     /**
@@ -91,13 +91,25 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     modifier whenNotPaused() {
-        if (_paused) revert EnforcedPause();
+        _requireNotPaused();
         _;
     }
 
     modifier whenPaused() {
-        if (!_paused) revert ExpectedPause();
+        _requirePaused();
         _;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                          INTERNAL HELPERS
+    //////////////////////////////////////////////////////////////*/
+
+    function _requireNotPaused() internal view {
+        if (_paused) revert EnforcedPause();
+    }
+
+    function _requirePaused() internal view {
+        if (!_paused) revert ExpectedPause();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -185,7 +197,7 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
         uint256 epoch = currentEpoch();
         uint256 unlockEpoch = epoch + WITHDRAWAL_DELAY_EPOCHS;
 
-        withdrawalRequests[msg.sender] = WithdrawalRequest({shares: shares, requestEpoch: epoch, receiver: msg.sender});
+        withdrawalRequests[msg.sender] = WithdrawalRequest({shares: shares, requestEpoch: epoch});
 
         emit WithdrawalRequested(msg.sender, shares, epoch, unlockEpoch);
     }
@@ -193,7 +205,7 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
     /**
      * @notice Cancel a pending withdrawal request
      */
-    function cancelWithdrawal() external nonReentrant {
+    function cancelWithdrawal() external {
         if (withdrawalRequests[msg.sender].shares == 0) revert NoWithdrawalRequest();
 
         delete withdrawalRequests[msg.sender];
@@ -211,18 +223,17 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
         uint256 unlockEpoch = req.requestEpoch + WITHDRAWAL_DELAY_EPOCHS;
         if (currentEpoch() < unlockEpoch) revert WithdrawalLocked(unlockEpoch);
 
-        uint256 assets = previewRedeem(req.shares);
         uint256 sharesToBurn = req.shares;
-        address receiver = req.receiver;
+        uint256 assets = previewRedeem(sharesToBurn);
+
+        // Clear request before external calls (CEI)
+        delete withdrawalRequests[msg.sender];
 
         // Burn shares
         _burn(msg.sender, sharesToBurn);
 
-        // Clear request
-        delete withdrawalRequests[msg.sender];
-
         // Transfer assets
-        ASSET.safeTransfer(receiver, assets);
+        ASSET.safeTransfer(msg.sender, assets);
 
         emit WithdrawalExecuted(msg.sender, sharesToBurn, assets);
     }
