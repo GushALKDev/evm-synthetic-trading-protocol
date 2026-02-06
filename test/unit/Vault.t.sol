@@ -4,6 +4,7 @@ pragma solidity 0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {LiquidityVault} from "../../src/Vault.sol";
 import {ERC20} from "solady/tokens/ERC20.sol";
+import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 
 contract MockUSDC is ERC20 {
     function name() public pure override returns (string memory) {
@@ -24,6 +25,8 @@ contract MockUSDC is ERC20 {
 }
 
 contract VaultTest is Test {
+    using SafeTransferLib for address;
+
     LiquidityVault vault;
     MockUSDC usdc;
 
@@ -31,15 +34,12 @@ contract VaultTest is Test {
     address alice = makeAddr("alice");
     address bob = makeAddr("bob");
     address tradingProtocol = makeAddr("tradingProtocol");
-    address solvencyManager = makeAddr("solvencyManager");
 
     event WithdrawalRequested(address indexed owner, uint256 shares, uint256 requestEpoch, uint256 unlockEpoch);
     event WithdrawalExecuted(address indexed owner, uint256 shares, uint256 assets);
     event WithdrawalCancelled(address indexed owner);
     event PayoutSent(address indexed receiver, uint256 amount);
-    event FundsInjected(uint256 amount);
     event TradingProtocolUpdated(address indexed newProtocol);
-    event SolvencyManagerUpdated(address indexed newManager);
     event Paused(address account);
     event Unpaused(address account);
 
@@ -456,36 +456,7 @@ contract VaultTest is Test {
         vault.sendPayout(bob, 2000 * 10 ** 6);
     }
 
-    function test_InjectFunds() public {
-        // Setup: Alice deposits first
-        vm.startPrank(alice);
-        usdc.approve(address(vault), 1000 * 10 ** 6);
-        vault.deposit(1000 * 10 ** 6, alice);
-        vm.stopPrank();
-
-        uint256 totalAssetsBefore = vault.totalAssets();
-
-        // Bob injects funds
-        vm.startPrank(bob);
-        usdc.approve(address(vault), 500 * 10 ** 6);
-        vault.injectFunds(500 * 10 ** 6);
-        vm.stopPrank();
-
-        assertEq(vault.totalAssets(), totalAssetsBefore + 500 * 10 ** 6);
-    }
-
-    function test_InjectFunds_EmitsEvent() public {
-        vm.startPrank(alice);
-        usdc.approve(address(vault), 500 * 10 ** 6);
-
-        vm.expectEmit(false, false, false, true);
-        emit FundsInjected(500 * 10 ** 6);
-
-        vault.injectFunds(500 * 10 ** 6);
-        vm.stopPrank();
-    }
-
-    function test_InjectFunds_IncreasesShareValue() public {
+    function test_DirectTransfer_IncreasesShareValue() public {
         // Alice deposits 1000 USDC, gets 1000 shares
         vm.startPrank(alice);
         usdc.approve(address(vault), 1000 * 10 ** 6);
@@ -495,11 +466,10 @@ contract VaultTest is Test {
         uint256 sharesBefore = vault.balanceOf(alice);
         uint256 assetsBefore = vault.previewRedeem(sharesBefore);
 
-        // Inject 1000 USDC (doubles the assets)
-        vm.startPrank(bob);
-        usdc.approve(address(vault), 1000 * 10 ** 6);
-        vault.injectFunds(1000 * 10 ** 6);
-        vm.stopPrank();
+        // Direct USDC transfer to vault (donation) doubles the assets
+        usdc.mint(bob, 1000 * 10 ** 6);
+        vm.prank(bob);
+        address(usdc).safeTransfer(address(vault), 1000 * 10 ** 6);
 
         uint256 assetsAfter = vault.previewRedeem(sharesBefore);
 
@@ -663,33 +633,6 @@ contract VaultTest is Test {
         vm.prank(alice);
         vm.expectRevert();
         vault.setTradingProtocol(makeAddr("newProtocol"));
-    }
-
-    function test_SetSolvencyManager() public {
-        vm.prank(owner);
-        vault.setSolvencyManager(solvencyManager);
-
-        assertEq(vault.solvencyManager(), solvencyManager);
-    }
-
-    function test_SetSolvencyManager_EmitsEvent() public {
-        vm.expectEmit(true, false, false, false);
-        emit SolvencyManagerUpdated(solvencyManager);
-
-        vm.prank(owner);
-        vault.setSolvencyManager(solvencyManager);
-    }
-
-    function test_SetSolvencyManager_RevertOnZeroAddress() public {
-        vm.prank(owner);
-        vm.expectRevert(LiquidityVault.ZeroAddress.selector);
-        vault.setSolvencyManager(address(0));
-    }
-
-    function test_SetSolvencyManager_RevertIfNotOwner() public {
-        vm.prank(alice);
-        vm.expectRevert();
-        vault.setSolvencyManager(solvencyManager);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -881,16 +824,6 @@ contract VaultTest is Test {
         // Payout
         vm.prank(tradingProtocol);
         vault.sendPayout(bob, 500 * 10 ** 6);
-
-        // Invariant still holds
-        assertEq(vault.totalAssets(), usdc.balanceOf(address(vault)));
-
-        // Inject funds
-        usdc.mint(alice, 1000 * 10 ** 6);
-        vm.startPrank(alice);
-        usdc.approve(address(vault), 1000 * 10 ** 6);
-        vault.injectFunds(1000 * 10 ** 6);
-        vm.stopPrank();
 
         // Invariant still holds
         assertEq(vault.totalAssets(), usdc.balanceOf(address(vault)));

@@ -41,11 +41,6 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
     bool private _paused;
 
     /**
-     * @notice The solvency manager address authorized to inject funds
-     */
-    address public solvencyManager;
-
-    /**
      * @notice Defines a withdrawal request
      */
     struct WithdrawalRequest {
@@ -65,9 +60,7 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
     event WithdrawalRequested(address indexed owner, uint256 shares, uint256 requestEpoch, uint256 unlockEpoch);
     event WithdrawalExecuted(address indexed owner, uint256 shares, uint256 assets);
     event PayoutSent(address indexed receiver, uint256 amount);
-    event FundsInjected(uint256 amount);
     event TradingProtocolUpdated(address indexed newProtocol);
-    event SolvencyManagerUpdated(address indexed newManager);
     event WithdrawalCancelled(address indexed owner);
     event Paused(address account);
     event Unpaused(address account);
@@ -295,16 +288,6 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
         emit PayoutSent(receiver, amount);
     }
 
-    /**
-     * @notice Receive fee injection or solvency rescue (called by Solvency Manager or anyone willing to donate)
-     * @dev Just a transfer, but we can have a hook if needed.
-     * Since we use balanceOf(this) for accounting, simple transfers work.
-     */
-    function injectFunds(uint256 amount) external {
-        ASSET.safeTransferFrom(msg.sender, address(this), amount);
-        emit FundsInjected(amount);
-    }
-
     /*//////////////////////////////////////////////////////////////
                             ADMIN FUNCTIONS
     //////////////////////////////////////////////////////////////*/
@@ -313,12 +296,6 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
         if (_tradingProtocol == address(0)) revert ZeroAddress();
         tradingProtocol = _tradingProtocol;
         emit TradingProtocolUpdated(_tradingProtocol);
-    }
-
-    function setSolvencyManager(address _solvencyManager) external onlyOwner {
-        if (_solvencyManager == address(0)) revert ZeroAddress();
-        solvencyManager = _solvencyManager;
-        emit SolvencyManagerUpdated(_solvencyManager);
     }
 
     function pause() external onlyOwner whenNotPaused {
