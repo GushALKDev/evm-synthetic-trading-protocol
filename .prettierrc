@@ -3,13 +3,13 @@
     "useTabs": false,
     "singleQuote": false,
     "bracketSpacing": false,
-    "printWidth": 180,
+    "printWidth": 160,
     "plugins": ["prettier-plugin-solidity"],
     "overrides": [
         {
             "files": "*.sol",
             "options": {
-                "printWidth": 180,
+                "printWidth": 160,
                 "tabWidth": 4,
                 "useTabs": false,
                 "singleQuote": false,

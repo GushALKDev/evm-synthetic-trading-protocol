@@ -37,15 +37,23 @@ contract TradingStorageTest is Test {
     address tradingEngine = makeAddr("tradingEngine");
     address vaultAddr = makeAddr("vault");
 
-    event TradeStored(uint256 indexed tradeId, address indexed user, uint256 pairIndex);
+    event TradeStored(uint256 indexed tradeId, address indexed user, uint16 pairIndex);
     event TradeDeleted(uint256 indexed tradeId, address indexed user);
-    event TradeTpUpdated(uint256 indexed tradeId, uint256 newTp);
-    event TradeSlUpdated(uint256 indexed tradeId, uint256 newSl);
+    event TradeTpUpdated(uint256 indexed tradeId, uint128 newTp);
+    event TradeSlUpdated(uint256 indexed tradeId, uint128 newSl);
     event OpenInterestUpdated(uint256 indexed pairIndex, uint256 newOI);
     event CollateralSent(address indexed to, uint256 amount);
     event PairAdded(uint256 indexed pairIndex, string name);
     event PairUpdated(uint256 indexed pairIndex);
     event TradingEngineUpdated(address indexed newEngine);
+
+    // Default trade parameters
+    uint16 constant DEFAULT_PAIR_INDEX = 0;
+    uint16 constant DEFAULT_LEVERAGE = 10;
+    uint64 constant DEFAULT_COLLATERAL = 100 * 10 ** 6;
+    uint128 constant DEFAULT_OPEN_PRICE = 50_000 * 1e18;
+    uint128 constant DEFAULT_TP = 55_000 * 1e18;
+    uint128 constant DEFAULT_SL = 45_000 * 1e18;
 
     function setUp() public {
         usdc = new MockUSDC();
@@ -65,20 +73,8 @@ contract TradingStorageTest is Test {
                           HELPER FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    function _createDefaultTrade(address _user) internal view returns (TradingStorage.Trade memory) {
-        return
-            TradingStorage.Trade({
-                user: _user,
-                isLong: true,
-                pairIndex: 0,
-                index: 0,
-                collateral: 100 * 10 ** 6,
-                leverage: 10,
-                openPrice: 50_000 * 1e18,
-                tp: 55_000 * 1e18,
-                sl: 45_000 * 1e18,
-                timestamp: block.timestamp
-            });
+    function _storeTrade(address _user) internal returns (uint32) {
+        return tradingStorage.storeTrade(_user, true, DEFAULT_PAIR_INDEX, DEFAULT_LEVERAGE, DEFAULT_COLLATERAL, DEFAULT_OPEN_PRICE, DEFAULT_TP, DEFAULT_SL);
     }
 
     function _depositCollateral(uint256 _amount) internal {
@@ -248,10 +244,8 @@ contract TradingStorageTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_StoreTrade() public {
-        TradingStorage.Trade memory trade = _createDefaultTrade(alice);
-
         vm.prank(tradingEngine);
-        uint256 tradeId = tradingStorage.storeTrade(trade);
+        uint32 tradeId = _storeTrade(alice);
 
         assertEq(tradeId, 0);
 
@@ -269,31 +263,24 @@ contract TradingStorageTest is Test {
     }
 
     function test_StoreTrade_EmitsEvent() public {
-        TradingStorage.Trade memory trade = _createDefaultTrade(alice);
-
         vm.expectEmit(true, true, false, true);
         emit TradeStored(0, alice, 0);
 
         vm.prank(tradingEngine);
-        tradingStorage.storeTrade(trade);
+        _storeTrade(alice);
     }
 
     function test_StoreTrade_SetsCorrectIndex() public {
-        TradingStorage.Trade memory trade = _createDefaultTrade(alice);
-        trade.index = 999;
-
         vm.prank(tradingEngine);
-        uint256 tradeId = tradingStorage.storeTrade(trade);
+        uint32 tradeId = _storeTrade(alice);
 
         TradingStorage.Trade memory stored = tradingStorage.getTrade(tradeId);
         assertEq(stored.index, 0);
     }
 
     function test_StoreTrade_AddsToUserTrades() public {
-        TradingStorage.Trade memory trade = _createDefaultTrade(alice);
-
         vm.prank(tradingEngine);
-        tradingStorage.storeTrade(trade);
+        _storeTrade(alice);
 
         uint256[] memory userTrades = tradingStorage.getUserTrades(alice);
         assertEq(userTrades.length, 1);
@@ -303,9 +290,9 @@ contract TradingStorageTest is Test {
     function test_StoreTrade_MultipleTradesSequentialIds() public {
         vm.startPrank(tradingEngine);
 
-        uint256 id0 = tradingStorage.storeTrade(_createDefaultTrade(alice));
-        uint256 id1 = tradingStorage.storeTrade(_createDefaultTrade(alice));
-        uint256 id2 = tradingStorage.storeTrade(_createDefaultTrade(bob));
+        uint32 id0 = _storeTrade(alice);
+        uint32 id1 = _storeTrade(alice);
+        uint32 id2 = _storeTrade(bob);
 
         vm.stopPrank();
 
@@ -316,21 +303,8 @@ contract TradingStorageTest is Test {
     }
 
     function test_StoreTrade_StructFieldsPreserved() public {
-        TradingStorage.Trade memory trade = TradingStorage.Trade({
-            user: bob,
-            isLong: false,
-            pairIndex: 0,
-            index: 0,
-            collateral: 500 * 10 ** 6,
-            leverage: 50,
-            openPrice: 2_000 * 1e18,
-            tp: 0,
-            sl: 1_800 * 1e18,
-            timestamp: 1234567890
-        });
-
         vm.prank(tradingEngine);
-        uint256 tradeId = tradingStorage.storeTrade(trade);
+        uint32 tradeId = tradingStorage.storeTrade(bob, false, 0, 50, 500 * 10 ** 6, 2_000 * 1e18, 0, 1_800 * 1e18);
 
         TradingStorage.Trade memory stored = tradingStorage.getTrade(tradeId);
         assertEq(stored.user, bob);
@@ -340,24 +314,19 @@ contract TradingStorageTest is Test {
         assertEq(stored.openPrice, 2_000 * 1e18);
         assertEq(stored.tp, 0);
         assertEq(stored.sl, 1_800 * 1e18);
-        assertEq(stored.timestamp, 1234567890);
+        assertEq(stored.timestamp, block.timestamp);
     }
 
     function test_StoreTrade_RevertIfNotTradingEngine() public {
-        TradingStorage.Trade memory trade = _createDefaultTrade(alice);
-
         vm.prank(alice);
         vm.expectRevert(TradingStorage.CallerNotTradingEngine.selector);
-        tradingStorage.storeTrade(trade);
+        _storeTrade(alice);
     }
 
     function test_StoreTrade_RevertIfPairNotFound() public {
-        TradingStorage.Trade memory trade = _createDefaultTrade(alice);
-        trade.pairIndex = 99;
-
         vm.prank(tradingEngine);
         vm.expectRevert(abi.encodeWithSelector(TradingStorage.PairNotFound.selector, 99));
-        tradingStorage.storeTrade(trade);
+        tradingStorage.storeTrade(alice, true, 99, DEFAULT_LEVERAGE, DEFAULT_COLLATERAL, DEFAULT_OPEN_PRICE, DEFAULT_TP, DEFAULT_SL);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -366,7 +335,7 @@ contract TradingStorageTest is Test {
 
     function test_DeleteTrade() public {
         vm.startPrank(tradingEngine);
-        uint256 tradeId = tradingStorage.storeTrade(_createDefaultTrade(alice));
+        uint32 tradeId = _storeTrade(alice);
         tradingStorage.deleteTrade(tradeId);
         vm.stopPrank();
 
@@ -376,7 +345,7 @@ contract TradingStorageTest is Test {
 
     function test_DeleteTrade_EmitsEvent() public {
         vm.prank(tradingEngine);
-        uint256 tradeId = tradingStorage.storeTrade(_createDefaultTrade(alice));
+        uint32 tradeId = _storeTrade(alice);
 
         vm.expectEmit(true, true, false, false);
         emit TradeDeleted(tradeId, alice);
@@ -387,8 +356,8 @@ contract TradingStorageTest is Test {
 
     function test_DeleteTrade_RemovesFromUserTrades() public {
         vm.startPrank(tradingEngine);
-        tradingStorage.storeTrade(_createDefaultTrade(alice));
-        uint256 tradeId1 = tradingStorage.storeTrade(_createDefaultTrade(alice));
+        _storeTrade(alice);
+        uint32 tradeId1 = _storeTrade(alice);
 
         tradingStorage.deleteTrade(tradeId1);
         vm.stopPrank();
@@ -400,9 +369,9 @@ contract TradingStorageTest is Test {
 
     function test_DeleteTrade_MultipleTradesSwapAndPop() public {
         vm.startPrank(tradingEngine);
-        tradingStorage.storeTrade(_createDefaultTrade(alice)); // id 0
-        tradingStorage.storeTrade(_createDefaultTrade(alice)); // id 1
-        tradingStorage.storeTrade(_createDefaultTrade(alice)); // id 2
+        _storeTrade(alice); // id 0
+        _storeTrade(alice); // id 1
+        _storeTrade(alice); // id 2
 
         // Delete middle trade (id 1) — should swap with last (id 2) and pop
         tradingStorage.deleteTrade(1);
@@ -416,7 +385,7 @@ contract TradingStorageTest is Test {
 
     function test_DeleteTrade_RevertIfNotTradingEngine() public {
         vm.prank(tradingEngine);
-        uint256 tradeId = tradingStorage.storeTrade(_createDefaultTrade(alice));
+        uint32 tradeId = _storeTrade(alice);
 
         vm.prank(alice);
         vm.expectRevert(TradingStorage.CallerNotTradingEngine.selector);
@@ -435,7 +404,7 @@ contract TradingStorageTest is Test {
 
     function test_UpdateTradeTp() public {
         vm.prank(tradingEngine);
-        uint256 tradeId = tradingStorage.storeTrade(_createDefaultTrade(alice));
+        uint32 tradeId = _storeTrade(alice);
 
         vm.prank(tradingEngine);
         tradingStorage.updateTradeTp(tradeId, 60_000 * 1e18);
@@ -446,7 +415,7 @@ contract TradingStorageTest is Test {
 
     function test_UpdateTradeTp_EmitsEvent() public {
         vm.prank(tradingEngine);
-        uint256 tradeId = tradingStorage.storeTrade(_createDefaultTrade(alice));
+        uint32 tradeId = _storeTrade(alice);
 
         vm.expectEmit(true, false, false, true);
         emit TradeTpUpdated(tradeId, 60_000 * 1e18);
@@ -457,7 +426,7 @@ contract TradingStorageTest is Test {
 
     function test_UpdateTradeTp_SetToZero() public {
         vm.prank(tradingEngine);
-        uint256 tradeId = tradingStorage.storeTrade(_createDefaultTrade(alice));
+        uint32 tradeId = _storeTrade(alice);
 
         vm.prank(tradingEngine);
         tradingStorage.updateTradeTp(tradeId, 0);
@@ -474,7 +443,7 @@ contract TradingStorageTest is Test {
 
     function test_UpdateTradeTp_RevertIfNotTradingEngine() public {
         vm.prank(tradingEngine);
-        uint256 tradeId = tradingStorage.storeTrade(_createDefaultTrade(alice));
+        uint32 tradeId = _storeTrade(alice);
 
         vm.prank(alice);
         vm.expectRevert(TradingStorage.CallerNotTradingEngine.selector);
@@ -483,7 +452,7 @@ contract TradingStorageTest is Test {
 
     function test_UpdateTradeSl() public {
         vm.prank(tradingEngine);
-        uint256 tradeId = tradingStorage.storeTrade(_createDefaultTrade(alice));
+        uint32 tradeId = _storeTrade(alice);
 
         vm.prank(tradingEngine);
         tradingStorage.updateTradeSl(tradeId, 40_000 * 1e18);
@@ -494,7 +463,7 @@ contract TradingStorageTest is Test {
 
     function test_UpdateTradeSl_EmitsEvent() public {
         vm.prank(tradingEngine);
-        uint256 tradeId = tradingStorage.storeTrade(_createDefaultTrade(alice));
+        uint32 tradeId = _storeTrade(alice);
 
         vm.expectEmit(true, false, false, true);
         emit TradeSlUpdated(tradeId, 40_000 * 1e18);
@@ -511,7 +480,7 @@ contract TradingStorageTest is Test {
 
     function test_UpdateTradeSl_RevertIfNotTradingEngine() public {
         vm.prank(tradingEngine);
-        uint256 tradeId = tradingStorage.storeTrade(_createDefaultTrade(alice));
+        uint32 tradeId = _storeTrade(alice);
 
         vm.prank(alice);
         vm.expectRevert(TradingStorage.CallerNotTradingEngine.selector);
@@ -667,7 +636,7 @@ contract TradingStorageTest is Test {
 
     function test_GetTrade() public {
         vm.prank(tradingEngine);
-        uint256 tradeId = tradingStorage.storeTrade(_createDefaultTrade(alice));
+        uint32 tradeId = _storeTrade(alice);
 
         TradingStorage.Trade memory stored = tradingStorage.getTrade(tradeId);
         assertEq(stored.user, alice);
@@ -676,7 +645,7 @@ contract TradingStorageTest is Test {
 
     function test_GetTrade_DeletedTradeReturnsZero() public {
         vm.startPrank(tradingEngine);
-        uint256 tradeId = tradingStorage.storeTrade(_createDefaultTrade(alice));
+        uint32 tradeId = _storeTrade(alice);
         tradingStorage.deleteTrade(tradeId);
         vm.stopPrank();
 
@@ -687,9 +656,9 @@ contract TradingStorageTest is Test {
 
     function test_GetUserTrades() public {
         vm.startPrank(tradingEngine);
-        tradingStorage.storeTrade(_createDefaultTrade(alice));
-        tradingStorage.storeTrade(_createDefaultTrade(alice));
-        tradingStorage.storeTrade(_createDefaultTrade(bob));
+        _storeTrade(alice);
+        _storeTrade(alice);
+        _storeTrade(bob);
         vm.stopPrank();
 
         uint256[] memory aliceTrades = tradingStorage.getUserTrades(alice);
@@ -704,12 +673,12 @@ contract TradingStorageTest is Test {
 
     function test_GetUserTradesCount() public {
         vm.startPrank(tradingEngine);
-        tradingStorage.storeTrade(_createDefaultTrade(alice));
-        tradingStorage.storeTrade(_createDefaultTrade(alice));
+        _storeTrade(alice);
+        _storeTrade(alice);
         vm.stopPrank();
 
-        assertEq(tradingStorage.getUserTradesCount(alice), 2);
-        assertEq(tradingStorage.getUserTradesCount(bob), 0);
+        assertEq(tradingStorage.getUserActiveTradesCount(alice), 2);
+        assertEq(tradingStorage.getUserActiveTradesCount(bob), 0);
     }
 
     function test_GetOpenInterest() public {
@@ -742,7 +711,7 @@ contract TradingStorageTest is Test {
         assertEq(tradingStorage.getTradeCounter(), 0);
 
         vm.prank(tradingEngine);
-        tradingStorage.storeTrade(_createDefaultTrade(alice));
+        _storeTrade(alice);
 
         assertEq(tradingStorage.getTradeCounter(), 1);
     }
@@ -787,16 +756,12 @@ contract TradingStorageTest is Test {
                             FUZZ TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function testFuzz_StoreTrade(uint256 collateral, uint256 leverage) public {
-        collateral = bound(collateral, 1, 10_000_000 * 10 ** 6);
-        leverage = bound(leverage, 1, 100);
-
-        TradingStorage.Trade memory trade = _createDefaultTrade(alice);
-        trade.collateral = collateral;
-        trade.leverage = leverage;
+    function testFuzz_StoreTrade(uint64 collateral, uint16 leverage) public {
+        collateral = uint64(bound(collateral, 1, 10_000_000 * 10 ** 6));
+        leverage = uint16(bound(leverage, 1, 100));
 
         vm.prank(tradingEngine);
-        uint256 tradeId = tradingStorage.storeTrade(trade);
+        uint32 tradeId = tradingStorage.storeTrade(alice, true, DEFAULT_PAIR_INDEX, leverage, collateral, DEFAULT_OPEN_PRICE, DEFAULT_TP, DEFAULT_SL);
 
         TradingStorage.Trade memory stored = tradingStorage.getTrade(tradeId);
         assertEq(stored.collateral, collateral);
@@ -836,18 +801,18 @@ contract TradingStorageTest is Test {
 
         vm.startPrank(tradingEngine);
         for (uint8 i; i < numTrades; i++) {
-            tradingStorage.storeTrade(_createDefaultTrade(alice));
+            _storeTrade(alice);
         }
         vm.stopPrank();
 
-        assertEq(tradingStorage.getUserTradesCount(alice), numTrades);
+        assertEq(tradingStorage.getUserActiveTradesCount(alice), numTrades);
         assertEq(tradingStorage.getTradeCounter(), numTrades);
 
         // Delete the first trade
         vm.prank(tradingEngine);
         tradingStorage.deleteTrade(0);
 
-        assertEq(tradingStorage.getUserTradesCount(alice), numTrades - 1);
+        assertEq(tradingStorage.getUserActiveTradesCount(alice), numTrades - 1);
 
         // Verify all remaining trade IDs point to valid trades
         uint256[] memory userTrades = tradingStorage.getUserTrades(alice);
@@ -864,15 +829,15 @@ contract TradingStorageTest is Test {
     function test_Invariant_TradeCounterNeverDecreases() public {
         vm.startPrank(tradingEngine);
 
-        uint256 counter0 = tradingStorage.getTradeCounter();
-        tradingStorage.storeTrade(_createDefaultTrade(alice));
-        uint256 counter1 = tradingStorage.getTradeCounter();
-        tradingStorage.storeTrade(_createDefaultTrade(bob));
-        uint256 counter2 = tradingStorage.getTradeCounter();
+        uint32 counter0 = tradingStorage.getTradeCounter();
+        _storeTrade(alice);
+        uint32 counter1 = tradingStorage.getTradeCounter();
+        _storeTrade(bob);
+        uint32 counter2 = tradingStorage.getTradeCounter();
 
         // Delete a trade — counter should NOT decrease
         tradingStorage.deleteTrade(0);
-        uint256 counter3 = tradingStorage.getTradeCounter();
+        uint32 counter3 = tradingStorage.getTradeCounter();
 
         vm.stopPrank();
 
@@ -884,9 +849,9 @@ contract TradingStorageTest is Test {
 
     function test_Invariant_UserTradesConsistency() public {
         vm.startPrank(tradingEngine);
-        tradingStorage.storeTrade(_createDefaultTrade(alice));
-        tradingStorage.storeTrade(_createDefaultTrade(alice));
-        tradingStorage.storeTrade(_createDefaultTrade(alice));
+        _storeTrade(alice);
+        _storeTrade(alice);
+        _storeTrade(alice);
 
         // Delete middle
         tradingStorage.deleteTrade(1);
