@@ -58,7 +58,7 @@ No order books. No AMM curves. Just oracle-priced synthetic exposure.
 
 ```
               ┌────────────────────────────────────────┐
-              │             TRADING PROXY              │
+              │             TRADING ENGINE             │
               │   (openTrade, closeTrade, liquidate).  │
               └───────────────────┬────────────────────┘
                                   │
@@ -67,11 +67,12 @@ No order books. No AMM curves. Just oracle-priced synthetic exposure.
           ▼                       ▼                        ▼
 ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
 │  TRADING        │      │   VAULT         │      │   ORACLE        │
-│  STORAGE        │      │   (ERC-4626)    │      │   AGGREGATOR    │
+│  STORAGE    ✅  │      │   (ERC-4626) ✅ │      │   AGGREGATOR    │
 │                 │      │                 │      │                 │
-│  • Trades       │      │  • USDC custody │      │  • DON nodes    │
-│  • Open Interest│      │  • LP shares    │      │  • Chainlink    │
-│  • Pairs config │      │  • Payouts      │      │  • Median calc  │
+│  • Trades       │      │  • LP USDC      │      │  • DON nodes    │
+│  • Collateral   │      │  • LP shares    │      │  • Chainlink    │
+│  • Open Interest│      │  • Payouts      │      │  • Median calc  │
+│  • Pairs config │      │                 │      │                 │
 └─────────────────┘      └────────┬────────┘      └─────────────────┘
                                   │
                       ┌───────────┴───────────┐
@@ -200,10 +201,8 @@ synthetic-trading-protocol/
 │   ├── 07-vault-ssl.md     # Guide 7: Vault architecture
 │   └── 08-security.md      # Guide 8: Security analysis
 ├── src/                     # Smart contracts
-│   ├── core/               # Core contracts (Vault, Trading)
-│   ├── oracle/             # Oracle aggregation
-│   ├── solvency/           # Solvency mechanisms
-│   └── libraries/          # Shared libraries
+│   ├── Vault.sol           # ERC-4626 LP liquidity vault
+│   └── TradingStorage.sol  # Trade data + collateral custody
 ├── test/                    # Test files
 │   ├── unit/               # Unit tests
 │   ├── fuzz/               # Fuzz tests
@@ -230,8 +229,8 @@ This project showcases advanced smart contract development skills through **orig
 
 **Implementation (In Progress):**
 
-- [x] Core contracts (Vault)
-- [ ] Core contracts (Trading, Oracle)
+- [x] Core contracts (Vault, TradingStorage)
+- [ ] Core contracts (TradingEngine, Oracle)
 - [ ] Solvency system (Assistant Fund, Bond Depository)
 - [ ] Comprehensive testing (unit, fuzz, invariant)
 - [ ] Deployment scripts

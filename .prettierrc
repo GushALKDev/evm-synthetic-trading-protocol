@@ -1,21 +1,21 @@
 {
-  "tabWidth": 4,
-  "useTabs": false,
-  "singleQuote": false,
-  "bracketSpacing": false,
-  "printWidth": 120,
-  "plugins": ["prettier-plugin-solidity"],
-  "overrides": [
-    {
-      "files": "*.sol",
-      "options": {
-        "printWidth": 120,
-        "tabWidth": 4,
-        "useTabs": false,
-        "singleQuote": false,
-        "bracketSpacing": false,
-        "explicitTypes": "always"
-      }
-    }
-  ]
+    "tabWidth": 4,
+    "useTabs": false,
+    "singleQuote": false,
+    "bracketSpacing": false,
+    "printWidth": 180,
+    "plugins": ["prettier-plugin-solidity"],
+    "overrides": [
+        {
+            "files": "*.sol",
+            "options": {
+                "printWidth": 180,
+                "tabWidth": 4,
+                "useTabs": false,
+                "singleQuote": false,
+                "bracketSpacing": false,
+                "explicitTypes": "always"
+            }
+        }
+    ]
 }

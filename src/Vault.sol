@@ -6,11 +6,11 @@ import {Ownable} from "solady/auth/Ownable.sol";
 import {ReentrancyGuard} from "solady/utils/ReentrancyGuard.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 
-/// @title LiquidityVault
+/// @title Vault
 /// @author GushALKDev
 /// @notice ERC-4626 Vault with Single-Sided Liquidity for Synthetic Trading Protocol
 /// @dev Implements a withdrawal lock mechanism to prevent front-running of trader payouts
-contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
+contract Vault is ERC4626, Ownable, ReentrancyGuard {
     using SafeTransferLib for address;
 
     /*//////////////////////////////////////////////////////////////
@@ -30,13 +30,18 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
     address public immutable ASSET;
 
     /**
-     * @notice The trading protocol address authorized to request payouts
-     * @dev Packed with _paused in the same slot (address = 20 bytes + bool = 1 byte = 21 bytes < 32)
+     * @notice Deployment timestamp used as epoch origin (epoch 0)
      */
-    address public tradingProtocol;
+    uint256 public immutable DEPLOY_TIMESTAMP;
 
     /**
-     * @notice Whether the vault is paused (packed with tradingProtocol)
+     * @notice The trading engine address authorized to request payouts
+     * @dev Packed with _paused in the same slot (address = 20 bytes + bool = 1 byte = 21 bytes < 32)
+     */
+    address public tradingEngine;
+
+    /**
+     * @notice Whether the vault is paused (packed with tradingEngine)
      */
     bool private _paused;
 
@@ -60,7 +65,7 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
     event WithdrawalRequested(address indexed owner, uint256 shares, uint256 requestEpoch, uint256 unlockEpoch);
     event WithdrawalExecuted(address indexed owner, uint256 shares, uint256 assets);
     event PayoutSent(address indexed receiver, uint256 amount);
-    event TradingProtocolUpdated(address indexed newProtocol);
+    event TradingEngineUpdated(address indexed newEngine);
     event WithdrawalCancelled(address indexed owner);
     event Paused(address account);
     event Unpaused(address account);
@@ -69,15 +74,15 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
 
+    error InsufficientVaultBalance(uint256 amount, uint256 totalAssets);
+    error InsufficientShares(uint256 shares, uint256 balance);
     error WithdrawalLocked(uint256 unlockEpoch);
-    error NoWithdrawalRequest();
-    error InsufficientVaultBalance();
-    error CallerNotTradingProtocol();
-    error InsufficientShares();
+    error CallerNotTradingEngine();
     error UseRequestWithdrawalFlow();
-    error ZeroAddress();
+    error NoWithdrawalRequest();
     error EnforcedPause();
     error ExpectedPause();
+    error ZeroAddress();
 
     /*//////////////////////////////////////////////////////////////
                               MODIFIERS
@@ -112,6 +117,7 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
     constructor(address _asset, address _owner) {
         _initializeOwner(_owner);
         ASSET = _asset;
+        DEPLOY_TIMESTAMP = block.timestamp;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -148,20 +154,14 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
     /**
      * @dev Override deposit to enforce any logic if needed, currently standard
      */
-    function deposit(
-        uint256 assets,
-        address receiver
-    ) public virtual override nonReentrant whenNotPaused returns (uint256 shares) {
+    function deposit(uint256 assets, address receiver) public virtual override nonReentrant whenNotPaused returns (uint256 shares) {
         return super.deposit(assets, receiver);
     }
 
     /**
      * @dev Override mint to enforce any logic if needed, currently standard
      */
-    function mint(
-        uint256 shares,
-        address receiver
-    ) public virtual override nonReentrant whenNotPaused returns (uint256 assets) {
+    function mint(uint256 shares, address receiver) public virtual override nonReentrant whenNotPaused returns (uint256 assets) {
         return super.mint(shares, receiver);
     }
 
@@ -185,7 +185,8 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
      * @param shares The amount of shares to withdraw
      */
     function requestWithdrawal(uint256 shares) external nonReentrant whenNotPaused {
-        if (balanceOf(msg.sender) < shares) revert InsufficientShares();
+        uint256 balance = balanceOf(msg.sender);
+        if (balance < shares) revert InsufficientShares(shares, balance);
 
         uint256 epoch = currentEpoch();
         uint256 unlockEpoch = epoch + WITHDRAWAL_DELAY_EPOCHS;
@@ -232,7 +233,7 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
     }
 
     function currentEpoch() public view returns (uint256) {
-        return block.timestamp / EPOCH_LENGTH;
+        return (block.timestamp - DEPLOY_TIMESTAMP) / EPOCH_LENGTH;
     }
 
     /**
@@ -266,7 +267,7 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
         WithdrawalRequest storage req = withdrawalRequests[user];
         if (req.shares == 0) return 0;
 
-        uint256 unlockTimestamp = (req.requestEpoch + WITHDRAWAL_DELAY_EPOCHS) * EPOCH_LENGTH;
+        uint256 unlockTimestamp = DEPLOY_TIMESTAMP + (req.requestEpoch + WITHDRAWAL_DELAY_EPOCHS) * EPOCH_LENGTH;
         if (block.timestamp >= unlockTimestamp) return 0;
         return unlockTimestamp - block.timestamp;
     }
@@ -276,13 +277,14 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Send payout to a trader (called by Trading Protocol)
+     * @notice Send payout to a trader (called by Trading Engine)
      * @param receiver The trader receiving the profit
      * @param amount The amount of USDC to send
      */
     function sendPayout(address receiver, uint256 amount) external nonReentrant {
-        if (msg.sender != tradingProtocol) revert CallerNotTradingProtocol();
-        if (amount > totalAssets()) revert InsufficientVaultBalance();
+        uint256 totalAssets = totalAssets();
+        if (msg.sender != tradingEngine) revert CallerNotTradingEngine();
+        if (amount > totalAssets) revert InsufficientVaultBalance(amount, totalAssets);
 
         ASSET.safeTransfer(receiver, amount);
         emit PayoutSent(receiver, amount);
@@ -292,10 +294,10 @@ contract LiquidityVault is ERC4626, Ownable, ReentrancyGuard {
                             ADMIN FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    function setTradingProtocol(address _tradingProtocol) external onlyOwner {
-        if (_tradingProtocol == address(0)) revert ZeroAddress();
-        tradingProtocol = _tradingProtocol;
-        emit TradingProtocolUpdated(_tradingProtocol);
+    function setTradingEngine(address _tradingEngine) external onlyOwner {
+        if (_tradingEngine == address(0)) revert ZeroAddress();
+        tradingEngine = _tradingEngine;
+        emit TradingEngineUpdated(_tradingEngine);
     }
 
     function pause() external onlyOwner whenNotPaused {

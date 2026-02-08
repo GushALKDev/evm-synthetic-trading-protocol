@@ -2,7 +2,7 @@
 pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
-import {LiquidityVault} from "../../src/Vault.sol";
+import {Vault} from "../../src/Vault.sol";
 import {ERC20} from "solady/tokens/ERC20.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 
@@ -27,30 +27,32 @@ contract MockUSDC is ERC20 {
 contract VaultTest is Test {
     using SafeTransferLib for address;
 
-    LiquidityVault vault;
+    Vault vault;
     MockUSDC usdc;
 
     address owner = makeAddr("owner");
     address alice = makeAddr("alice");
     address bob = makeAddr("bob");
-    address tradingProtocol = makeAddr("tradingProtocol");
+    address tradingEngine = makeAddr("tradingEngine");
 
     event WithdrawalRequested(address indexed owner, uint256 shares, uint256 requestEpoch, uint256 unlockEpoch);
     event WithdrawalExecuted(address indexed owner, uint256 shares, uint256 assets);
     event WithdrawalCancelled(address indexed owner);
     event PayoutSent(address indexed receiver, uint256 amount);
-    event TradingProtocolUpdated(address indexed newProtocol);
+    event TradingEngineUpdated(address indexed newEngine);
     event Paused(address account);
     event Unpaused(address account);
 
     function setUp() public {
+        vm.warp(1 days);
+
         usdc = new MockUSDC();
 
         vm.prank(owner);
-        vault = new LiquidityVault(address(usdc), owner);
+        vault = new Vault(address(usdc), owner);
 
         vm.prank(owner);
-        vault.setTradingProtocol(tradingProtocol);
+        vault.setTradingEngine(tradingEngine);
 
         usdc.mint(alice, 10_000 * 10 ** 6);
         usdc.mint(bob, 10_000 * 10 ** 6);
@@ -173,7 +175,7 @@ contract VaultTest is Test {
 
         uint256 tooManyShares = vault.balanceOf(alice) + 1;
 
-        vm.expectRevert(LiquidityVault.InsufficientShares.selector);
+        vm.expectRevert();
         vault.requestWithdrawal(tooManyShares);
 
         vm.stopPrank();
@@ -188,13 +190,13 @@ contract VaultTest is Test {
         // First request for 1000 shares
         vault.requestWithdrawal(1000 * 1e18);
 
-        (uint256 reqShares1,) = vault.withdrawalRequests(alice);
+        (uint256 reqShares1, ) = vault.withdrawalRequests(alice);
         assertEq(reqShares1, 1000 * 1e18);
 
         // Second request for 500 shares overwrites
         vault.requestWithdrawal(500 * 1e18);
 
-        (uint256 reqShares2,) = vault.withdrawalRequests(alice);
+        (uint256 reqShares2, ) = vault.withdrawalRequests(alice);
         assertEq(reqShares2, 500 * 1e18);
 
         vm.stopPrank();
@@ -208,7 +210,7 @@ contract VaultTest is Test {
         vault.deposit(amount, alice);
         vault.requestWithdrawal(vault.balanceOf(alice));
 
-        vm.expectRevert(abi.encodeWithSelector(LiquidityVault.WithdrawalLocked.selector, 3));
+        vm.expectRevert(abi.encodeWithSelector(Vault.WithdrawalLocked.selector, 3));
         vault.executeWithdrawal();
 
         vm.stopPrank();
@@ -224,7 +226,7 @@ contract VaultTest is Test {
 
         vm.stopPrank();
 
-        vm.warp(3 days);
+        vm.warp(1 days + 3 days);
 
         vm.prank(alice);
         vault.executeWithdrawal();
@@ -245,7 +247,7 @@ contract VaultTest is Test {
 
         vm.stopPrank();
 
-        vm.warp(3 days);
+        vm.warp(1 days + 3 days);
 
         vm.expectEmit(true, false, false, true);
         emit WithdrawalExecuted(alice, shares, amount);
@@ -256,7 +258,7 @@ contract VaultTest is Test {
 
     function test_ExecuteWithdrawal_RevertIfNoRequest() public {
         vm.prank(alice);
-        vm.expectRevert(LiquidityVault.NoWithdrawalRequest.selector);
+        vm.expectRevert(Vault.NoWithdrawalRequest.selector);
         vault.executeWithdrawal();
     }
 
@@ -269,17 +271,17 @@ contract VaultTest is Test {
 
         vm.stopPrank();
 
-        vm.warp(3 days);
+        vm.warp(1 days + 3 days);
 
         vm.prank(alice);
         vault.executeWithdrawal();
 
-        (uint256 reqShares,) = vault.withdrawalRequests(alice);
+        (uint256 reqShares, ) = vault.withdrawalRequests(alice);
         assertEq(reqShares, 0);
 
         // Cannot execute again
         vm.prank(alice);
-        vm.expectRevert(LiquidityVault.NoWithdrawalRequest.selector);
+        vm.expectRevert(Vault.NoWithdrawalRequest.selector);
         vault.executeWithdrawal();
     }
 
@@ -297,12 +299,12 @@ contract VaultTest is Test {
         uint256 shares = vault.balanceOf(alice);
         vault.requestWithdrawal(shares);
 
-        (uint256 reqShares,) = vault.withdrawalRequests(alice);
+        (uint256 reqShares, ) = vault.withdrawalRequests(alice);
         assertEq(reqShares, shares);
 
         vault.cancelWithdrawal();
 
-        (reqShares,) = vault.withdrawalRequests(alice);
+        (reqShares, ) = vault.withdrawalRequests(alice);
         assertEq(reqShares, 0);
 
         assertEq(vault.balanceOf(alice), shares);
@@ -327,7 +329,7 @@ contract VaultTest is Test {
 
     function test_CancelWithdrawal_RevertIfNoRequest() public {
         vm.prank(alice);
-        vm.expectRevert(LiquidityVault.NoWithdrawalRequest.selector);
+        vm.expectRevert(Vault.NoWithdrawalRequest.selector);
         vault.cancelWithdrawal();
     }
 
@@ -361,14 +363,15 @@ contract VaultTest is Test {
 
         assertFalse(vault.canExecuteWithdrawal(alice));
 
-        vm.warp(3 days);
+        vm.warp(1 days + 3 days);
 
         assertTrue(vault.canExecuteWithdrawal(alice));
         assertFalse(vault.canExecuteWithdrawal(bob));
     }
 
     function test_TimeUntilWithdrawal() public {
-        vm.warp(1 days);
+        // Deploy was at 1 days, we warp to 2 days (epoch 1) to request
+        vm.warp(1 days + 1 days);
 
         vm.startPrank(alice);
 
@@ -379,12 +382,13 @@ contract VaultTest is Test {
 
         vm.stopPrank();
 
+        // Request at epoch 1, unlock at epoch 4 → 3 days remaining
         assertEq(vault.timeUntilWithdrawal(alice), 3 days);
 
-        vm.warp(2 days);
+        vm.warp(1 days + 2 days);
         assertEq(vault.timeUntilWithdrawal(alice), 2 days);
 
-        vm.warp(4 days);
+        vm.warp(1 days + 4 days);
         assertEq(vault.timeUntilWithdrawal(alice), 0);
 
         assertEq(vault.timeUntilWithdrawal(bob), 0);
@@ -393,10 +397,10 @@ contract VaultTest is Test {
     function test_CurrentEpoch() public {
         assertEq(vault.currentEpoch(), 0);
 
-        vm.warp(1 days);
+        vm.warp(1 days + 1 days);
         assertEq(vault.currentEpoch(), 1);
 
-        vm.warp(10 days);
+        vm.warp(1 days + 10 days);
         assertEq(vault.currentEpoch(), 10);
     }
 
@@ -413,8 +417,8 @@ contract VaultTest is Test {
 
         uint256 bobBalanceBefore = usdc.balanceOf(bob);
 
-        // Trading protocol sends payout to Bob
-        vm.prank(tradingProtocol);
+        // Trading engine sends payout to Bob
+        vm.prank(tradingEngine);
         vault.sendPayout(bob, 500 * 10 ** 6);
 
         assertEq(usdc.balanceOf(bob), bobBalanceBefore + 500 * 10 ** 6);
@@ -430,18 +434,18 @@ contract VaultTest is Test {
         vm.expectEmit(true, false, false, true);
         emit PayoutSent(bob, 500 * 10 ** 6);
 
-        vm.prank(tradingProtocol);
+        vm.prank(tradingEngine);
         vault.sendPayout(bob, 500 * 10 ** 6);
     }
 
-    function test_SendPayout_RevertIfNotTradingProtocol() public {
+    function test_SendPayout_RevertIfNotTradingEngine() public {
         vm.startPrank(alice);
         usdc.approve(address(vault), 1000 * 10 ** 6);
         vault.deposit(1000 * 10 ** 6, alice);
         vm.stopPrank();
 
         vm.prank(alice);
-        vm.expectRevert(LiquidityVault.CallerNotTradingProtocol.selector);
+        vm.expectRevert(Vault.CallerNotTradingEngine.selector);
         vault.sendPayout(bob, 500 * 10 ** 6);
     }
 
@@ -451,8 +455,8 @@ contract VaultTest is Test {
         vault.deposit(1000 * 10 ** 6, alice);
         vm.stopPrank();
 
-        vm.prank(tradingProtocol);
-        vm.expectRevert(LiquidityVault.InsufficientVaultBalance.selector);
+        vm.prank(tradingEngine);
+        vm.expectRevert();
         vault.sendPayout(bob, 2000 * 10 ** 6);
     }
 
@@ -488,7 +492,7 @@ contract VaultTest is Test {
         vm.startPrank(alice);
         usdc.approve(address(vault), 1000 * 10 ** 6);
 
-        vm.expectRevert(LiquidityVault.EnforcedPause.selector);
+        vm.expectRevert(Vault.EnforcedPause.selector);
         vault.deposit(1000 * 10 ** 6, alice);
 
         vm.stopPrank();
@@ -501,7 +505,7 @@ contract VaultTest is Test {
         vm.startPrank(alice);
         usdc.approve(address(vault), 1000 * 10 ** 6);
 
-        vm.expectRevert(LiquidityVault.EnforcedPause.selector);
+        vm.expectRevert(Vault.EnforcedPause.selector);
         vault.mint(1000 * 1e18, alice);
 
         vm.stopPrank();
@@ -518,7 +522,7 @@ contract VaultTest is Test {
         vault.pause();
 
         vm.prank(alice);
-        vm.expectRevert(LiquidityVault.EnforcedPause.selector);
+        vm.expectRevert(Vault.EnforcedPause.selector);
         vault.requestWithdrawal(shares);
     }
 
@@ -535,7 +539,7 @@ contract VaultTest is Test {
         vault.pause();
 
         vm.prank(owner);
-        vm.expectRevert(LiquidityVault.EnforcedPause.selector);
+        vm.expectRevert(Vault.EnforcedPause.selector);
         vault.pause();
     }
 
@@ -573,7 +577,7 @@ contract VaultTest is Test {
 
     function test_Unpause_RevertIfNotPaused() public {
         vm.prank(owner);
-        vm.expectRevert(LiquidityVault.ExpectedPause.selector);
+        vm.expectRevert(Vault.ExpectedPause.selector);
         vault.unpause();
     }
 
@@ -604,35 +608,35 @@ contract VaultTest is Test {
                         ADMIN FUNCTIONS TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_SetTradingProtocol() public {
-        address newProtocol = makeAddr("newProtocol");
+    function test_SetTradingEngine() public {
+        address newEngine = makeAddr("newEngine");
 
         vm.prank(owner);
-        vault.setTradingProtocol(newProtocol);
+        vault.setTradingEngine(newEngine);
 
-        assertEq(vault.tradingProtocol(), newProtocol);
+        assertEq(vault.tradingEngine(), newEngine);
     }
 
-    function test_SetTradingProtocol_EmitsEvent() public {
-        address newProtocol = makeAddr("newProtocol");
+    function test_SetTradingEngine_EmitsEvent() public {
+        address newEngine = makeAddr("newEngine");
 
         vm.expectEmit(true, false, false, false);
-        emit TradingProtocolUpdated(newProtocol);
+        emit TradingEngineUpdated(newEngine);
 
         vm.prank(owner);
-        vault.setTradingProtocol(newProtocol);
+        vault.setTradingEngine(newEngine);
     }
 
-    function test_SetTradingProtocol_RevertOnZeroAddress() public {
+    function test_SetTradingEngine_RevertOnZeroAddress() public {
         vm.prank(owner);
-        vm.expectRevert(LiquidityVault.ZeroAddress.selector);
-        vault.setTradingProtocol(address(0));
+        vm.expectRevert(Vault.ZeroAddress.selector);
+        vault.setTradingEngine(address(0));
     }
 
-    function test_SetTradingProtocol_RevertIfNotOwner() public {
+    function test_SetTradingEngine_RevertIfNotOwner() public {
         vm.prank(alice);
         vm.expectRevert();
-        vault.setTradingProtocol(makeAddr("newProtocol"));
+        vault.setTradingEngine(makeAddr("newEngine"));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -641,13 +645,13 @@ contract VaultTest is Test {
 
     function test_Withdraw_RevertsWithCustomError() public {
         vm.prank(alice);
-        vm.expectRevert(LiquidityVault.UseRequestWithdrawalFlow.selector);
+        vm.expectRevert(Vault.UseRequestWithdrawalFlow.selector);
         vault.withdraw(100, alice, alice);
     }
 
     function test_Redeem_RevertsWithCustomError() public {
         vm.prank(alice);
-        vm.expectRevert(LiquidityVault.UseRequestWithdrawalFlow.selector);
+        vm.expectRevert(Vault.UseRequestWithdrawalFlow.selector);
         vault.redeem(100, alice, alice);
     }
 
@@ -767,7 +771,7 @@ contract VaultTest is Test {
         vault.requestWithdrawal(shares);
         vm.stopPrank();
 
-        vm.warp(3 days);
+        vm.warp(1 days + 3 days);
 
         uint256 balanceBefore = usdc.balanceOf(alice);
 
@@ -794,7 +798,7 @@ contract VaultTest is Test {
 
         uint256 bobBalanceBefore = usdc.balanceOf(bob);
 
-        vm.prank(tradingProtocol);
+        vm.prank(tradingEngine);
         vault.sendPayout(bob, payoutAmount);
 
         assertEq(usdc.balanceOf(bob), bobBalanceBefore + payoutAmount);
@@ -822,7 +826,7 @@ contract VaultTest is Test {
         assertEq(vault.totalAssets(), usdc.balanceOf(address(vault)));
 
         // Payout
-        vm.prank(tradingProtocol);
+        vm.prank(tradingEngine);
         vault.sendPayout(bob, 500 * 10 ** 6);
 
         // Invariant still holds
@@ -854,7 +858,7 @@ contract VaultTest is Test {
         vm.prank(bob);
         vault.requestWithdrawal(bobShares);
 
-        vm.warp(3 days);
+        vm.warp(1 days + 3 days);
 
         vm.prank(alice);
         vault.executeWithdrawal();

@@ -22,7 +22,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 | :-------- | :------------------------ | :----- | :-------- | :------- |
 | 0         | Setup & Infrastructure    | 6      | 0         | 0%       |
 | 1         | Core: Vault               | 8      | 8         | 100%     |
-| 2         | Core: Trading Engine      | 12     | 0         | 0%       |
+| 2         | Core: Trading Engine      | 12     | 2         | 17%      |
 | 3         | Oracles (DON)             | 7      | 0         | 0%       |
 | 4         | Fee System                | 5      | 0         | 0%       |
 | 5         | Funding Rates             | 4      | 0         | 0%       |
@@ -34,7 +34,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 | 11        | Governance Token          | 4      | 0         | 0%       |
 | 12        | Testing & Audit           | 8      | 0         | 0%       |
 | 13        | V2 Improvements           | 7      | 0         | 0%       |
-| **TOTAL** |                           | **89** | **8**     | **9%**   |
+| **TOTAL** |                           | **89** | **10**    | **11%**  |
 
 ---
 
@@ -86,9 +86,9 @@ Each phase should be completed before moving to the next. Within each phase, the
 >
 > **Dependencies:** Phase 1
 
-- [ ] **2.1** Contract `TradingStorage.sol` - Struct `Trade`, mappings
-- [ ] **2.2** Contract `TradingProxy.sol` - Main controller
-- [ ] **2.3** Struct `Pair` - Trading pair configuration
+- [x] **2.1** Contract `TradingStorage.sol` - Struct `Trade`, mappings
+- [ ] **2.2** Contract `TradingEngine.sol` - Main controller
+- [x] **2.3** Struct `Pair` - Trading pair configuration
 - [ ] **2.4** Basic `openTrade()` function (no fees, no spread)
     - [ ] 2.4.1 Validate collateral and leverage
     - [ ] 2.4.2 Transfer USDC to Vault
@@ -152,7 +152,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 >
 > **Dependencies:** Phase 2
 
-- [ ] **4.1** Contract `FeeManager.sol` (or integrate in TradingProxy)
+- [ ] **4.1** Contract `FeeManager.sol` (or integrate in TradingEngine)
 - [ ] **4.2** Opening Fee (0.08% of size)
 - [ ] **4.3** Closing Fee (0.08% of size)
 - [ ] **4.4** Fee distribution (80% Vault, 20% Treasury/Assistant)
@@ -215,7 +215,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 >
 > **Dependencies:** Phase 3, Phase 6
 
-- [ ] **7.1** Function `liquidate()` in TradingProxy
+- [ ] **7.1** Function `liquidate()` in TradingEngine
 - [ ] **7.2** Liquidation price calculation
 - [ ] **7.3** Liquidation condition verification (loss >= 90%)
 - [ ] **7.4** Remaining collateral distribution (liquidator vs vault)
@@ -238,7 +238,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 >
 > **Dependencies:** Phase 7
 
-- [ ] **8.1** Function `executeLimit()` in TradingProxy
+- [ ] **8.1** Function `executeLimit()` in TradingEngine
 - [ ] **8.2** Chainlink Automation integration (Keepers)
 - [ ] **8.3** TP/SL condition verification
 - [ ] **8.4** Access Control for Keepers (`onlyKeeper`)
@@ -366,6 +366,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 
 | Date       | Changes                 |
 | :--------- | :---------------------- |
+| 2026-02-07 | Phase 2: TradingStorage.sol + Pair struct complete (2.1, 2.3) |
 | 2026-02-05 | Initial Roadmap version |
 
 ---

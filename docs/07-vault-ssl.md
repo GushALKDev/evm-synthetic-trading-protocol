@@ -507,7 +507,7 @@ function openTrade(...) external {
 | Contract | Function | Standard/Logic |
 |:---|:---|:---|
 | **LiquidityVault.sol** | Custodies LP funds, central counterparty | ERC-4626 |
-| **TradingProxy.sol** | Executes trades, calculates PnL | Business Logic |
+| **TradingEngine.sol** | Executes trades, calculates PnL | Business Logic |
 | **TradingStorage.sol** | Stores trades and OI | State Layer |
 | **OracleAggregator.sol** | Aggregates DON prices | DON + Chainlink |
 | **OIManager.sol** | Calculates max OI based on volatility | Adaptive OI |

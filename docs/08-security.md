@@ -37,7 +37,7 @@
 | Asset | Location | Value at Risk | Protection |
 |:---|:---|:---|:---|\
 | Vault USDC | `LiquidityVault.sol` | Total TVL | Access control, CEI |
-| Trade Data | `TradingStorage.sol` | Integrity | Only TradingProxy writes |
+| Trade Data | `TradingStorage.sol` | Integrity | Only TradingEngine writes |
 | Oracle Prices | `OracleAggregator.sol` | Fairness | Median, Chainlink validation |
 | $SYNTH Token | `SynthToken.sol` | Market value | Controlled minter role |
 | Admin Keys | External multisig | Entire system | Timelock, 3/5 threshold |
@@ -51,7 +51,7 @@
 | Role | Description | Holders |
 |:---|:---|:---|
 | `DEFAULT_ADMIN_ROLE` | Can assign/revoke roles | Multisig + Timelock |
-| `TRADING_ROLE` | Can interact with Vault for payments | TradingProxy.sol |
+| `TRADING_ROLE` | Can interact with Vault for payments | TradingEngine.sol |
 | `KEEPER_ROLE` | Can execute limits/liquidations | Keeper bots |
 | `PAUSER_ROLE` | Can pause system | Multisig (no timelock) |
 | `MINTER_ROLE` | Can mint $SYNTH | BondDepository.sol |
@@ -70,7 +70,7 @@
 | `pause()` | ❌ | - | - | ✅ |
 | `setEmergencyWithdraw()` | ❌ | - | ✅ | - |
 
-#### TradingProxy.sol
+#### TradingEngine.sol
 
 | Function | PUBLIC | KEEPER | ADMIN | PAUSER |
 |:---|:---|:---|:---|:---|\
@@ -374,7 +374,7 @@ function emergencyWithdraw() external {
 | Contract | Maximum Severity |
 |:---|:---|
 | LiquidityVault.sol | Critical |
-| TradingProxy.sol | Critical |
+| TradingEngine.sol | Critical |
 | TradingStorage.sol | High |
 | OracleAggregator.sol | Critical |
 | SolvencyManager.sol | Critical |

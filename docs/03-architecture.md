@@ -22,7 +22,7 @@
 
 ```mermaid
 graph TD
-    User([User]) -->|1. Trading| Proxy[TradingProxy.sol]
+    User([User]) -->|1. Trading| Proxy[TradingEngine.sol]
     User -->|2. Liquidity| Vault[Vault.sol ERC4626]
     
     subgraph Core System
@@ -61,7 +61,7 @@ graph TD
 │                        EVM CONTRACT LAYER                            │
 │                                                                      │
 │  ┌───────────────────────┐           ┌───────────────────────┐      │
-│  │  TRADING PROXY        │──────────►│  VAULT (ERC-4626)     │      │
+│  │  TRADING ENGINE              │──────────►│  VAULT (ERC-4626)     │      │
 │  │  (Business Logic)     │           │  (The Treasury)       │      │
 │  │                       │           │                       │      │
 │  │  • openTrade          │◄──────────│  • Custodies USDC     │      │
@@ -108,7 +108,7 @@ The oracle is the most critical component. Manipulation or failure can drain the
 ```mermaid
 sequenceDiagram
     participant User
-    participant Trading as TradingProxy
+    participant Trading as TradingEngine
     participant Agg as OracleAggregator
     participant N1 as Node 1
     participant N2 as Node 2
@@ -175,10 +175,10 @@ sequenceDiagram
 | `totalAssets()` | View | Total USDC in Vault |
 
 **Security:**
-- `onlyTrading`: Only TradingProxy can request payouts.
+- `onlyTrading`: Only TradingEngine can request payouts.
 - **Withdrawal Request System:** 3-epoch timelock for withdrawals (anti front-running).
 
-### 3.2 `TradingProxy.sol` (Business Logic)
+### 3.2 `TradingEngine.sol` (Business Logic)
 
 **Role:** Main controller for trading logic.
 
@@ -269,7 +269,7 @@ require(
 ```mermaid
 sequenceDiagram
     participant User
-    participant Trading as TradingProxy
+    participant Trading as TradingEngine
     participant Oracle as OracleAggregator
     participant Storage as TradingStorage
     participant Vault
@@ -297,7 +297,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant User
-    participant Trading as TradingProxy
+    participant Trading as TradingEngine
     participant Oracle as OracleAggregator
     participant Storage as TradingStorage
     participant Vault
@@ -330,7 +330,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant Bot as Liquidator Bot
-    participant Trading as TradingProxy
+    participant Trading as TradingEngine
     participant Oracle as OracleAggregator
     participant Storage as TradingStorage
     participant Vault

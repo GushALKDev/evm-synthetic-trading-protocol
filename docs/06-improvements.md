@@ -303,7 +303,7 @@ function openTrade(...) external {
 
 ### Phase 1: Core (MVP)
 - [x] ERC-4626 Vault
-- [x] Basic TradingProxy
+- [x] Basic TradingEngine
 - [x] Oracle integration
 - [x] Liquidations
 - [ ] Basic Frontend

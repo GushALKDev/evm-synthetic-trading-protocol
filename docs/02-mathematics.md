@@ -322,8 +322,8 @@ $$CR = \\frac{TotalUSDC_{Vault}}{TotalLPDeposits}$$
 
 | Parameter | Suggested Value | Contract | Description |
 |:---|:---|:---|:---|
-| `MAX_LEVERAGE` | 100x | TradingProxy | Maximum allowed leverage |
-| `LIQUIDATION_THRESHOLD` | 90% | TradingProxy | % loss for liquidation |
+| `MAX_LEVERAGE` | 100x | TradingEngine | Maximum allowed leverage |
+| `LIQUIDATION_THRESHOLD` | 90% | TradingEngine | % loss for liquidation |
 | `MAX_MULTIPLIER` | 7x-9x | Market | Profit cap (max payout) |
 | `BASE_SPREAD` | 0.05% | PricingLib | Fixed minimum spread |
 | `OI_IMPACT_FACTOR` | Variable | PricingLib | OI impact factor |
@@ -334,7 +334,7 @@ $$CR = \\frac{TotalUSDC_{Vault}}{TotalLPDeposits}$$
 | `SAFE_CR_THRESHOLD` | 110% | SolvencyManager | Ratio to activate buyback |
 | `DEFICIT_CR_THRESHOLD` | 100% | SolvencyManager | Ratio to activate solvency |
 | `FEE_SPLIT_ASSISTANT` | 20% | FeeManager | % fees → Assistant Fund |
-| `LIQUIDATOR_REWARD` | 10% | TradingProxy | % of remaining for liquidator |
+| `LIQUIDATOR_REWARD` | 10% | TradingEngine | % of remaining for liquidator |
 | `VOLATILITY_UPDATE_FREQ` | 1 hour | Keeper | σ update frequency |
 | `MAX_VOLATILITY_CHANGE` | ±2% | OIManager | Maximum change per update |
 

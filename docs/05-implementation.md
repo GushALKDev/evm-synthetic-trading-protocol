@@ -139,7 +139,7 @@ interface IVault is IERC4626 {
                             TRADING FUNCTIONS
     //////////////////////////////////////////////////////////////*/
     
-    /// @notice Send payout to winning trader (only callable by TradingProxy)
+    /// @notice Send payout to winning trader (only callable by TradingEngine)
     /// @param user Recipient address
     /// @param amount Amount in USDC (6 decimals)
     function sendPayout(address user, uint256 amount) external;
@@ -160,13 +160,13 @@ interface IVault is IERC4626 {
 }
 ```
 
-### ITradingProxy.sol
+### ITradingEngine.sol
 
 ```solidity
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-interface ITradingProxy {
+interface ITradingEngine {
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -348,7 +348,7 @@ function closeTrade(uint256 tradeId) external nonReentrant {
 ```solidity
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 
-contract TradingProxy is AccessControl {
+contract TradingEngine is AccessControl {
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     bytes32 public constant KEEPER_ROLE = keccak256("KEEPER_ROLE");
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");

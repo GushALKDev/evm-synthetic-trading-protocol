@@ -24,3 +24,4 @@ Thumbs.db
 docs/book/
 code-style-guide.md
 es/
+*.local.*
