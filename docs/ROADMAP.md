@@ -22,8 +22,8 @@ Each phase should be completed before moving to the next. Within each phase, the
 | :-------- | :------------------------ | :----- | :-------- | :------- |
 | 0         | Setup & Infrastructure    | 6      | 0         | 0%       |
 | 1         | Core: Vault               | 8      | 8         | 100%     |
-| 2         | Core: Trading Engine      | 12     | 2         | 17%      |
-| 3         | Oracles (DON)             | 7      | 0         | 0%       |
+| 2         | Core: Trading Engine      | 12     | 12        | 100%     |
+| 3         | Oracle (Pyth + Chainlink) | 8      | 0         | 0%       |
 | 4         | Fee System                | 5      | 0         | 0%       |
 | 5         | Funding Rates             | 4      | 0         | 0%       |
 | 6         | Risk Control (OI)         | 6      | 0         | 0%       |
@@ -34,7 +34,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 | 11        | Governance Token          | 4      | 0         | 0%       |
 | 12        | Testing & Audit           | 8      | 0         | 0%       |
 | 13        | V2 Improvements           | 7      | 0         | 0%       |
-| **TOTAL** |                           | **89** | **10**    | **11%**  |
+| **TOTAL** |                           | **90** | **20**    | **22%**  |
 
 ---
 
@@ -87,26 +87,28 @@ Each phase should be completed before moving to the next. Within each phase, the
 > **Dependencies:** Phase 1
 
 - [x] **2.1** Contract `TradingStorage.sol` - Struct `Trade`, mappings
-- [ ] **2.2** Contract `TradingEngine.sol` - Main controller
+- [x] **2.2** Contract `TradingEngine.sol` - Main controller
 - [x] **2.3** Struct `Pair` - Trading pair configuration
-- [ ] **2.4** Basic `openTrade()` function (no fees, no spread)
-    - [ ] 2.4.1 Validate collateral and leverage
-    - [ ] 2.4.2 Transfer USDC to Vault
-    - [ ] 2.4.3 Store trade in Storage
-    - [ ] 2.4.4 Emit `TradeOpened` event
-- [ ] **2.5** Basic `closeTrade()` function (no fees)
-    - [ ] 2.5.1 Verify ownership
-    - [ ] 2.5.2 Calculate PnL
-    - [ ] 2.5.3 Request payout from Vault
-    - [ ] 2.5.4 Delete trade from Storage
-    - [ ] 2.5.5 Emit `TradeClosed` event
-- [ ] **2.6** PnL calculation for Long
-- [ ] **2.7** PnL calculation for Short
-- [ ] **2.8** Profit Cap (limit gains to 7x-9x)
-- [ ] **2.9** Function `updateTP()` - Update Take Profit
-- [ ] **2.10** Function `updateSL()` - Update Stop Loss
-- [ ] **2.11** Pausable (emergency)
-- [ ] **2.12** Trading engine unit tests (coverage >95%)
+- [x] **2.4** Basic `openTrade()` function (no fees, no spread)
+    - [x] 2.4.1 Validate collateral and leverage
+    - [x] 2.4.2 Transfer USDC to TradingStorage
+    - [x] 2.4.3 Store trade in Storage
+    - [x] 2.4.4 Emit `TradeOpened` event
+- [x] **2.5** Basic `closeTrade()` function (no fees)
+    - [x] 2.5.1 Verify ownership
+    - [x] 2.5.2 Calculate PnL
+    - [x] 2.5.3 Request payout from Vault
+    - [x] 2.5.4 Delete trade from Storage
+    - [x] 2.5.5 Emit `TradeClosed` event
+- [x] **2.6** PnL calculation for Long
+- [x] **2.7** PnL calculation for Short
+- [x] **2.8** Profit Cap (limit gains to 9x)
+- [x] **2.9** Function `updateTP()` - Update Take Profit
+    - [x] 2.9.1 Validate new TP against current price (not already reached)
+- [x] **2.10** Function `updateSL()` - Update Stop Loss
+    - [x] 2.10.1 Validate new SL against current price (not already reached)
+- [x] **2.11** Pausable (emergency)
+- [x] **2.12** Trading engine unit tests (coverage >95%)
 
 **Deliverables:**
 
@@ -118,31 +120,36 @@ Each phase should be completed before moving to the next. Within each phase, the
 
 ---
 
-## Phase 3: Oracle System (DON)
+## Phase 3: Oracle System (Pyth + Chainlink)
 
-> **Objective:** Integrate decentralized oracle prices.
+> **Objective:** Integrate Pyth Network as primary price source with Chainlink as deviation anchor.
+>
+> **Architecture Decision:** Originally designed as a custom DON (6-8 nodes). Migrated to Pyth pull oracle model after analysis — see [03-architecture.md ADR](./03-architecture.md#3-oracle-architecture-decision-record) for full rationale.
 >
 > **Dependencies:** Phase 2
 
-- [ ] **3.1** Contract `OracleAggregator.sol`
-- [ ] **3.2** Chainlink integration (basic feed)
-- [ ] **3.3** Staleness validation (price not older than X minutes)
-- [ ] **3.4** DON integration (6-8 nodes)
-    - [ ] 3.4.1 Receive multiple prices
-    - [ ] 3.4.2 Filter by slippage vs Chainlink
-    - [ ] 3.4.3 Select 3 best
-    - [ ] 3.4.4 Calculate median
-- [ ] **3.5** Mock Oracle for local tests
-- [ ] **3.6** Unified `getPrice()` function
-- [ ] **3.7** Aggregator tests (including edge cases)
+- [ ] **3.1** Contract `OracleAggregator.sol` (Pyth + Chainlink wrapper)
+- [ ] **3.2** Pyth integration (pull model)
+    - [ ] 3.2.1 `updatePriceFeeds()` with user-submitted signed data
+    - [ ] 3.2.2 `getPriceNoOlderThan()` with staleness check
+    - [ ] 3.2.3 Confidence interval validation
+- [ ] **3.3** Chainlink integration (deviation anchor only, NOT fallback)
+    - [ ] 3.3.1 Read `latestRoundData()` as reference price
+    - [ ] 3.3.2 Deviation check: revert if `|pythPrice - chainlinkPrice| > MAX_DEVIATION`
+- [ ] **3.4** Price normalization to 18 decimals (Pyth expo + Chainlink 8 dec)
+- [ ] **3.5** Pair feed mapping (`pairIndex → pythFeedId + chainlinkFeed`)
+- [ ] **3.6** Update TradingEngine to accept `bytes[] calldata priceUpdate` + `payable`
+- [ ] **3.7** Mock Oracle for local tests (simulates Pyth interface)
+- [ ] **3.8** Aggregator tests (staleness, confidence, deviation, edge cases)
 
 **Deliverables:**
 
-- Aggregated prices from multiple sources
-- Resistance to single node manipulation
-- Mock for local development
+- Validated prices from Pyth with sub-second freshness
+- Chainlink deviation anchor protects against Pyth anomalies
+- Stale Pyth price → revert (no fallback)
+- Mock oracle for local development
 
-**Reference:** [03-architecture.md](./03-architecture.md) - Oracle Section
+**Reference:** [03-architecture.md](./03-architecture.md) - Oracle System + ADR
 
 ---
 
@@ -366,6 +373,8 @@ Each phase should be completed before moving to the next. Within each phase, the
 
 | Date       | Changes                 |
 | :--------- | :---------------------- |
+| 2026-02-25 | Phase 3: Redesigned oracle from custom DON to Pyth + Chainlink (see ADR) |
+| 2026-02-25 | Phase 2: TradingEngine.sol complete (2.2, 2.4-2.11) |
 | 2026-02-07 | Phase 2: TradingStorage.sol + Pair struct complete (2.1, 2.3) |
 | 2026-02-05 | Initial Roadmap version |
 

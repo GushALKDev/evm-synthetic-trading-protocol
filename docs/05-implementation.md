@@ -52,8 +52,8 @@ solady = "0.0.170"
 
 | Library | Use | Import |
 |:---|:---|:---|
-| **OpenZeppelin** | ERC4626, ERC20, AccessControl, Pausable, ReentrancyGuard | `@openzeppelin/contracts/` |
-| **Solady** | FixedPointMathLib (gas optimization) | `solady/utils/FixedPointMathLib.sol` |
+| **Solady** | Ownable, SafeTransferLib, ReentrancyGuard, ERC4626, FixedPointMathLib | `solady/` |
+| **Pyth SDK** | IPyth, PythStructs for price verification | `@pythnetwork/pyth-sdk-solidity/` |
 
 ---
 
@@ -85,7 +85,8 @@ struct Trade {
 /// @notice Configuration for a trading pair
 struct Pair {
     string name;            // e.g., "BTC/USD"
-    bytes32 feedId;         // Chainlink/DON feed identifier
+    bytes32 pythFeedId;     // Pyth price feed ID
+    address chainlinkFeed;  // Chainlink AggregatorV3 address (deviation anchor)
     uint256 spreadBps;      // Base spread in basis points (100 = 1%)
     uint256 maxOI;          // Maximum open interest allowed (USD, 18 decimals)
     uint256 maxLeverage;    // Maximum leverage for this pair
@@ -94,15 +95,15 @@ struct Pair {
 }
 ```
 
-### Oracle Response Struct
+### Oracle Validated Price Struct
 
 ```solidity
-/// @notice Aggregated price response from DON
-struct PriceData {
-    uint256 price;          // Aggregated price (18 decimals)
-    uint256 timestamp;      // Timestamp of aggregation
-    uint256 confidence;     // Confidence level (optional)
-    uint8 numResponses;     // Number of valid node responses used
+/// @notice Validated price output from OracleAggregator
+/// @dev Pyth raw price is normalized to 18 decimals. Confidence is preserved for risk management.
+struct ValidatedPrice {
+    uint128 price;          // Normalized price (18 decimals)
+    uint128 confidence;     // Pyth confidence interval (18 decimals)
+    uint64 publishTime;     // Pyth publish timestamp
 }
 ```
 
@@ -248,40 +249,40 @@ interface IOracleAggregator {
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
-    
-    error PriceStale(uint256 timestamp, uint256 maxAge);
-    error InsufficientResponses(uint8 received, uint8 required);
-    error PriceDeviationTooHigh(uint256 donPrice, uint256 chainlinkPrice);
-    
+
+    error StalePrice(uint64 publishTime, uint256 maxStaleness);
+    error ConfidenceTooWide(uint128 confidence, uint128 price, uint256 maxBps);
+    error PriceDeviationTooHigh(uint256 pythPrice, uint256 chainlinkPrice, uint256 maxDeviation);
+    error ZeroPrice();
+    error InvalidPythFee();
+
     /*//////////////////////////////////////////////////////////////
                             PRICE FUNCTIONS
     //////////////////////////////////////////////////////////////*/
-    
-    /// @notice Get aggregated price for a pair (median of 3 best from DON)
+
+    /// @notice Validate and return Pyth price with Chainlink deviation check
+    /// @dev Caller must send ETH to cover Pyth update fee. Reverts if:
+    ///      - Pyth price is stale (> MAX_STALENESS)
+    ///      - Confidence interval is too wide (> MAX_CONFIDENCE_BPS)
+    ///      - Deviation from Chainlink exceeds MAX_DEVIATION
+    ///      Chainlink is NOT a fallback — stale Pyth always reverts.
+    /// @param priceUpdate Signed price data from Pyth Hermes API
     /// @param pairIndex Index of the trading pair
-    /// @return price Aggregated price (18 decimals)
-    /// @return timestamp Timestamp of the price
-    function getPrice(uint256 pairIndex) external returns (uint256 price, uint256 timestamp);
-    
-    /// @notice Get price with spread applied for execution
+    /// @return price Validated price (18 decimals)
+    function getValidatedPrice(bytes[] calldata priceUpdate, uint16 pairIndex) external payable returns (uint128 price);
+
+    /// @notice Get the Pyth update fee for a given price update
+    /// @param priceUpdate The price update bytes
+    /// @return fee The fee in native token (wei)
+    function getUpdateFee(bytes[] calldata priceUpdate) external view returns (uint256 fee);
+
+    /// @notice Get price with spread applied for execution (future: Phase 4)
+    /// @param priceUpdate Signed price data from Pyth Hermes API
     /// @param pairIndex Index of the trading pair
     /// @param isLong Direction of the trade
     /// @param isOpen Whether this is an open or close
-    /// @return executionPrice Price with spread applied
-    function getExecutionPrice(
-        uint256 pairIndex,
-        bool isLong,
-        bool isOpen
-    ) external returns (uint256 executionPrice);
-    
-    /// @notice Verify a historical price touched a level (for lookback liquidations)
-    /// @param priceProof Signed price data from DON
-    /// @param targetPrice The price level to verify
-    /// @return touched Whether the price touched or crossed the target
-    function verifyPriceTouchedLevel(
-        bytes calldata priceProof,
-        uint256 targetPrice
-    ) external view returns (bool touched);
+    /// @return executionPrice Price with spread applied (18 decimals)
+    function getExecutionPrice(bytes[] calldata priceUpdate, uint16 pairIndex, bool isLong, bool isOpen) external payable returns (uint128 executionPrice);
 }
 ```
 
@@ -381,6 +382,7 @@ contract TradingEngine is AccessControl {
 | USDC (input/output) | 6 | `1e6` |
 | Internal USD values | 18 | `WAD = 1e18` |
 | Chainlink prices | 8 | `1e8` |
+| Pyth prices | variable (expo) | normalized to `1e18` |
 | Internal prices | 18 | `WAD = 1e18` |
 | Percentages (BPS) | 4 | `10000 = 100%` |
 

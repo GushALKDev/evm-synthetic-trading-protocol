@@ -29,7 +29,7 @@
 | **LP** | Liquidity provider | Untrusted | Can attempt timing attacks |
 | **Keeper** | Bot executing TP/SL/Liquidations | Semi-trusted | Can attempt front-running |
 | **Admin** | Multisig with parameter control | Trusted | Can change configuration (with timelock) |
-| **Oracle Node** | DON node | Semi-trusted | 1 node cannot manipulate price |
+| **Pyth Publisher** | Data publisher (exchange, market maker) | Semi-trusted | Subject to Oracle Integrity Staking (slashing) |
 | **Attacker** | External malicious agent | Untrusted | All attack vectors |
 
 ### Critical Assets
@@ -38,7 +38,7 @@
 |:---|:---|:---|:---|\
 | Vault USDC | `LiquidityVault.sol` | Total TVL | Access control, CEI |
 | Trade Data | `TradingStorage.sol` | Integrity | Only TradingEngine writes |
-| Oracle Prices | `OracleAggregator.sol` | Fairness | Median, Chainlink validation |
+| Oracle Prices | `OracleAggregator.sol` | Fairness | Pyth (128+ publishers) + Chainlink deviation anchor |
 | $SYNTH Token | `SynthToken.sol` | Market value | Controlled minter role |
 | Admin Keys | External multisig | Entire system | Timelock, 3/5 threshold |
 
@@ -139,14 +139,18 @@ for (trade in allTrades) {
 ### Oracle Invariants
 
 ```solidity
-// INV-7: Aggregated price is never 0
-assert(oracle.getPrice(pairIndex) > 0);
+// INV-7: Validated price is never 0
+assert(oracle.getValidatedPrice(priceUpdate, pairIndex) > 0);
 
-// INV-8: Aggregated price doesn't deviate more than X% from Chainlink
-uint256 donPrice = oracle.getPrice(pairIndex);
+// INV-8: Pyth price doesn't deviate more than MAX_DEVIATION from Chainlink
+// (enforced by OracleAggregator — reverts if exceeded)
+uint256 pythPrice = oracle.getValidatedPrice(priceUpdate, pairIndex);
 uint256 clPrice = chainlink.latestAnswer();
-uint256 deviation = abs(donPrice - clPrice) * 1e18 / clPrice;
-assert(deviation <= MAX_PRICE_DEVIATION);
+uint256 deviation = abs(pythPrice - clPrice) * 1e18 / clPrice;
+assert(deviation <= MAX_DEVIATION);
+
+// INV-8b: Pyth price is never stale (staleness > MAX_STALENESS → revert, no fallback)
+// (enforced by Pyth's getPriceNoOlderThan — cannot be bypassed)
 ```
 
 ### Token Invariants
@@ -180,22 +184,25 @@ function closeTrade(uint256 tradeId) external nonReentrant {
 
 ### 4.2 Oracle Manipulation
 
-**Vector:** Flash loan to manipulate spot price used as reference.
+**Vector:** Submit manipulated or adversarial price data to execute trades at favorable prices.
 
 **Mitigation:**
 - DO NOT use DEX pools as oracles.
-- Median of 3 prices from DON.
-- Cross-validation with Chainlink.
-- Max slippage check (±0.5%).
+- **Pyth Wormhole verification:** All prices are cryptographically signed by publishers and verified on-chain. Cannot be forged.
+- **128+ publishers** with Oracle Integrity Staking (slashing for inaccurate data). Manipulation requires compromising a significant fraction.
+- **Chainlink deviation anchor:** Pyth price must be within `MAX_DEVIATION` of Chainlink — catches anomalous Pyth prices.
+- **Confidence interval check:** Wide confidence (publisher disagreement) → revert.
+- **Staleness check:** Only prices within `MAX_STALENESS` (10-30s) are accepted — no stale price exploitation.
 
 ### 4.3 Front-Running (Latency Arbitrage)
 
-**Vector:** See future price on CEX, open trade before update.
+**Vector:** See future price on CEX, open trade before oracle update.
 
 **Mitigation:**
-- Fresh prices from DON (not just Chainlink).
-- Dynamic spread based on OI.
-- Consider deferred execution (Phase 2).
+- **Pyth sub-second updates:** 400ms refresh rate from first-party publishers significantly narrows the arbitrage window.
+- **Strict staleness:** `MAX_STALENESS` of 10-30 seconds ensures the price included in the transaction is recent.
+- **Adversarial price selection defense:** User submits the price, but it must pass staleness + confidence + Chainlink deviation checks. They cannot submit an old favorable price.
+- Dynamic spread based on OI (Phase 4).
 
 ### 4.4 Sandwich Attack on LP Withdrawals
 
@@ -384,7 +391,7 @@ function emergencyWithdraw() external {
 
 ### Out of Scope
 
-- Third-party contracts (OpenZeppelin, Chainlink)
+- Third-party contracts (Solady, Pyth SDK, Chainlink)
 - Frontend/UI vulnerabilities
 - Documented centralization risks
 - Attacks requiring >51% stake in $SYNTH

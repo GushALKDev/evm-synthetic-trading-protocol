@@ -27,14 +27,14 @@ No order books. No AMM curves. Just oracle-priced synthetic exposure.
 │   TRADERS ──────┐                                               │
 │   (Bet on       │         ┌──────────────────┐                  │
 │    price)       ├────────►│                  │                  │
-│                 │         │   VAULT (USDC)   │◄────── LPs       │
-│   Win = Payout  │         │   "The House"    │        (Provide  │
-│   Lose = Loss   │         │                  │         USDC)    │
-│   to Vault      │         └──────────────────┘                  │
-│                 │                  │                            │
-│                 │                  ▼                            │
-│                 │         Traders lose → LPs profit             │
-│                 │         Traders win  → LPs pay                │
+│                 └◄────────┤   VAULT (USDC)   │◄────── LPs       │
+│   Win = Payout            │   "The House"    │        (Provide  │
+│   Lose = Loss             │                  │         USDC)    │
+│   to Vault                └──────────────────┘                  │
+│                                    │                            │
+│                                    ▼                            │
+│                           Traders lose → LPs profit             │
+│                           Traders win  → LPs pay                │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -67,7 +67,7 @@ No order books. No AMM curves. Just oracle-priced synthetic exposure.
           ▼                       ▼                        ▼
 ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
 │  TRADING        │      │   VAULT         │      │   ORACLE        │
-│  STORAGE    ✅  │      │   (ERC-4626) ✅ │      │   AGGREGATOR    │
+│  STORAGE        │      │   (ERC-4626)    │      │   AGGREGATOR    │
 │                 │      │                 │      │                 │
 │  • Trades       │      │  • LP USDC      │      │  • DON nodes    │
 │  • Collateral   │      │  • LP shares    │      │  • Chainlink    │

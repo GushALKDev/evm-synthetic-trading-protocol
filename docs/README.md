@@ -36,7 +36,8 @@
 
 3. **[Technical Architecture & Data Flow](./03-architecture.md)**
    - Component diagram
-   - Decentralized Oracle Network (DON)
+   - Oracle System (Pyth + Chainlink)
+   - Oracle Architecture Decision Record (DON → Pyth migration)
    - Contract descriptions
    - Detailed execution flows
    - Design patterns (CEI, Diamond, Pull over Push)
@@ -50,7 +51,7 @@
    - Risk matrix
 
 5. **[Solidity Implementation](./05-implementation.md)**
-   - Tech stack (Foundry, OpenZeppelin, Solady)
+   - Tech stack (Foundry, Solady, Pyth SDK)
    - Data structures (Trade, Pair, Oracle)
    - Contract interfaces
    - Security patterns (Custom errors, CEI, Access control)
@@ -182,7 +183,8 @@ This project is licensed under the MIT License - see the [LICENSE](../LICENSE) f
 - **Foundry Documentation:** https://book.getfoundry.sh/
 - **ERC-4626 Standard:** https://eips.ethereum.org/EIPS/eip-4626
 - **OpenZeppelin Contracts:** https://docs.openzeppelin.com/contracts/
-- **Chainlink Price Feeds:** https://docs.chain.link/data-feeds
+- **Pyth Network:** https://docs.pyth.network/ (primary oracle)
+- **Chainlink Price Feeds:** https://docs.chain.link/data-feeds (deviation anchor)
 - **GMX Documentation:** https://gmx-docs.io/ (reference implementation)
 - **Gains Network Docs:** https://gains-network.gitbook.io/ (reference implementation)
 

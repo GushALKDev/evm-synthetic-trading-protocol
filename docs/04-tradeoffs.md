@@ -48,21 +48,23 @@ Timeline:
 
 **Consequence:** Systematic LP fund drainage (Toxic Flow).
 
-### Our Solution: DON + Aggregation
+### Our Solution: Pyth Pull Oracle + Staleness Control
 
-The Synthetic Trading Protocol uses a **Decentralized Oracle Network (DON)** with 6-8 nodes:
+The Synthetic Trading Protocol uses **Pyth Network** (pull model) with strict staleness enforcement:
 
-1. **Parallel request:** Prices requested from all nodes simultaneously.
-2. **Chainlink validation:** Prices with excessive slippage vs Chainlink are discarded.
-3. **Select 3 best:** The 3 fastest prices that passed validation are taken.
-4. **Median:** Final price is the median of those 3.
+1. **Fresh prices:** Pyth provides sub-second price updates from 128+ first-party publishers (exchanges, market makers).
+2. **User-submitted prices:** Frontend fetches the latest signed price from Pyth Hermes API and includes it as calldata — price is verified on-chain via Wormhole signatures.
+3. **Strict staleness:** `MAX_STALENESS` of 10-30 seconds. Stale price → revert (no fallback).
+4. **Chainlink deviation anchor:** If Pyth price deviates too far from Chainlink → revert. Protects against Pyth anomalies without using Chainlink as a slower fallback.
+5. **Confidence intervals:** Pyth provides publisher disagreement data — trades are rejected during high uncertainty (`conf/price > 1%`).
 
 **Benefits:**
-- Fresher prices than a single Chainlink feed.
-- Resistant to 1 corrupt/slow node.
-- Cross-validation eliminates obvious discrepancies.
+- Sub-second price freshness eliminates most latency arbitrage windows.
+- Pull model means users pay the update fee (~$0.01 on L2), no protocol gas cost.
+- 128+ publishers make manipulation economically infeasible.
+- Confidence intervals enable dynamic risk management.
 
-### Alternative: Deferred Execution (Gains Model)
+### Alternative: Deferred Execution
 
 If latency remains a problem:
 
@@ -70,7 +72,7 @@ If latency remains a problem:
 2. Order is queued (pending).
 3. After X blocks, a Keeper executes with the price *at that future moment*.
 
-**Trade-off:** Worse UX (non-instant order), but eliminates price prediction ability.
+**Trade-off:** Worse UX (non-instant order), but eliminates price prediction ability. Most modern perp DEXs (Jupiter, Synthetix v3) avoid this by relying on Pyth's sub-second updates.
 
 ---
 
@@ -169,29 +171,33 @@ If the oracle can be manipulated, an attacker could:
 - Systematically drain the Vault.
 
 **Attack vectors:**
-1. Flash Loan to manipulate Uniswap pool used as oracle.
-2. Corrupt DON nodes.
-3. Exploit low-liquidity price source.
+1. Flash Loan to manipulate DEX pool used as oracle.
+2. Compromise Pyth publishers or submit stale/adversarial price updates.
+3. Exploit low-liquidity feeds with fewer publishers.
 
 ### Our Solution
 
 | Protection | Implementation |
 |:---|:---|
-| **Don't use DEX pools as oracle** | Only Chainlink/Pyth as primary sources |
-| **Cross-validation** | DON prices validated vs Chainlink (max slippage) |
-| **Median of 3** | 1 corrupt node cannot move price |
-| **Staleness check** | Reject prices > 2 minutes old |
+| **Don't use DEX pools as oracle** | Pyth (primary) + Chainlink (anchor) only |
+| **Wormhole signature verification** | Pyth prices are cryptographically signed by publishers and verified on-chain |
+| **Chainlink deviation anchor** | Pyth price must be within `MAX_DEVIATION` of Chainlink; revert otherwise |
+| **Staleness check** | Reject Pyth prices older than `MAX_STALENESS` (10-30s) |
+| **Confidence check** | Reject prices with wide confidence interval (`conf/price > MAX_CONFIDENCE_BPS`) |
 | **Circuit Breakers** | If price moves >X% in 1 block, pause system |
 
 ```solidity
-// Circuit Breaker
-uint256 lastPrice = oracle.lastPrice(pairIndex);
-uint256 currentPrice = oracle.getPrice(pairIndex);
+// Validation pipeline in OracleAggregator
+// 1. Pyth staleness (reverts if stale — no Chainlink fallback)
+PythStructs.Price memory price = pyth.getPriceNoOlderThan(feedId, MAX_STALENESS);
 
-uint256 deviation = abs(currentPrice - lastPrice) * 1e18 / lastPrice;
-if (deviation > MAX_SINGLE_BLOCK_DEVIATION) {
-    revert CircuitBreakerTriggered(pairIndex, deviation);
-}
+// 2. Confidence interval check
+if (price.conf * BPS_DENOMINATOR / uint64(abs(price.price)) > MAX_CONFIDENCE_BPS)
+    revert ConfidenceTooWide();
+
+// 3. Chainlink deviation anchor (circuit breaker, not fallback)
+uint256 deviation = _calculateDeviation(pythPrice, chainlinkPrice);
+if (deviation > MAX_DEVIATION) revert PriceDeviationTooHigh();
 ```
 
 ---
@@ -224,9 +230,9 @@ The entire Vault is denominated in USDC. If USDC loses parity (as in March 2023)
 | Feature | Advantage | Disadvantage (Trade-off) |
 |:---|:---|:---|
 | **Single-Sided Liquidity** | High efficiency, no slippage by size | Insolvency risk if OI not managed |
-| **DON (6-8 nodes)** | Fresh prices, manipulation-resistant | Complexity, node maintenance costs |
-| **Chainlink Validation** | Additional security | Third-party dependency (Chainlink) |
-| **Deferred Execution** | Eliminates latency arbitrage | Slower UX (wait for confirmation) |
+| **Pyth Pull Oracle** | Sub-second prices, 128+ publishers, near-zero cost | Wormhole dependency, pull model requires frontend integration |
+| **Chainlink Deviation Anchor** | Protects against Pyth anomalies | Third-party dependency, Chainlink latency limits anchor precision |
+| **No Fallback (Revert on Stale)** | Prevents high-leverage execution on stale prices | Temporary trade unavailability during Pyth outages |
 | **High Max Leverage (100x)** | Attracts retail/degens | Higher variance and bad debt risk |
 | **Profit Cap (7x-9x)** | Protects Vault | Limits upside for successful traders |
 | **Bonding over Mint** | More controlled than direct minting | Requires demand for $SYNTH |
@@ -237,9 +243,9 @@ The entire Vault is denominated in USDC. If USDC loses parity (as in March 2023)
 
 | Risk | Probability | Impact | Mitigation | Residual Risk |
 |:---|:---|:---|:---|:---|
-| Latency Arbitrage | High | High | DON + Validation + Spread | Medium |
+| Latency Arbitrage | Medium | High | Pyth sub-second updates + Spread | Medium-Low |
 | Vault Insolvency | Medium | Critical | 4-layer defense | Low |
-| Oracle Manipulation | Low | Critical | Median + Chainlink | Low |
+| Oracle Manipulation | Low | Critical | Pyth (128+ publishers) + Chainlink anchor | Low |
 | Liquidation Front-run | Medium | Medium | Lookbacks + Fixed reward | Low |
 | USDC Depeg | Low | High | Circuit breaker + Monitoring | Medium |
 | Smart Contract Bug | Low | Critical | Audits + Bug Bounty | Low |
