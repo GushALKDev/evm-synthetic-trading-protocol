@@ -19,29 +19,31 @@ contract TradingStorage is Ownable {
 
     /**
      * @notice Represents an open trading position
-     * @dev Packed into 3 storage slots (down from 10)
+     * @dev Packed into 3 storage slots
      */
+    // prettier-ignore
     struct Trade {
-        address user; // 20 bytes ─┐
-        bool isLong; //  1 byte   │
-        uint16 pairIndex; //  2 bytes  │  Slot 0 (31 bytes)
-        uint16 leverage; //  2 bytes  │
-        uint48 timestamp; //  6 bytes ─┘
-        uint32 index; //  4 bytes ─┐
-        uint64 collateral; //  8 bytes  │  Slot 1 (28 bytes)
-        uint128 openPrice; // 16 bytes ─┘
-        uint128 tp; // 16 bytes ─┐  Slot 2 (32 bytes)
-        uint128 sl; // 16 bytes ─┘
+        address user;       // 20 bytes ─┐
+        bool isLong;        //  1 byte   │
+        uint16 pairIndex;   //  2 bytes  │  Slot 0 (31 bytes)
+        uint16 leverage;    //  2 bytes  │
+        uint48 timestamp;   //  6 bytes ─┘
+        uint32 index;       //  4 bytes ─┐
+        uint64 collateral;  //  8 bytes  │  Slot 1 (28 bytes)
+        uint128 openPrice;  // 16 bytes ─┘
+        uint128 tp;         // 16 bytes ─┐  Slot 2 (32 bytes)
+        uint128 sl;         // 16 bytes ─┘
     }
 
     /**
      * @notice Configuration for a trading pair
      */
+    // prettier-ignore
     struct Pair {
-        string name; // Slot 0 (pointer)
-        uint128 maxOI; // 16 bytes ─┐
+        string name;        // Slot 0 (pointer)
+        uint128 maxOI;      // 16 bytes ─┐
         uint16 maxLeverage; //  2 bytes  │  Slot 1 (19 bytes)
-        bool isActive; //  1 byte  ─┘
+        bool isActive;      //  1 byte  ─┘
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -109,6 +111,9 @@ contract TradingStorage is Ownable {
     error EmptyPairName();
     error ZeroMaxLeverage();
     error ZeroMaxOI();
+    error InvalidTp(uint128 tp, uint128 openPrice, bool isLong);
+    error InvalidSl(uint128 sl, uint128 openPrice, bool isLong);
+    error MaxOpenInterestExceeded(uint256 newOI, uint128 maxOI);
 
     /*//////////////////////////////////////////////////////////////
                               MODIFIERS
@@ -129,20 +134,39 @@ contract TradingStorage is Ownable {
 
     /**
      * @dev Removes a trade ID from the user's trade array using swap-and-pop
+     * Swaps target element with last element, then pops — O(1) deletion at cost of losing order
      */
     function _removeFromUserTrades(address _user, uint256 _tradeId) internal {
-        uint256[] storage trades = _userTrades[_user];
-        uint256 len = trades.length;
+        uint256[] storage userTrades = _userTrades[_user];
+        uint256 len = userTrades.length;
         for (uint256 i; i < len; ) {
-            if (trades[i] == _tradeId) {
-                trades[i] = trades[len - 1];
-                trades.pop();
+            if (userTrades[i] == _tradeId) {
+                userTrades[i] = userTrades[len - 1];
+                userTrades.pop();
                 return;
             }
             unchecked {
                 ++i;
             }
         }
+    }
+
+    /**
+     * @dev Validates TP against openPrice and direction.
+     * LONG: tp > openPrice | SHORT: tp < openPrice
+     */
+    function _validateTp(uint128 _tp, uint128 _openPrice, bool _isLong) internal pure {
+        if (_isLong && _tp <= _openPrice) revert InvalidTp(_tp, _openPrice, _isLong);
+        if (!_isLong && _tp >= _openPrice) revert InvalidTp(_tp, _openPrice, _isLong);
+    }
+
+    /**
+     * @dev Validates SL against openPrice and direction.
+     * LONG: sl < openPrice | SHORT: sl > openPrice
+     */
+    function _validateSl(uint128 _sl, uint128 _openPrice, bool _isLong) internal pure {
+        if (_isLong && _sl >= _openPrice) revert InvalidSl(_sl, _openPrice, _isLong);
+        if (!_isLong && _sl <= _openPrice) revert InvalidSl(_sl, _openPrice, _isLong);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -182,7 +206,10 @@ contract TradingStorage is Ownable {
         uint128 _sl
     ) external onlyTradingEngine returns (uint32 tradeId) {
         if (_pairIndex >= _pairs.length) revert PairNotFound(_pairIndex);
+        if (_tp != 0) _validateTp(_tp, _openPrice, _isLong);
+        if (_sl != 0) _validateSl(_sl, _openPrice, _isLong);
 
+        // Auto-increment trade ID (never reused even after deletion)
         tradeId = _tradeCounter++;
 
         _trades[tradeId] = Trade({
@@ -209,12 +236,13 @@ contract TradingStorage is Ownable {
      */
     function deleteTrade(uint256 _tradeId) external onlyTradingEngine {
         Trade storage trade = _trades[_tradeId];
+
         if (trade.user == address(0)) revert TradeNotFound(_tradeId);
 
         address user = trade.user;
 
         _removeFromUserTrades(user, _tradeId);
-        delete _trades[_tradeId];
+        delete _trades[_tradeId]; // Sets all fields to 0, including user → address(0)
 
         emit TradeDeleted(_tradeId, user);
     }
@@ -227,6 +255,7 @@ contract TradingStorage is Ownable {
     function updateTradeTp(uint256 _tradeId, uint128 _newTp) external onlyTradingEngine {
         Trade storage trade = _trades[_tradeId];
         if (trade.user == address(0)) revert TradeNotFound(_tradeId);
+        if (_newTp != 0) _validateTp(_newTp, trade.openPrice, trade.isLong);
         trade.tp = _newTp;
         emit TradeTpUpdated(_tradeId, _newTp);
     }
@@ -239,6 +268,7 @@ contract TradingStorage is Ownable {
     function updateTradeSl(uint256 _tradeId, uint128 _newSl) external onlyTradingEngine {
         Trade storage trade = _trades[_tradeId];
         if (trade.user == address(0)) revert TradeNotFound(_tradeId);
+        if (_newSl != 0) _validateSl(_newSl, trade.openPrice, trade.isLong);
         trade.sl = _newSl;
         emit TradeSlUpdated(_tradeId, _newSl);
     }
@@ -251,6 +281,8 @@ contract TradingStorage is Ownable {
     function increaseOpenInterest(uint256 _pairIndex, uint256 _amount) external onlyTradingEngine {
         if (_pairIndex >= _pairs.length) revert PairNotFound(_pairIndex);
         uint256 newOI = _openInterest[_pairIndex] + _amount;
+        uint128 maxOI = _pairs[_pairIndex].maxOI;
+        if (newOI > uint256(maxOI)) revert MaxOpenInterestExceeded(newOI, maxOI);
         _openInterest[_pairIndex] = newOI;
         emit OpenInterestUpdated(_pairIndex, newOI);
     }
@@ -276,9 +308,8 @@ contract TradingStorage is Ownable {
         uint256 balance = ASSET.balanceOf(address(this));
         if (_amount > balance) revert InsufficientBalance(_amount, balance);
 
-        ASSET.safeTransfer(_to, _amount);
-
         emit CollateralSent(_to, _amount);
+        ASSET.safeTransfer(_to, _amount);
     }
 
     /*//////////////////////////////////////////////////////////////

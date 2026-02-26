@@ -230,14 +230,17 @@ interface ITradingEngine {
     function closeTrade(uint256 tradeId) external;
     
     function updateTakeProfit(uint256 tradeId, uint256 newTp) external;
-    
+
     function updateStopLoss(uint256 tradeId, uint256 newSl) external;
-    
+
     function liquidate(uint256 tradeId) external;
-    
+
     function executeLimit(uint256 tradeId) external;
 }
 ```
+
+> **TP/SL price-dependent validations (Phase 3):**
+> `openTrade`, `updateTakeProfit`, and `updateStopLoss` must validate that the TP/SL has not already been triggered at the current oracle price. For example, a LONG with `oraclePrice = 80,000` must reject `sl = 90,000` because the keeper would execute immediately at 80k — worse than the 90k the user intended. Similarly, a TP already surpassed is rejected so the user can raise it or close at market. These validations live in TradingEngine (requires oracle access), while TradingStorage retains its structural checks (`tp > openPrice` for longs, etc.) as a defense-in-depth layer.
 
 ### IOracleAggregator.sol
 

@@ -300,6 +300,23 @@ The `OracleAggregator` abstraction layer allows adding new oracle backends (e.g.
 - ✅ Global/pair `MaxOpenInterest` not exceeded
 - ✅ Oracle price is valid and recent
 - ✅ Leverage is within limits
+- ✅ TP/SL not already triggered at oracle price (see below)
+
+**TP/SL price-dependent validations (Phase 3):**
+
+Both `openTrade` (when setting initial TP/SL) and `updateTP`/`updateSL` must validate that the TP/SL is not already triggered at the current oracle price. This is done in TradingEngine (not TradingStorage) because it requires access to the oracle.
+
+| Direction | TP rule              | SL rule              |
+| :-------- | :------------------- | :------------------- |
+| LONG      | `tp > oraclePrice`   | `sl < oraclePrice`   |
+| SHORT     | `tp < oraclePrice`   | `sl > oraclePrice`   |
+
+If violated, the transaction reverts. Rationale:
+
+- **SL already triggered:** The keeper would execute immediately at current market price, which is worse than the SL the user intended. The user loses more than expected while thinking they are protected.
+- **TP already triggered:** The keeper would execute immediately at current market price, which is better than the TP — but the user likely doesn't know the price already surpassed their target. Reverting lets them set a higher TP or close at market price explicitly.
+
+TradingStorage retains its own structural validations (Long: `tp > openPrice`, `sl < openPrice`; Short: inverse) as a defense-in-depth layer that doesn't depend on the oracle.
 
 ### 4.3 `TradingStorage.sol` (State Layer)
 

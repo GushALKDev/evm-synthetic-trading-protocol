@@ -23,7 +23,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 | 0         | Setup & Infrastructure    | 6      | 0         | 0%       |
 | 1         | Core: Vault               | 8      | 8         | 100%     |
 | 2         | Core: Trading Engine      | 12     | 12        | 100%     |
-| 3         | Oracle (Pyth + Chainlink) | 8      | 0         | 0%       |
+| 3         | Oracle (Pyth + Chainlink) | 12     | 0         | 0%       |
 | 4         | Fee System                | 5      | 0         | 0%       |
 | 5         | Funding Rates             | 4      | 0         | 0%       |
 | 6         | Risk Control (OI)         | 6      | 0         | 0%       |
@@ -34,7 +34,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 | 11        | Governance Token          | 4      | 0         | 0%       |
 | 12        | Testing & Audit           | 8      | 0         | 0%       |
 | 13        | V2 Improvements           | 7      | 0         | 0%       |
-| **TOTAL** |                           | **90** | **20**    | **22%**  |
+| **TOTAL** |                           | **94** | **20**    | **21%**  |
 
 ---
 
@@ -139,8 +139,27 @@ Each phase should be completed before moving to the next. Within each phase, the
 - [ ] **3.4** Price normalization to 18 decimals (Pyth expo + Chainlink 8 dec)
 - [ ] **3.5** Pair feed mapping (`pairIndex → pythFeedId + chainlinkFeed`)
 - [ ] **3.6** Update TradingEngine to accept `bytes[] calldata priceUpdate` + `payable`
-- [ ] **3.7** Mock Oracle for local tests (simulates Pyth interface)
-- [ ] **3.8** Aggregator tests (staleness, confidence, deviation, edge cases)
+    - [ ] 3.6.1 `openTrade` signature: add `priceUpdate`, remove `_openPrice` param (oracle provides it)
+    - [ ] 3.6.2 `closeTrade` signature: add `priceUpdate`, remove `_closePrice` param
+    - [ ] 3.6.3 `updateTp`/`updateSl`: add `priceUpdate` to validate TP/SL not already reached at current price
+    - [ ] 3.6.4 Forward `msg.value` to OracleAggregator for Pyth update fee
+    - [ ] 3.6.5 Refund excess ETH from Pyth fee to `msg.sender`
+- [ ] **3.7** Price-dependent validations (deferred from Phase 2)
+    - [ ] 3.7.1 Validate TP/SL not already triggered on `openTrade` against execution price (e.g. Long: TP > oraclePrice, SL < oraclePrice)
+    - [ ] 3.7.2 Validate TP/SL not already triggered on `updateTp`/`updateSl` against current oracle price — revert in both cases (SL: protects user from keeper executing at worse price; TP: avoids silent instant close, user should raise TP or close at market)
+    - [ ] 3.7.3 Reject positions that are pre-liquidable after spread application (loss at entry >= LIQUIDATION_THRESHOLD)
+    - [ ] 3.7.4 Dynamic spread on execution price: `P_execution = P_oracle × (1 ± spread)`
+    - [ ] 3.7.5 Use confidence interval for conservative pricing on liquidation checks (`price - conf` for longs, `price + conf` for shorts)
+- [ ] **3.8** TradingStorage adaptations
+    - [ ] 3.8.1 `_validateTp`/`_validateSl` validate against execution price instead of openPrice (or move validation to TradingEngine)
+    - [ ] 3.8.2 Evaluate OI tracking: nominal (current: `collateral × leverage`) vs USD-denominated (`collateral × leverage × price / 1e18`)
+- [ ] **3.9** Pyth fee handling
+    - [ ] 3.9.1 TradingEngine must be `payable` or receive ETH for Pyth fees
+    - [ ] 3.9.2 Consider who pays the fee (user via `msg.value`, or protocol treasury)
+    - [ ] 3.9.3 `receive()` function if protocol subsidizes fees
+- [ ] **3.10** Mock Oracle for local tests (simulates Pyth interface)
+- [ ] **3.11** Aggregator tests (staleness, confidence, deviation, edge cases)
+- [ ] **3.12** Update TradingEngine tests for oracle integration (mock price feeds, fee forwarding)
 
 **Deliverables:**
 
@@ -148,6 +167,8 @@ Each phase should be completed before moving to the next. Within each phase, the
 - Chainlink deviation anchor protects against Pyth anomalies
 - Stale Pyth price → revert (no fallback)
 - Mock oracle for local development
+- All trading functions use oracle-derived prices instead of caller-supplied parameters
+- TP/SL validated against live oracle price on set and update
 
 **Reference:** [03-architecture.md](./03-architecture.md) - Oracle System + ADR
 

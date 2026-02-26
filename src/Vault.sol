@@ -146,6 +146,7 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
     /**
      * @dev Offset to handle USDC (6 decimals) -> sToken (18 decimals) conversion
      * This makes 1 USDC deposit mint 1e12 more raw shares units, so 1.0 USDC = 1.0 sToken
+     * Example: deposit 1e6 USDC → 1e18 shares (1.0 sToken displayed to user)
      */
     function _decimalsOffset() internal view virtual override returns (uint8) {
         return 12;
@@ -191,6 +192,7 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
         uint256 epoch = currentEpoch();
         uint256 unlockEpoch = epoch + WITHDRAWAL_DELAY_EPOCHS;
 
+        // Overwrites any existing request (no need to cancel first)
         withdrawalRequests[msg.sender] = WithdrawalRequest({shares: shares, requestEpoch: epoch});
 
         emit WithdrawalRequested(msg.sender, shares, epoch, unlockEpoch);
@@ -218,6 +220,7 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
         if (currentEpoch() < unlockEpoch) revert WithdrawalLocked(unlockEpoch);
 
         uint256 sharesToBurn = req.shares;
+        // Assets calculated at execution time (price per share may have changed since request)
         uint256 assets = previewRedeem(sharesToBurn);
 
         // Clear request before external calls (CEI)
@@ -225,14 +228,14 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
 
         // Burn shares
         _burn(msg.sender, sharesToBurn);
+        emit WithdrawalExecuted(msg.sender, sharesToBurn, assets);
 
         // Transfer assets
         ASSET.safeTransfer(msg.sender, assets);
-
-        emit WithdrawalExecuted(msg.sender, sharesToBurn, assets);
     }
 
     function currentEpoch() public view returns (uint256) {
+        // Epoch 0 = deployment day, epoch 1 = next day, etc.
         return (block.timestamp - DEPLOY_TIMESTAMP) / EPOCH_LENGTH;
     }
 
@@ -286,8 +289,9 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
         if (msg.sender != tradingEngine) revert CallerNotTradingEngine();
         if (amount > totalAssets) revert InsufficientVaultBalance(amount, totalAssets);
 
-        ASSET.safeTransfer(receiver, amount);
+        // Transfers LP liquidity to winning traders (does not affect share price calculation)
         emit PayoutSent(receiver, amount);
+        ASSET.safeTransfer(receiver, amount);
     }
 
     /*//////////////////////////////////////////////////////////////

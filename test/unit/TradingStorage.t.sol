@@ -304,7 +304,7 @@ contract TradingStorageTest is Test {
 
     function test_StoreTrade_StructFieldsPreserved() public {
         vm.prank(tradingEngine);
-        uint32 tradeId = tradingStorage.storeTrade(bob, false, 0, 50, 500 * 10 ** 6, 2_000 * 1e18, 0, 1_800 * 1e18);
+        uint32 tradeId = tradingStorage.storeTrade(bob, false, 0, 50, 500 * 10 ** 6, 2_000 * 1e18, 0, 2_200 * 1e18);
 
         TradingStorage.Trade memory stored = tradingStorage.getTrade(tradeId);
         assertEq(stored.user, bob);
@@ -313,7 +313,7 @@ contract TradingStorageTest is Test {
         assertEq(stored.leverage, 50);
         assertEq(stored.openPrice, 2_000 * 1e18);
         assertEq(stored.tp, 0);
-        assertEq(stored.sl, 1_800 * 1e18);
+        assertEq(stored.sl, 2_200 * 1e18);
         assertEq(stored.timestamp, block.timestamp);
     }
 
@@ -485,6 +485,142 @@ contract TradingStorageTest is Test {
         vm.prank(alice);
         vm.expectRevert(TradingStorage.CallerNotTradingEngine.selector);
         tradingStorage.updateTradeSl(tradeId, 40_000 * 1e18);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                      TP/SL VALIDATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    // --- storeTrade TP validation ---
+
+    function test_StoreTrade_LongTpAbovePrice() public {
+        vm.prank(tradingEngine);
+        uint32 tradeId = tradingStorage.storeTrade(alice, true, 0, 10, DEFAULT_COLLATERAL, DEFAULT_OPEN_PRICE, DEFAULT_OPEN_PRICE + 1, 0);
+        assertEq(tradingStorage.getTrade(tradeId).tp, DEFAULT_OPEN_PRICE + 1);
+    }
+
+    function test_StoreTrade_RevertLongTpAtPrice() public {
+        vm.prank(tradingEngine);
+        vm.expectRevert(abi.encodeWithSelector(TradingStorage.InvalidTp.selector, DEFAULT_OPEN_PRICE, DEFAULT_OPEN_PRICE, true));
+        tradingStorage.storeTrade(alice, true, 0, 10, DEFAULT_COLLATERAL, DEFAULT_OPEN_PRICE, DEFAULT_OPEN_PRICE, 0);
+    }
+
+    function test_StoreTrade_RevertLongTpBelowPrice() public {
+        vm.prank(tradingEngine);
+        vm.expectRevert(abi.encodeWithSelector(TradingStorage.InvalidTp.selector, DEFAULT_OPEN_PRICE - 1, DEFAULT_OPEN_PRICE, true));
+        tradingStorage.storeTrade(alice, true, 0, 10, DEFAULT_COLLATERAL, DEFAULT_OPEN_PRICE, DEFAULT_OPEN_PRICE - 1, 0);
+    }
+
+    function test_StoreTrade_ShortTpBelowPrice() public {
+        vm.prank(tradingEngine);
+        uint32 tradeId = tradingStorage.storeTrade(alice, false, 0, 10, DEFAULT_COLLATERAL, DEFAULT_OPEN_PRICE, DEFAULT_OPEN_PRICE - 1, 0);
+        assertEq(tradingStorage.getTrade(tradeId).tp, DEFAULT_OPEN_PRICE - 1);
+    }
+
+    function test_StoreTrade_RevertShortTpAtPrice() public {
+        vm.prank(tradingEngine);
+        vm.expectRevert(abi.encodeWithSelector(TradingStorage.InvalidTp.selector, DEFAULT_OPEN_PRICE, DEFAULT_OPEN_PRICE, false));
+        tradingStorage.storeTrade(alice, false, 0, 10, DEFAULT_COLLATERAL, DEFAULT_OPEN_PRICE, DEFAULT_OPEN_PRICE, 0);
+    }
+
+    function test_StoreTrade_RevertShortTpAbovePrice() public {
+        vm.prank(tradingEngine);
+        vm.expectRevert(abi.encodeWithSelector(TradingStorage.InvalidTp.selector, DEFAULT_OPEN_PRICE + 1, DEFAULT_OPEN_PRICE, false));
+        tradingStorage.storeTrade(alice, false, 0, 10, DEFAULT_COLLATERAL, DEFAULT_OPEN_PRICE, DEFAULT_OPEN_PRICE + 1, 0);
+    }
+
+    // --- storeTrade SL validation ---
+
+    function test_StoreTrade_LongSlBelowPrice() public {
+        vm.prank(tradingEngine);
+        uint32 tradeId = tradingStorage.storeTrade(alice, true, 0, 10, DEFAULT_COLLATERAL, DEFAULT_OPEN_PRICE, 0, DEFAULT_OPEN_PRICE - 1);
+        assertEq(tradingStorage.getTrade(tradeId).sl, DEFAULT_OPEN_PRICE - 1);
+    }
+
+    function test_StoreTrade_RevertLongSlAtPrice() public {
+        vm.prank(tradingEngine);
+        vm.expectRevert(abi.encodeWithSelector(TradingStorage.InvalidSl.selector, DEFAULT_OPEN_PRICE, DEFAULT_OPEN_PRICE, true));
+        tradingStorage.storeTrade(alice, true, 0, 10, DEFAULT_COLLATERAL, DEFAULT_OPEN_PRICE, 0, DEFAULT_OPEN_PRICE);
+    }
+
+    function test_StoreTrade_RevertLongSlAbovePrice() public {
+        vm.prank(tradingEngine);
+        vm.expectRevert(abi.encodeWithSelector(TradingStorage.InvalidSl.selector, DEFAULT_OPEN_PRICE + 1, DEFAULT_OPEN_PRICE, true));
+        tradingStorage.storeTrade(alice, true, 0, 10, DEFAULT_COLLATERAL, DEFAULT_OPEN_PRICE, 0, DEFAULT_OPEN_PRICE + 1);
+    }
+
+    function test_StoreTrade_ShortSlAbovePrice() public {
+        vm.prank(tradingEngine);
+        uint32 tradeId = tradingStorage.storeTrade(alice, false, 0, 10, DEFAULT_COLLATERAL, DEFAULT_OPEN_PRICE, 0, DEFAULT_OPEN_PRICE + 1);
+        assertEq(tradingStorage.getTrade(tradeId).sl, DEFAULT_OPEN_PRICE + 1);
+    }
+
+    function test_StoreTrade_RevertShortSlAtPrice() public {
+        vm.prank(tradingEngine);
+        vm.expectRevert(abi.encodeWithSelector(TradingStorage.InvalidSl.selector, DEFAULT_OPEN_PRICE, DEFAULT_OPEN_PRICE, false));
+        tradingStorage.storeTrade(alice, false, 0, 10, DEFAULT_COLLATERAL, DEFAULT_OPEN_PRICE, 0, DEFAULT_OPEN_PRICE);
+    }
+
+    function test_StoreTrade_RevertShortSlBelowPrice() public {
+        vm.prank(tradingEngine);
+        vm.expectRevert(abi.encodeWithSelector(TradingStorage.InvalidSl.selector, DEFAULT_OPEN_PRICE - 1, DEFAULT_OPEN_PRICE, false));
+        tradingStorage.storeTrade(alice, false, 0, 10, DEFAULT_COLLATERAL, DEFAULT_OPEN_PRICE, 0, DEFAULT_OPEN_PRICE - 1);
+    }
+
+    // --- storeTrade with both TP and SL ---
+
+    function test_StoreTrade_LongWithBothTpAndSl() public {
+        vm.prank(tradingEngine);
+        uint32 tradeId = tradingStorage.storeTrade(alice, true, 0, 10, DEFAULT_COLLATERAL, DEFAULT_OPEN_PRICE, DEFAULT_TP, DEFAULT_SL);
+        TradingStorage.Trade memory t = tradingStorage.getTrade(tradeId);
+        assertEq(t.tp, DEFAULT_TP);
+        assertEq(t.sl, DEFAULT_SL);
+    }
+
+    function test_StoreTrade_ShortWithBothTpAndSl() public {
+        uint128 shortTp = DEFAULT_OPEN_PRICE - 5_000 * 1e18;
+        uint128 shortSl = DEFAULT_OPEN_PRICE + 5_000 * 1e18;
+        vm.prank(tradingEngine);
+        uint32 tradeId = tradingStorage.storeTrade(alice, false, 0, 10, DEFAULT_COLLATERAL, DEFAULT_OPEN_PRICE, shortTp, shortSl);
+        TradingStorage.Trade memory t = tradingStorage.getTrade(tradeId);
+        assertEq(t.tp, shortTp);
+        assertEq(t.sl, shortSl);
+    }
+
+    // --- updateTradeTp validation ---
+
+    function test_UpdateTradeTp_RevertLongTpBelowPrice() public {
+        vm.startPrank(tradingEngine);
+        uint32 tradeId = _storeTrade(alice);
+        vm.expectRevert(abi.encodeWithSelector(TradingStorage.InvalidTp.selector, DEFAULT_OPEN_PRICE - 1, DEFAULT_OPEN_PRICE, true));
+        tradingStorage.updateTradeTp(tradeId, DEFAULT_OPEN_PRICE - 1);
+        vm.stopPrank();
+    }
+
+    function test_UpdateTradeTp_RevertShortTpAbovePrice() public {
+        vm.startPrank(tradingEngine);
+        uint32 tradeId = tradingStorage.storeTrade(alice, false, 0, 10, DEFAULT_COLLATERAL, DEFAULT_OPEN_PRICE, DEFAULT_OPEN_PRICE - 1, 0);
+        vm.expectRevert(abi.encodeWithSelector(TradingStorage.InvalidTp.selector, DEFAULT_OPEN_PRICE + 1, DEFAULT_OPEN_PRICE, false));
+        tradingStorage.updateTradeTp(tradeId, DEFAULT_OPEN_PRICE + 1);
+        vm.stopPrank();
+    }
+
+    // --- updateTradeSl validation ---
+
+    function test_UpdateTradeSl_RevertLongSlAbovePrice() public {
+        vm.startPrank(tradingEngine);
+        uint32 tradeId = _storeTrade(alice);
+        vm.expectRevert(abi.encodeWithSelector(TradingStorage.InvalidSl.selector, DEFAULT_OPEN_PRICE + 1, DEFAULT_OPEN_PRICE, true));
+        tradingStorage.updateTradeSl(tradeId, DEFAULT_OPEN_PRICE + 1);
+        vm.stopPrank();
+    }
+
+    function test_UpdateTradeSl_RevertShortSlBelowPrice() public {
+        vm.startPrank(tradingEngine);
+        uint32 tradeId = tradingStorage.storeTrade(alice, false, 0, 10, DEFAULT_COLLATERAL, DEFAULT_OPEN_PRICE, 0, DEFAULT_OPEN_PRICE + 1);
+        vm.expectRevert(abi.encodeWithSelector(TradingStorage.InvalidSl.selector, DEFAULT_OPEN_PRICE - 1, DEFAULT_OPEN_PRICE, false));
+        tradingStorage.updateTradeSl(tradeId, DEFAULT_OPEN_PRICE - 1);
+        vm.stopPrank();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -785,7 +921,7 @@ contract TradingStorageTest is Test {
     }
 
     function testFuzz_OpenInterest(uint256 increaseAmount, uint256 decreaseAmount) public {
-        increaseAmount = bound(increaseAmount, 1, type(uint128).max);
+        increaseAmount = bound(increaseAmount, 1, 10_000_000 * 1e18); // Bounded to pair maxOI
         decreaseAmount = bound(decreaseAmount, 0, increaseAmount);
 
         vm.startPrank(tradingEngine);
