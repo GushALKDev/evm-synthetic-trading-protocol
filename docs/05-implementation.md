@@ -95,17 +95,9 @@ struct Pair {
 }
 ```
 
-### Oracle Validated Price Struct
+### Oracle Price
 
-```solidity
-/// @notice Validated price output from OracleAggregator
-/// @dev Pyth raw price is normalized to 18 decimals. Confidence is preserved for risk management.
-struct ValidatedPrice {
-    uint128 price;          // Normalized price (18 decimals)
-    uint128 confidence;     // Pyth confidence interval (18 decimals)
-    uint64 publishTime;     // Pyth publish timestamp
-}
-```
+The oracle returns a single `uint128 price18` (normalized to 18 decimals). Confidence and staleness checks are handled internally by the oracle implementation — the consumer only receives a validated price.
 
 ---
 
@@ -242,52 +234,25 @@ interface ITradingEngine {
 > **TP/SL price-dependent validations (Phase 3):**
 > `openTrade`, `updateTakeProfit`, and `updateStopLoss` must validate that the TP/SL has not already been triggered at the current oracle price. For example, a LONG with `oraclePrice = 80,000` must reject `sl = 90,000` because the keeper would execute immediately at 80k — worse than the 90k the user intended. Similarly, a TP already surpassed is rejected so the user can raise it or close at market. These validations live in TradingEngine (requires oracle access), while TradingStorage retains its structural checks (`tp > openPrice` for longs, etc.) as a defense-in-depth layer.
 
-### IOracleAggregator.sol
+### IOracle.sol
 
 ```solidity
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-interface IOracleAggregator {
-    /*//////////////////////////////////////////////////////////////
-                                ERRORS
-    //////////////////////////////////////////////////////////////*/
-
-    error StalePrice(uint64 publishTime, uint256 maxStaleness);
-    error ConfidenceTooWide(uint128 confidence, uint128 price, uint256 maxBps);
-    error PriceDeviationTooHigh(uint256 pythPrice, uint256 chainlinkPrice, uint256 maxDeviation);
-    error ZeroPrice();
-    error InvalidPythFee();
-
-    /*//////////////////////////////////////////////////////////////
-                            PRICE FUNCTIONS
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Validate and return Pyth price with Chainlink deviation check
-    /// @dev Caller must send ETH to cover Pyth update fee. Reverts if:
-    ///      - Pyth price is stale (> MAX_STALENESS)
-    ///      - Confidence interval is too wide (> MAX_CONFIDENCE_BPS)
-    ///      - Deviation from Chainlink exceeds MAX_DEVIATION
-    ///      Chainlink is NOT a fallback — stale Pyth always reverts.
-    /// @param priceUpdate Signed price data from Pyth Hermes API
-    /// @param pairIndex Index of the trading pair
-    /// @return price Validated price (18 decimals)
-    function getValidatedPrice(bytes[] calldata priceUpdate, uint16 pairIndex) external payable returns (uint128 price);
-
-    /// @notice Get the Pyth update fee for a given price update
-    /// @param priceUpdate The price update bytes
-    /// @return fee The fee in native token (wei)
-    function getUpdateFee(bytes[] calldata priceUpdate) external view returns (uint256 fee);
-
-    /// @notice Get price with spread applied for execution (future: Phase 4)
-    /// @param priceUpdate Signed price data from Pyth Hermes API
-    /// @param pairIndex Index of the trading pair
-    /// @param isLong Direction of the trade
-    /// @param isOpen Whether this is an open or close
-    /// @return executionPrice Price with spread applied (18 decimals)
-    function getExecutionPrice(bytes[] calldata priceUpdate, uint16 pairIndex, bool isLong, bool isOpen) external payable returns (uint128 executionPrice);
+interface IOracle {
+    /// @notice Get a validated price for a trading pair
+    /// @dev Implementation-specific: may use Pyth, Chainlink, or any other source.
+    ///      NOT payable — if the oracle needs ETH (e.g., Pyth fees), it self-funds from its own balance.
+    ///      `priceData` is used by pull-based oracles (e.g., Pyth); push-based oracles ignore it.
+    /// @param pairIndex The pair index to get price for
+    /// @param priceData Oracle-specific signed price data (empty for push-based oracles)
+    /// @return price18 Validated price normalized to 18 decimals
+    function getPrice(uint256 pairIndex, bytes[] calldata priceData) external returns (uint128 price18);
 }
 ```
+
+> **Technology-agnostic design:** `IOracle` decouples the protocol from any specific oracle provider. The current implementation (`PythChainlinkOracle.sol`) uses Pyth as primary source with Chainlink as deviation anchor. Swapping oracle providers only requires deploying a new `IOracle` implementation and updating the address — TradingEngine never changes.
 
 ---
 

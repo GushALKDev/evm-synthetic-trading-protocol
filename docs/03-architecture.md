@@ -28,7 +28,7 @@ graph TD
 
     subgraph Core System
         Engine -->|Read/Write| Storage[TradingStorage.sol]
-        Engine -->|Validate Price| Oracle[OracleAggregator.sol]
+        Engine -->|Validate Price| Oracle[PythChainlinkOracle.sol]
         Engine -->|Request Funds| Vault
         Vault -->|Check Health| Solvency[SolvencyManager.sol]
     end
@@ -89,7 +89,7 @@ graph TD
 │             │                        └────────────┘ └────────────┘  │
 │             │                                                       │
 │  ┌──────────┴────────────┐                                          │
-│  │  ORACLE AGGREGATOR    │◄──── Pyth Network (Primary, Pull Model)  │
+│  │  PYTH+CHAINLINK ORACLE│◄──── Pyth Network (Primary, Pull Model)  │
 │  │  (Price Validation)   │                                          │
 │  │                       │      ┌────────────────────────────────┐  │
 │  │  • Pyth price + conf  │◄─────│  CHAINLINK FEED (Deviation     │  │
@@ -120,7 +120,7 @@ sequenceDiagram
     participant Hermes as Pyth Hermes (Off-chain)
     participant User
     participant Engine as TradingEngine
-    participant Oracle as OracleAggregator
+    participant Oracle as PythChainlinkOracle
     participant Pyth as Pyth Contract
     participant CL as Chainlink Feed
 
@@ -129,7 +129,7 @@ sequenceDiagram
     Frontend->>User: Include priceUpdate in tx calldata
 
     User->>Engine: openTrade(pair, collateral, ..., priceUpdate)
-    Engine->>Oracle: getValidatedPrice(priceUpdate, pairIndex)
+    Engine->>Oracle: getPrice(pairIndex, priceUpdate)
 
     Oracle->>Pyth: updatePriceFeeds{value: fee}(priceUpdate)
     Pyth-->>Oracle: Price verified (Wormhole signature valid)
@@ -192,7 +192,7 @@ The original architecture (v1.0) specified a custom Decentralized Oracle Network
 
 #### Option A: Custom DON (6-8 nodes) — Original Design
 
-**How it works:** 6-8 independent nodes connect to CEX WebSocket APIs (Binance, Coinbase, Kraken, etc.), compute median prices, sign and submit them on-chain. An OracleAggregator contract receives these prices, validates each against Chainlink (reject if >1.5% deviation), waits for minimum 3 valid answers, and returns the median.
+**How it works:** 6-8 independent nodes connect to CEX WebSocket APIs (Binance, Coinbase, Kraken, etc.), compute median prices, sign and submit them on-chain. An oracle aggregator contract receives these prices, validates each against Chainlink (reject if >1.5% deviation), waits for minimum 3 valid answers, and returns the median.
 
 **Pros:**
 
@@ -215,7 +215,7 @@ The original architecture (v1.0) specified a custom Decentralized Oracle Network
 
 **Pros:**
 
-- **~2-3 weeks integration effort** (install SDK, wrap in OracleAggregator, add checks)
+- **~2-3 weeks integration effort** (install SDK, implement IOracle, add checks)
 - **Near-zero operational cost** (users pay ~$0.01 per price update on L2)
 - 128+ first-party publishers with Oracle Integrity Staking (slashing)
 - Confidence intervals enable dynamic risk management
@@ -248,13 +248,13 @@ The original architecture (v1.0) specified a custom Decentralized Oracle Network
 
 Chainlink is specifically NOT a fallback for stale Pyth prices. In a protocol supporting up to 100x leverage, executing a trade with a high-latency fallback price (Chainlink heartbeat can be 1-60 seconds) would expose traders and LPs to unfair execution. If Pyth is stale, the trade simply reverts — the user retries with a fresh price.
 
-The `OracleAggregator` abstraction layer allows adding new oracle backends (e.g., Chainlink Data Streams, a custom DON) in the future without modifying the TradingEngine.
+The `IOracle` interface abstraction allows adding new oracle backends (e.g., Chainlink Data Streams, a custom DON) in the future — just deploy a new `IOracle` implementation and update the address. TradingEngine never changes.
 
 ### Consequences
 
 - Phase 3 reduced from ~3 months to ~3 weeks
 - Engineering effort focused on core protocol features (Phases 4-8)
-- TradingEngine functions that need prices must accept `bytes[] calldata priceUpdate` and be `payable`
+- TradingEngine functions that need prices must accept `bytes[] calldata priceUpdate` (not payable — oracle self-funds fees)
 - Frontend must integrate with Pyth Hermes API
 - Keeper bots (liquidations, TP/SL execution) must also fetch and submit Pyth price updates
 
@@ -333,30 +333,37 @@ uint256 public cumulativeFundingIndex;
 uint256 public lastFundingTime;
 ```
 
-### 4.4 `OracleAggregator.sol`
+### 4.4 `PythChainlinkOracle.sol` (implements `IOracle`)
 
-**Role:** Validates Pyth prices with staleness, confidence, and Chainlink deviation checks.
+**Role:** Validates Pyth prices with staleness, confidence, and Chainlink deviation checks. Self-funds Pyth fees from its own ETH balance.
 
-| Function                                    | Description                                                                    |
-| :------------------------------------------ | :----------------------------------------------------------------------------- |
-| `getValidatedPrice(priceUpdate, pairIndex)` | Updates Pyth price on-chain, validates, returns normalized price (18 decimals) |
-| `getPairFeedId(pairIndex)`                  | Returns Pyth feed ID for a pair                                                |
+| Function                                | Description                                                                    |
+| :-------------------------------------- | :----------------------------------------------------------------------------- |
+| `getPrice(pairIndex, priceData)`        | Updates Pyth price on-chain, validates, returns normalized price (18 decimals) |
+| `getPairFeed(pairIndex)`                | Returns PairFeed config for a pair                                             |
+
+**Interface:** `IOracle { getPrice(uint256 pairIndex, bytes[] calldata priceData) → uint128 price18 }` — technology-agnostic. TradingEngine only depends on this interface, not the implementation.
 
 **Validation pipeline (all checks must pass or transaction reverts):**
 
 ```solidity
+// 0. Compute fee and pay from own ETH balance
+uint256 fee = PYTH.getUpdateFee(priceData);
+if (address(this).balance < fee) revert InsufficientEthForFee();
+
 // 1. Update Pyth price on-chain (user-submitted signed data)
-pyth.updatePriceFeeds{value: fee}(priceUpdate);
+PYTH.updatePriceFeeds{value: fee}(priceData);
 
 // 2. Read price with staleness check (reverts if stale)
-PythStructs.Price memory price = pyth.getPriceNoOlderThan(feedId, MAX_STALENESS);
+PythStructs.Price memory price = PYTH.getPriceUnsafe(feed.pythFeedId);
+if (block.timestamp - price.publishTime > MAX_STALENESS) revert StalePrice();
 
 // 3. Reject if confidence interval too wide
 if (price.conf * BPS_DENOMINATOR / uint64(abs(price.price)) > MAX_CONFIDENCE_BPS)
     revert ConfidenceTooWide();
 
 // 4. Chainlink deviation anchor (NOT a fallback — circuit breaker only)
-uint256 chainlinkPrice = _getChainlinkPrice(pairIndex);
+uint256 chainlinkPrice = _getChainlinkPrice18(feed.chainlinkFeed, feed.chainlinkHeartbeat);
 uint256 deviation = _calculateDeviation(pythPrice, chainlinkPrice);
 if (deviation > MAX_DEVIATION) revert PriceDeviationTooHigh();
 ```
@@ -392,7 +399,7 @@ if (deviation > MAX_DEVIATION) revert PriceDeviationTooHigh();
 
 ## 5. Detailed Execution Flows
 
-> **Note:** All trading functions that require a price accept `bytes[] calldata priceUpdate` as a parameter. The frontend fetches signed price data from Pyth Hermes API and includes it in the transaction calldata (pull oracle model). Functions are `payable` to cover the Pyth update fee.
+> **Note:** All trading functions that require a price accept `bytes[] calldata priceUpdate` as a parameter. The frontend fetches signed price data from Pyth Hermes API and includes it in the transaction calldata (pull oracle model). TradingEngine is NOT payable — the oracle implementation (PythChainlinkOracle) self-funds Pyth fees from its own ETH balance.
 
 ### 5.1 Open Trade Flow
 
@@ -402,7 +409,7 @@ sequenceDiagram
     participant Hermes as Pyth Hermes
     participant User
     participant Trading as TradingEngine
-    participant Oracle as OracleAggregator
+    participant Oracle as PythChainlinkOracle
     participant Pyth as Pyth Contract
     participant CL as Chainlink Feed
     participant Storage as TradingStorage
@@ -413,7 +420,7 @@ sequenceDiagram
 
     User->>Trading: openTrade{value: fee}(pair, 100 USDC, 10x, Long, priceUpdate)
 
-    Trading->>Oracle: getValidatedPrice(priceUpdate, pairIndex)
+    Trading->>Oracle: getPrice(pairIndex, priceUpdate)
     Oracle->>Pyth: updatePriceFeeds{value: fee}(priceUpdate)
     Oracle->>Pyth: getPriceNoOlderThan(feedId, MAX_STALENESS)
     Pyth-->>Oracle: PythPrice(price, conf, expo, publishTime)
@@ -443,7 +450,7 @@ sequenceDiagram
     participant Hermes as Pyth Hermes
     participant User
     participant Trading as TradingEngine
-    participant Oracle as OracleAggregator
+    participant Oracle as PythChainlinkOracle
     participant Storage as TradingStorage
     participant Vault
 
@@ -457,7 +464,7 @@ sequenceDiagram
 
     Trading->>Trading: Verify msg.sender == owner
 
-    Trading->>Oracle: getValidatedPrice(priceUpdate, pairIndex)
+    Trading->>Oracle: getPrice(pairIndex, priceUpdate)
     Oracle-->>Trading: exitPrice = 52,000 USD (validated)
 
     Trading->>Trading: Calculate PnL:<br/>- Raw PnL = +400 USDC<br/>- After fees = +384 USDC<br/>- Payout = 484 USDC
@@ -481,7 +488,7 @@ sequenceDiagram
     participant Hermes as Pyth Hermes
     participant Bot as Liquidator Bot
     participant Trading as TradingEngine
-    participant Oracle as OracleAggregator
+    participant Oracle as PythChainlinkOracle
     participant Storage as TradingStorage
     participant Vault
 
@@ -494,7 +501,7 @@ sequenceDiagram
     Trading->>Storage: getTrade(tradeId)
     Storage-->>Trading: trade{...}
 
-    Trading->>Oracle: getValidatedPrice(priceUpdate, pairIndex)
+    Trading->>Oracle: getPrice(pairIndex, priceUpdate)
     Oracle-->>Trading: currentPrice (validated)
 
     Trading->>Trading: Calculate loss %

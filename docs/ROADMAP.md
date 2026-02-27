@@ -23,18 +23,18 @@ Each phase should be completed before moving to the next. Within each phase, the
 | 0         | Setup & Infrastructure    | 6      | 0         | 0%       |
 | 1         | Core: Vault               | 8      | 8         | 100%     |
 | 2         | Core: Trading Engine      | 12     | 12        | 100%     |
-| 3         | Oracle (Pyth + Chainlink) | 12     | 0         | 0%       |
+| 3         | Oracle (Pyth + Chainlink) | 10     | 10        | 100%     |
 | 4         | Fee System                | 5      | 0         | 0%       |
 | 5         | Funding Rates             | 4      | 0         | 0%       |
 | 6         | Risk Control (OI)         | 6      | 0         | 0%       |
-| 7         | Liquidations              | 6      | 0         | 0%       |
+| 7         | Liquidations              | 8      | 0         | 0%       |
 | 8         | Limit Orders (TP/SL)      | 5      | 0         | 0%       |
 | 9         | Solvency (Assistant Fund) | 5      | 0         | 0%       |
 | 10        | Solvency (Bonding)        | 6      | 0         | 0%       |
 | 11        | Governance Token          | 4      | 0         | 0%       |
 | 12        | Testing & Audit           | 8      | 0         | 0%       |
 | 13        | V2 Improvements           | 7      | 0         | 0%       |
-| **TOTAL** |                           | **94** | **20**    | **21%**  |
+| **TOTAL** |                           | **94** | **30**    | **32%**  |
 
 ---
 
@@ -128,38 +128,36 @@ Each phase should be completed before moving to the next. Within each phase, the
 >
 > **Dependencies:** Phase 2
 
-- [ ] **3.1** Contract `OracleAggregator.sol` (Pyth + Chainlink wrapper)
-- [ ] **3.2** Pyth integration (pull model)
-    - [ ] 3.2.1 `updatePriceFeeds()` with user-submitted signed data
-    - [ ] 3.2.2 `getPriceNoOlderThan()` with staleness check
-    - [ ] 3.2.3 Confidence interval validation
-- [ ] **3.3** Chainlink integration (deviation anchor only, NOT fallback)
-    - [ ] 3.3.1 Read `latestRoundData()` as reference price
-    - [ ] 3.3.2 Deviation check: revert if `|pythPrice - chainlinkPrice| > MAX_DEVIATION`
-- [ ] **3.4** Price normalization to 18 decimals (Pyth expo + Chainlink 8 dec)
-- [ ] **3.5** Pair feed mapping (`pairIndex → pythFeedId + chainlinkFeed`)
-- [ ] **3.6** Update TradingEngine to accept `bytes[] calldata priceUpdate` + `payable`
-    - [ ] 3.6.1 `openTrade` signature: add `priceUpdate`, remove `_openPrice` param (oracle provides it)
-    - [ ] 3.6.2 `closeTrade` signature: add `priceUpdate`, remove `_closePrice` param
-    - [ ] 3.6.3 `updateTp`/`updateSl`: add `priceUpdate` to validate TP/SL not already reached at current price
-    - [ ] 3.6.4 Forward `msg.value` to OracleAggregator for Pyth update fee
-    - [ ] 3.6.5 Refund excess ETH from Pyth fee to `msg.sender`
-- [ ] **3.7** Price-dependent validations (deferred from Phase 2)
-    - [ ] 3.7.1 Validate TP/SL not already triggered on `openTrade` against execution price (e.g. Long: TP > oraclePrice, SL < oraclePrice)
-    - [ ] 3.7.2 Validate TP/SL not already triggered on `updateTp`/`updateSl` against current oracle price — revert in both cases (SL: protects user from keeper executing at worse price; TP: avoids silent instant close, user should raise TP or close at market)
-    - [ ] 3.7.3 Reject positions that are pre-liquidable after spread application (loss at entry >= LIQUIDATION_THRESHOLD)
-    - [ ] 3.7.4 Dynamic spread on execution price: `P_execution = P_oracle × (1 ± spread)`
-    - [ ] 3.7.5 Use confidence interval for conservative pricing on liquidation checks (`price - conf` for longs, `price + conf` for shorts)
-- [ ] **3.8** TradingStorage adaptations
-    - [ ] 3.8.1 `_validateTp`/`_validateSl` validate against execution price instead of openPrice (or move validation to TradingEngine)
-    - [ ] 3.8.2 Evaluate OI tracking: nominal (current: `collateral × leverage`) vs USD-denominated (`collateral × leverage × price / 1e18`)
-- [ ] **3.9** Pyth fee handling
-    - [ ] 3.9.1 TradingEngine must be `payable` or receive ETH for Pyth fees
-    - [ ] 3.9.2 Consider who pays the fee (user via `msg.value`, or protocol treasury)
-    - [ ] 3.9.3 `receive()` function if protocol subsidizes fees
-- [ ] **3.10** Mock Oracle for local tests (simulates Pyth interface)
-- [ ] **3.11** Aggregator tests (staleness, confidence, deviation, edge cases)
-- [ ] **3.12** Update TradingEngine tests for oracle integration (mock price feeds, fee forwarding)
+- [x] **3.1** Contract `PythChainlinkOracle.sol` (IOracle implementation — Pyth + Chainlink)
+- [x] **3.2** Pyth integration (pull model)
+    - [x] 3.2.1 `updatePriceFeeds()` with user-submitted signed data
+    - [x] 3.2.2 `getPriceUnsafe()` with manual staleness check (MAX_STALENESS = 30s)
+    - [x] 3.2.3 Confidence interval validation (MAX_CONFIDENCE_BPS = 200 / 2%)
+- [x] **3.3** Chainlink integration (deviation anchor only, NOT fallback)
+    - [x] 3.3.1 Read `latestRoundData()` as reference price with heartbeat staleness check
+    - [x] 3.3.2 Deviation check: revert if `|pythPrice - chainlinkPrice| > MAX_DEVIATION_BPS` (300 / 3%)
+- [x] **3.4** Price normalization to 18 decimals (Pyth expo via PythUtils.convertToUint + Chainlink 8→18 dec)
+- [x] **3.5** Pair feed mapping (`pairIndex → PairFeed{pythFeedId, chainlinkFeed, heartbeat, active}`)
+- [x] **3.6** Update TradingEngine to accept `bytes[] calldata priceUpdate`
+    - [x] 3.6.1 `openTrade` signature: add `priceUpdate`, `_openPrice` renamed to `_expectedPrice` (oracle provides execution price)
+    - [x] 3.6.2 `closeTrade` signature: add `priceUpdate`, `_closePrice` renamed to `_expectedPrice`
+    - [x] 3.6.3 `updateTp`/`updateSl`: add `priceUpdate` to validate TP/SL not already reached at current price
+    - [x] 3.6.4 Oracle self-funds Pyth fees from its own ETH balance (via `receive()`)
+    - [x] 3.6.5 TradingEngine uses `IOracle` interface — no fee logic or `receive()`
+- [x] **3.7** Price-dependent validations
+    - [x] 3.7.1 Validate TP/SL not already triggered on `openTrade` against oracle price
+    - [x] 3.7.2 Validate TP/SL not already triggered on `updateTp`/`updateSl` against oracle price
+    - [x] 3.7.4 Fixed base spread on execution price: `P_execution = P_oracle × (1 ± BASE_SPREAD_BPS/10000)` (5 bps)
+- [x] **3.8** TradingStorage adaptations
+    - [x] 3.8.1 Storage validates TP/SL against openPrice (execution price with spread baked in); Engine validates against oracle price
+    - [x] 3.8.2 OI tracking kept as nominal (`collateral × leverage × 1e12`), unchanged
+- [x] **3.9** Pyth fee handling
+    - [x] 3.9.1 Oracle has `receive() external payable` for ETH funding
+    - [x] 3.9.2 Oracle self-pays Pyth fees from own balance (protocol subsidizes)
+    - [x] 3.9.3 `InsufficientEthForFee` error on oracle if balance too low
+- [x] **3.10** Mock Oracle for local tests (MockOracle + MockChainlinkFeed)
+- [x] **3.11** Oracle tests (31 tests: staleness, confidence, deviation, normalization, receive ETH, fuzz)
+- [x] **3.12** Update TradingEngine tests for oracle integration (76 tests: spread, TP/SL oracle validation, all PnL recalculated)
 
 **Deliverables:**
 
@@ -248,7 +246,9 @@ Each phase should be completed before moving to the next. Within each phase, the
 - [ ] **7.3** Liquidation condition verification (loss >= 90%)
 - [ ] **7.4** Remaining collateral distribution (liquidator vs vault)
 - [ ] **7.5** Liquidator reward (10% of remainder)
-- [ ] **7.6** Liquidation tests (edge case fuzzing)
+- [ ] **7.6** Reject positions that are pre-liquidable after spread application (moved from Phase 3)
+- [ ] **7.7** Confidence-based conservative pricing for liquidation checks (moved from Phase 3)
+- [ ] **7.8** Liquidation tests (edge case fuzzing)
 
 **Deliverables:**
 
@@ -394,6 +394,8 @@ Each phase should be completed before moving to the next. Within each phase, the
 
 | Date       | Changes                 |
 | :--------- | :---------------------- |
+| 2026-02-27 | Phase 3: Oracle abstraction — IOracle interface, OracleAggregator→PythChainlinkOracle, TradingEngine decoupled from oracle impl |
+| 2026-02-26 | Phase 3: OracleAggregator + TradingEngine oracle integration complete (12/12) |
 | 2026-02-25 | Phase 3: Redesigned oracle from custom DON to Pyth + Chainlink (see ADR) |
 | 2026-02-25 | Phase 2: TradingEngine.sol complete (2.2, 2.4-2.11) |
 | 2026-02-07 | Phase 2: TradingStorage.sol + Pair struct complete (2.1, 2.3) |

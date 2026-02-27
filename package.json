@@ -19,5 +19,8 @@
     "prettier": "^3.8.1",
     "prettier-plugin-solidity": "^2.2.1",
     "solhint": "^6.0.3"
+  },
+  "dependencies": {
+    "@pythnetwork/pyth-sdk-solidity": "^4.3.1"
   }
 }

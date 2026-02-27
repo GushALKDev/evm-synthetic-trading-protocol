@@ -187,7 +187,7 @@ If the oracle can be manipulated, an attacker could:
 | **Circuit Breakers** | If price moves >X% in 1 block, pause system |
 
 ```solidity
-// Validation pipeline in OracleAggregator
+// Validation pipeline in PythChainlinkOracle
 // 1. Pyth staleness (reverts if stale — no Chainlink fallback)
 PythStructs.Price memory price = pyth.getPriceNoOlderThan(feedId, MAX_STALENESS);
 

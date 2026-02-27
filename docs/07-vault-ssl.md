@@ -509,7 +509,7 @@ function openTrade(...) external {
 | **LiquidityVault.sol** | Custodies LP funds, central counterparty | ERC-4626 |
 | **TradingEngine.sol** | Executes trades, calculates PnL | Business Logic |
 | **TradingStorage.sol** | Stores trades and OI | State Layer |
-| **OracleAggregator.sol** | Validates Pyth prices with Chainlink anchor | Pyth + Chainlink |
+| **PythChainlinkOracle.sol** | Validates Pyth prices with Chainlink anchor (implements IOracle) | Pyth + Chainlink |
 | **OIManager.sol** | Calculates max OI based on volatility | Adaptive OI |
 | **AssistantFund.sol** | Emergency reserve in USDC | Treasury |
 | **BondDepository.sol** | Sells $SYNTH at discount | Bonding Mechanism |

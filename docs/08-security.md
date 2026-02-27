@@ -38,7 +38,7 @@
 |:---|:---|:---|:---|\
 | Vault USDC | `LiquidityVault.sol` | Total TVL | Access control, CEI |
 | Trade Data | `TradingStorage.sol` | Integrity | Only TradingEngine writes |
-| Oracle Prices | `OracleAggregator.sol` | Fairness | Pyth (128+ publishers) + Chainlink deviation anchor |
+| Oracle Prices | `PythChainlinkOracle.sol` | Fairness | Pyth (128+ publishers) + Chainlink deviation anchor |
 | $SYNTH Token | `SynthToken.sol` | Market value | Controlled minter role |
 | Admin Keys | External multisig | Entire system | Timelock, 3/5 threshold |
 
@@ -140,11 +140,11 @@ for (trade in allTrades) {
 
 ```solidity
 // INV-7: Validated price is never 0
-assert(oracle.getValidatedPrice(priceUpdate, pairIndex) > 0);
+assert(oracle.getPrice(pairIndex, priceUpdate) > 0);
 
 // INV-8: Pyth price doesn't deviate more than MAX_DEVIATION from Chainlink
-// (enforced by OracleAggregator — reverts if exceeded)
-uint256 pythPrice = oracle.getValidatedPrice(priceUpdate, pairIndex);
+// (enforced by PythChainlinkOracle — reverts if exceeded)
+uint256 pythPrice = oracle.getPrice(pairIndex, priceUpdate);
 uint256 clPrice = chainlink.latestAnswer();
 uint256 deviation = abs(pythPrice - clPrice) * 1e18 / clPrice;
 assert(deviation <= MAX_DEVIATION);
@@ -383,7 +383,7 @@ function emergencyWithdraw() external {
 | LiquidityVault.sol | Critical |
 | TradingEngine.sol | Critical |
 | TradingStorage.sol | High |
-| OracleAggregator.sol | Critical |
+| PythChainlinkOracle.sol | Critical |
 | SolvencyManager.sol | Critical |
 | AssistantFund.sol | High |
 | BondDepository.sol | High |
