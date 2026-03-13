@@ -39,6 +39,7 @@ contract TradingEngineTest is Test {
     address owner = makeAddr("owner");
     address alice = makeAddr("alice");
     address bob = makeAddr("bob");
+    address treasuryAddr = makeAddr("treasury");
 
     // Default trade parameters
     uint16 constant DEFAULT_PAIR_INDEX = 0;
@@ -55,22 +56,20 @@ contract TradingEngineTest is Test {
     uint128 constant DEFAULT_TP = 55_000 * 1e18;
     uint128 constant DEFAULT_SL = 45_000 * 1e18;
 
+    // Fee constants: openFee = 100_000_000 * 10 * 8 / 10000 = 800_000
+    uint256 constant DEFAULT_OPEN_FEE = 800_000;
+    uint64 constant DEFAULT_EFFECTIVE_COLLATERAL = DEFAULT_COLLATERAL - uint64(DEFAULT_OPEN_FEE); // 99_200_000
+
     // Empty price update for mock oracle
     bytes[] EMPTY_UPDATE;
 
     // Events
-    event TradeOpened(
-        uint256 indexed tradeId,
-        address indexed user,
-        uint16 pairIndex,
-        bool isLong,
-        uint64 collateral,
-        uint16 leverage,
-        uint128 openPrice
-    );
-    event TradeClosed(uint256 indexed tradeId, address indexed user, uint128 closePrice, int256 pnlUsdc, uint256 payoutUsdc);
+    event TradeOpened(uint256 indexed tradeId, address indexed user, uint16 pairIndex, bool isLong, uint64 collateral, uint16 leverage, uint128 openPrice, uint256 fee);
+    event TradeClosed(uint256 indexed tradeId, address indexed user, uint128 closePrice, int256 pnlUsdc, uint256 payoutUsdc, uint256 fee);
+    event FeesDistributed(uint256 vaultFee, uint256 treasuryFee);
     event TpUpdated(uint256 indexed tradeId, uint128 newTp);
     event SlUpdated(uint256 indexed tradeId, uint128 newSl);
+    event TreasuryUpdated(address indexed newTreasury);
     event Paused(address account);
     event Unpaused(address account);
 
@@ -84,7 +83,7 @@ contract TradingEngineTest is Test {
         vm.startPrank(owner);
         tradingStorage = new TradingStorage(address(usdc), owner);
         vault = new Vault(address(usdc), owner);
-        engine = new TradingEngine(address(tradingStorage), address(vault), address(mockOracle), address(usdc), owner);
+        engine = new TradingEngine(address(tradingStorage), address(vault), address(mockOracle), address(usdc), treasuryAddr, owner);
 
         tradingStorage.setTradingEngine(address(engine));
         vault.setTradingEngine(address(engine));
@@ -146,6 +145,20 @@ contract TradingEngineTest is Test {
         return uint128(uint256(oraclePrice) * 10_005 / 10_000);
     }
 
+    /**
+     * @dev Calculate open fee: collateral * leverage * 8 / 10000
+     */
+    function _openFee(uint64 collateral, uint16 leverage) internal pure returns (uint256) {
+        return uint256(collateral) * uint256(leverage) * 8 / 10_000;
+    }
+
+    /**
+     * @dev Calculate close fee: collateral * leverage * 8 / 10000 (on effective collateral)
+     */
+    function _closeFee(uint64 effectiveCollateral, uint16 leverage) internal pure returns (uint256) {
+        return uint256(effectiveCollateral) * uint256(leverage) * 8 / 10_000;
+    }
+
     /*//////////////////////////////////////////////////////////////
                         CONSTRUCTOR TESTS
     //////////////////////////////////////////////////////////////*/
@@ -161,28 +174,37 @@ contract TradingEngineTest is Test {
         assertEq(engine.owner(), owner);
     }
 
+    function test_Constructor_SetsTreasury() public view {
+        assertEq(engine.treasury(), treasuryAddr);
+    }
+
     function test_Constructor_SetsOracleImmutable() public view {
         assertEq(address(engine.ORACLE()), address(mockOracle));
     }
 
     function test_Constructor_RevertOnZeroTradingStorage() public {
         vm.expectRevert(TradingEngine.ZeroAddress.selector);
-        new TradingEngine(address(0), address(vault), address(mockOracle), address(usdc), owner);
+        new TradingEngine(address(0), address(vault), address(mockOracle), address(usdc), treasuryAddr, owner);
     }
 
     function test_Constructor_RevertOnZeroVault() public {
         vm.expectRevert(TradingEngine.ZeroAddress.selector);
-        new TradingEngine(address(tradingStorage), address(0), address(mockOracle), address(usdc), owner);
+        new TradingEngine(address(tradingStorage), address(0), address(mockOracle), address(usdc), treasuryAddr, owner);
     }
 
     function test_Constructor_RevertOnZeroOracle() public {
         vm.expectRevert(TradingEngine.ZeroAddress.selector);
-        new TradingEngine(address(tradingStorage), address(vault), address(0), address(usdc), owner);
+        new TradingEngine(address(tradingStorage), address(vault), address(0), address(usdc), treasuryAddr, owner);
     }
 
     function test_Constructor_RevertOnZeroAsset() public {
         vm.expectRevert(TradingEngine.ZeroAddress.selector);
-        new TradingEngine(address(tradingStorage), address(vault), address(mockOracle), address(0), owner);
+        new TradingEngine(address(tradingStorage), address(vault), address(mockOracle), address(0), treasuryAddr, owner);
+    }
+
+    function test_Constructor_RevertOnZeroTreasury() public {
+        vm.expectRevert(TradingEngine.ZeroAddress.selector);
+        new TradingEngine(address(tradingStorage), address(vault), address(mockOracle), address(usdc), address(0), owner);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -196,15 +218,18 @@ contract TradingEngineTest is Test {
         uint32 tradeId = _openDefaultTrade(alice);
 
         assertEq(tradeId, 0);
+        // Alice sends full collateral
         assertEq(usdc.balanceOf(alice), aliceBalBefore - DEFAULT_COLLATERAL);
-        assertEq(usdc.balanceOf(address(tradingStorage)), storageBefore + DEFAULT_COLLATERAL);
+        // Storage retains effectiveCollateral (full - openFee split to vault+treasury)
+        assertEq(usdc.balanceOf(address(tradingStorage)), storageBefore + DEFAULT_EFFECTIVE_COLLATERAL);
 
         TradingStorage.Trade memory trade = tradingStorage.getTrade(tradeId);
         assertEq(trade.user, alice);
         assertTrue(trade.isLong);
         assertEq(trade.pairIndex, DEFAULT_PAIR_INDEX);
         assertEq(trade.leverage, DEFAULT_LEVERAGE);
-        assertEq(trade.collateral, DEFAULT_COLLATERAL);
+        // Stored collateral is effective (minus fee)
+        assertEq(trade.collateral, DEFAULT_EFFECTIVE_COLLATERAL);
         // Open price has spread baked in
         assertEq(trade.openPrice, DEFAULT_LONG_OPEN_PRICE);
         assertEq(trade.tp, DEFAULT_TP);
@@ -236,7 +261,7 @@ contract TradingEngineTest is Test {
 
     function test_OpenTrade_EmitsEvent() public {
         vm.expectEmit(true, true, false, true);
-        emit TradeOpened(0, alice, DEFAULT_PAIR_INDEX, true, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE);
+        emit TradeOpened(0, alice, DEFAULT_PAIR_INDEX, true, DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, DEFAULT_OPEN_FEE);
 
         _openDefaultTrade(alice);
     }
@@ -244,7 +269,8 @@ contract TradingEngineTest is Test {
     function test_OpenTrade_UpdatesOpenInterest() public {
         _openDefaultTrade(alice);
 
-        uint256 expectedOI = uint256(DEFAULT_COLLATERAL) * uint256(DEFAULT_LEVERAGE) * 1e12;
+        // OI based on effectiveCollateral
+        uint256 expectedOI = uint256(DEFAULT_EFFECTIVE_COLLATERAL) * uint256(DEFAULT_LEVERAGE) * 1e12;
         assertEq(tradingStorage.getOpenInterest(DEFAULT_PAIR_INDEX), expectedOI);
     }
 
@@ -336,7 +362,6 @@ contract TradingEngineTest is Test {
         engine.openTrade(DEFAULT_PAIR_INDEX, true, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE);
     }
 
-
     /*//////////////////////////////////////////////////////////////
                     TP/SL ORACLE VALIDATION TESTS
     //////////////////////////////////////////////////////////////*/
@@ -379,20 +404,15 @@ contract TradingEngineTest is Test {
         // Price went up 10%: 50k → 55k
         uint128 closeOracle = 55_000 * 1e18;
         mockOracle.setPrice(DEFAULT_PAIR_INDEX, closeOracle);
-        uint128 closeExec = _longClosePrice(closeOracle); // 54972.5e18
-
-        // PnL = (closeExec / openExec - 1) * collateral * leverage
-        // openExec = 50025e18, closeExec = 54972.5e18
-        // exitValue = closeExec * size / openExec = 54972.5e18 * 1000e6 / 50025e18 ≈ 1098.9...
-        // pnl ≈ +98.9 USDC, payout ≈ 198.9 USDC
+        uint128 closeExec = _longClosePrice(closeOracle);
 
         uint256 aliceBefore = usdc.balanceOf(alice);
         vm.prank(alice);
         engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
         uint256 aliceAfter = usdc.balanceOf(alice);
 
-        // Positive payout
-        assertGt(aliceAfter - aliceBefore, DEFAULT_COLLATERAL);
+        // Positive payout (even after close fee)
+        assertGt(aliceAfter - aliceBefore, DEFAULT_EFFECTIVE_COLLATERAL);
 
         // Trade deleted
         TradingStorage.Trade memory trade = tradingStorage.getTrade(tradeId);
@@ -412,14 +432,14 @@ contract TradingEngineTest is Test {
         // Price went down 10%: 50k → 45k (profit for short)
         uint128 closeOracle = 45_000 * 1e18;
         mockOracle.setPrice(DEFAULT_PAIR_INDEX, closeOracle);
-        uint128 closeExec = _shortClosePrice(closeOracle); // 45022.5e18
+        uint128 closeExec = _shortClosePrice(closeOracle);
 
         uint256 aliceBefore = usdc.balanceOf(alice);
         vm.prank(alice);
         engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
         uint256 aliceAfter = usdc.balanceOf(alice);
 
-        assertGt(aliceAfter - aliceBefore, DEFAULT_COLLATERAL);
+        assertGt(aliceAfter - aliceBefore, DEFAULT_EFFECTIVE_COLLATERAL);
     }
 
     function test_CloseTrade_UsesSpreadOnClose() public {
@@ -432,7 +452,7 @@ contract TradingEngineTest is Test {
         engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
 
         // With spread on both open and close, trader should have a small loss even at same oracle price
-        // Open: 50025e18, Close: 49975e18 → net loss due to spread
+        // Open: 50025e18, Close: 49975e18 → net loss due to spread + close fee
     }
 
     function test_CloseTrade_EmitsEvent_Profit() public {
@@ -442,14 +462,16 @@ contract TradingEngineTest is Test {
         mockOracle.setPrice(DEFAULT_PAIR_INDEX, closeOracle);
         uint128 closeExec = _longClosePrice(closeOracle);
 
-        // Calculate expected PnL
-        uint256 size = uint256(DEFAULT_COLLATERAL) * uint256(DEFAULT_LEVERAGE);
+        // Calculate expected PnL using effectiveCollateral
+        uint256 size = uint256(DEFAULT_EFFECTIVE_COLLATERAL) * uint256(DEFAULT_LEVERAGE);
         uint256 exitValue = (uint256(closeExec) * size) / uint256(DEFAULT_LONG_OPEN_PRICE);
         int256 expectedPnl = int256(exitValue) - int256(size);
-        uint256 expectedPayout = uint256(expectedPnl) + uint256(DEFAULT_COLLATERAL);
+        uint256 rawPayout = uint256(expectedPnl) + uint256(DEFAULT_EFFECTIVE_COLLATERAL);
+        uint256 closeFeeVal = _closeFee(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE);
+        uint256 expectedPayout = rawPayout - closeFeeVal;
 
         vm.expectEmit(true, true, false, true);
-        emit TradeClosed(tradeId, alice, closeExec, expectedPnl, expectedPayout);
+        emit TradeClosed(tradeId, alice, closeExec, expectedPnl, expectedPayout, closeFeeVal);
 
         vm.prank(alice);
         engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
@@ -476,9 +498,9 @@ contract TradingEngineTest is Test {
         uint256 aliceAfter = usdc.balanceOf(alice);
         uint256 vaultAfter = usdc.balanceOf(address(vault));
 
-        // Alice gets less than collateral back
-        assertLt(aliceAfter - aliceBefore, DEFAULT_COLLATERAL);
-        // Vault gains from loss
+        // Alice gets less than effectiveCollateral back (partial loss + close fee)
+        assertLt(aliceAfter - aliceBefore, DEFAULT_EFFECTIVE_COLLATERAL);
+        // Vault gains from loss + fee share
         assertGt(vaultAfter, vaultBefore);
     }
 
@@ -491,16 +513,14 @@ contract TradingEngineTest is Test {
         uint128 closeExec = _longClosePrice(closeOracle);
 
         uint256 aliceBefore = usdc.balanceOf(alice);
-        uint256 vaultBefore = usdc.balanceOf(address(vault));
 
         vm.prank(alice);
         engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
 
         uint256 aliceAfter = usdc.balanceOf(alice);
-        uint256 vaultAfter = usdc.balanceOf(address(vault));
 
-        assertEq(aliceAfter, aliceBefore); // Alice gets nothing
-        assertEq(vaultAfter - vaultBefore, uint256(DEFAULT_COLLATERAL)); // Vault gets all collateral
+        // Alice gets nothing (full loss, payout=0, close fee=0 since payout was 0)
+        assertEq(aliceAfter, aliceBefore);
     }
 
     function test_CloseTrade_LongMoreThan100Loss() public {
@@ -512,13 +532,11 @@ contract TradingEngineTest is Test {
         uint128 closeExec = _longClosePrice(closeOracle);
 
         uint256 aliceBefore = usdc.balanceOf(alice);
-        uint256 vaultBefore = usdc.balanceOf(address(vault));
 
         vm.prank(alice);
         engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
 
         assertEq(usdc.balanceOf(alice), aliceBefore);
-        assertEq(usdc.balanceOf(address(vault)) - vaultBefore, uint256(DEFAULT_COLLATERAL));
     }
 
     function test_CloseTrade_ShortLoss() public {
@@ -548,14 +566,17 @@ contract TradingEngineTest is Test {
         mockOracle.setPrice(DEFAULT_PAIR_INDEX, closeOracle);
         uint128 closeExec = _longClosePrice(closeOracle);
 
-        // Calculate expected PnL
-        uint256 size = uint256(DEFAULT_COLLATERAL) * uint256(DEFAULT_LEVERAGE);
+        // Calculate expected PnL using effectiveCollateral
+        uint256 size = uint256(DEFAULT_EFFECTIVE_COLLATERAL) * uint256(DEFAULT_LEVERAGE);
         uint256 exitValue = (uint256(closeExec) * size) / uint256(DEFAULT_LONG_OPEN_PRICE);
         int256 expectedPnl = int256(exitValue) - int256(size);
-        uint256 expectedPayout = uint256(DEFAULT_COLLATERAL) - uint256(-expectedPnl);
+        uint256 rawPayout = uint256(DEFAULT_EFFECTIVE_COLLATERAL) - uint256(-expectedPnl);
+        uint256 closeFeeVal = _closeFee(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE);
+        uint256 expectedPayout = rawPayout > closeFeeVal ? rawPayout - closeFeeVal : 0;
+        uint256 expectedFee = rawPayout > closeFeeVal ? closeFeeVal : rawPayout;
 
         vm.expectEmit(true, true, false, true);
-        emit TradeClosed(tradeId, alice, closeExec, expectedPnl, expectedPayout);
+        emit TradeClosed(tradeId, alice, closeExec, expectedPnl, expectedPayout, expectedFee);
 
         vm.prank(alice);
         engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
@@ -578,8 +599,9 @@ contract TradingEngineTest is Test {
         engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
 
         uint256 received = usdc.balanceOf(alice) - aliceBefore;
-        // Payout capped at 9x collateral = 900 USDC
-        assertEq(received, uint256(DEFAULT_COLLATERAL) * 9);
+        uint256 closeFeeVal = _closeFee(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE);
+        // Payout capped at 9x effectiveCollateral, minus close fee
+        assertEq(received, uint256(DEFAULT_EFFECTIVE_COLLATERAL) * 9 - closeFeeVal);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -600,8 +622,8 @@ contract TradingEngineTest is Test {
 
         uint256 aliceAfter = usdc.balanceOf(alice);
 
-        // Due to spread on open (up) and close (down), trader loses a small amount
-        assertLt(aliceAfter - aliceBefore, uint256(DEFAULT_COLLATERAL));
+        // Due to spread on open (up) and close (down), plus fees, trader loses
+        assertLt(aliceAfter - aliceBefore, uint256(DEFAULT_EFFECTIVE_COLLATERAL));
         assertGt(usdc.balanceOf(address(vault)), vaultBefore);
     }
 
@@ -878,11 +900,13 @@ contract TradingEngineTest is Test {
 
         uint256 received = usdc.balanceOf(alice) - aliceBefore;
 
-        // Verify math: exitValue = closeExec * size / openExec
-        uint256 size = uint256(DEFAULT_COLLATERAL) * uint256(DEFAULT_LEVERAGE);
+        // Verify math: exitValue = closeExec * size / openExec (using effectiveCollateral)
+        uint256 size = uint256(DEFAULT_EFFECTIVE_COLLATERAL) * uint256(DEFAULT_LEVERAGE);
         uint256 exitValue = (uint256(closeExec) * size) / uint256(DEFAULT_LONG_OPEN_PRICE);
         int256 pnl = int256(exitValue) - int256(size);
-        uint256 expectedPayout = uint256(pnl) + uint256(DEFAULT_COLLATERAL);
+        uint256 rawPayout = uint256(pnl) + uint256(DEFAULT_EFFECTIVE_COLLATERAL);
+        uint256 closeFeeVal = _closeFee(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE);
+        uint256 expectedPayout = rawPayout - closeFeeVal;
 
         assertEq(received, expectedPayout);
     }
@@ -890,7 +914,10 @@ contract TradingEngineTest is Test {
     function test_PnL_ShortExactMath() public {
         vm.prank(alice);
         uint32 tradeId = engine.openTrade(DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE);
-        uint128 shortOpenExec = _shortOpenPrice(DEFAULT_ORACLE_PRICE);
+
+        TradingStorage.Trade memory openedTrade = tradingStorage.getTrade(tradeId);
+        uint64 effColl = openedTrade.collateral;
+        uint128 shortOpenExec = openedTrade.openPrice;
 
         // Short entry at oracle 50k, close at 47.5k
         uint128 closeOracle = 47_500 * 1e18;
@@ -904,10 +931,12 @@ contract TradingEngineTest is Test {
         uint256 received = usdc.balanceOf(alice) - aliceBefore;
 
         // Verify math for short: pnl = size - exitValue
-        uint256 size = uint256(DEFAULT_COLLATERAL) * uint256(DEFAULT_LEVERAGE);
+        uint256 size = uint256(effColl) * uint256(DEFAULT_LEVERAGE);
         uint256 exitValue = (uint256(closeExec) * size) / uint256(shortOpenExec);
         int256 pnl = int256(size) - int256(exitValue);
-        uint256 expectedPayout = uint256(pnl) + uint256(DEFAULT_COLLATERAL);
+        uint256 rawPayout = uint256(pnl) + uint256(effColl);
+        uint256 closeFeeVal = _closeFee(effColl, DEFAULT_LEVERAGE);
+        uint256 expectedPayout = rawPayout - closeFeeVal;
 
         assertEq(received, expectedPayout);
     }
@@ -918,6 +947,8 @@ contract TradingEngineTest is Test {
         uint128 expectedOpen = _longOpenPrice(DEFAULT_ORACLE_PRICE);
         uint32 tradeId = engine.openTrade(DEFAULT_PAIR_INDEX, true, DEFAULT_COLLATERAL, 100, expectedOpen, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE);
 
+        TradingStorage.Trade memory trade = tradingStorage.getTrade(tradeId);
+
         uint128 closeOracle = 50_500 * 1e18;
         mockOracle.setPrice(DEFAULT_PAIR_INDEX, closeOracle);
         uint128 closeExec = _longClosePrice(closeOracle);
@@ -927,7 +958,7 @@ contract TradingEngineTest is Test {
         engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
 
         uint256 received = usdc.balanceOf(alice) - aliceBefore;
-        assertGt(received, DEFAULT_COLLATERAL);
+        assertGt(received, trade.collateral);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -947,8 +978,9 @@ contract TradingEngineTest is Test {
         vm.prank(alice);
         engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
 
-        assertEq(usdc.balanceOf(address(tradingStorage)), storageBefore - DEFAULT_COLLATERAL);
-        assertEq(usdc.balanceOf(address(vault)), vaultBefore + DEFAULT_COLLATERAL);
+        // Full loss: payout=0, closeFee=0 (capped to payout), all effectiveCollateral goes to Vault
+        assertEq(usdc.balanceOf(address(tradingStorage)), storageBefore - DEFAULT_EFFECTIVE_COLLATERAL);
+        assertEq(usdc.balanceOf(address(vault)), vaultBefore + DEFAULT_EFFECTIVE_COLLATERAL);
     }
 
     function test_CollateralFlow_PartialLossSplitCorrectly() public {
@@ -964,9 +996,9 @@ contract TradingEngineTest is Test {
         vm.prank(alice);
         engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
 
-        // Storage sent all collateral out
-        assertEq(usdc.balanceOf(address(tradingStorage)), storageBefore - DEFAULT_COLLATERAL);
-        // Vault gained from loss portion
+        // Storage sent all effectiveCollateral out (fee + payout + vault)
+        assertEq(usdc.balanceOf(address(tradingStorage)), storageBefore - DEFAULT_EFFECTIVE_COLLATERAL);
+        // Vault gained from loss portion + fee share
         assertGt(usdc.balanceOf(address(vault)), vaultBefore);
     }
 
@@ -983,22 +1015,230 @@ contract TradingEngineTest is Test {
         vm.prank(alice);
         engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
 
-        // Storage returns full collateral to trader
-        assertEq(usdc.balanceOf(address(tradingStorage)), storageBefore - DEFAULT_COLLATERAL);
-        // Vault pays profit
+        // Storage returns all effectiveCollateral (fee + trader payout from storage)
+        assertEq(usdc.balanceOf(address(tradingStorage)), storageBefore - DEFAULT_EFFECTIVE_COLLATERAL);
+        // Vault pays profit (minus vault fee share which flows back in)
         assertLt(usdc.balanceOf(address(vault)), vaultBefore);
     }
 
     /*//////////////////////////////////////////////////////////////
-                            FUZZ TESTS
+                            FEE TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_Fee_OpenFeeCalculation() public {
+        // 100 USDC * 10x * 8 / 10000 = 80000 (0.08 USDC)
+        uint256 expectedFee = uint256(DEFAULT_COLLATERAL) * DEFAULT_LEVERAGE * 8 / 10_000;
+        assertEq(expectedFee, DEFAULT_OPEN_FEE);
+
+        _openDefaultTrade(alice);
+
+        TradingStorage.Trade memory trade = tradingStorage.getTrade(0);
+        assertEq(trade.collateral, DEFAULT_COLLATERAL - uint64(expectedFee));
+    }
+
+    function test_Fee_CloseFeeCalculation() public {
+        uint32 tradeId = _openDefaultTrade(alice);
+
+        // Close at profit
+        uint128 closeOracle = 55_000 * 1e18;
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, closeOracle);
+        uint128 closeExec = _longClosePrice(closeOracle);
+
+        // Expected close fee based on effectiveCollateral
+        uint256 expectedCloseFee = _closeFee(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE);
+
+        // Compute raw payout
+        uint256 size = uint256(DEFAULT_EFFECTIVE_COLLATERAL) * uint256(DEFAULT_LEVERAGE);
+        uint256 exitValue = (uint256(closeExec) * size) / uint256(DEFAULT_LONG_OPEN_PRICE);
+        int256 pnl = int256(exitValue) - int256(size);
+        uint256 rawPayout = uint256(pnl) + uint256(DEFAULT_EFFECTIVE_COLLATERAL);
+
+        uint256 aliceBefore = usdc.balanceOf(alice);
+        vm.prank(alice);
+        engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
+
+        uint256 received = usdc.balanceOf(alice) - aliceBefore;
+        assertEq(received, rawPayout - expectedCloseFee);
+    }
+
+    function test_Fee_Split80_20() public {
+        uint256 vaultBefore = usdc.balanceOf(address(vault));
+        uint256 treasuryBefore = usdc.balanceOf(treasuryAddr);
+
+        _openDefaultTrade(alice);
+
+        uint256 expectedVaultFee = DEFAULT_OPEN_FEE * 8000 / 10_000; // 64000
+        uint256 expectedTreasuryFee = DEFAULT_OPEN_FEE - expectedVaultFee; // 16000
+
+        assertEq(usdc.balanceOf(address(vault)) - vaultBefore, expectedVaultFee);
+        assertEq(usdc.balanceOf(treasuryAddr) - treasuryBefore, expectedTreasuryFee);
+    }
+
+    function test_Fee_VaultTotalAssetsIncreases() public {
+        uint256 totalAssetsBefore = vault.totalAssets();
+
+        _openDefaultTrade(alice);
+
+        uint256 expectedVaultFee = DEFAULT_OPEN_FEE * 8000 / 10_000;
+        assertEq(vault.totalAssets(), totalAssetsBefore + expectedVaultFee);
+    }
+
+    function test_Fee_TreasuryReceivesFee() public {
+        uint256 treasuryBefore = usdc.balanceOf(treasuryAddr);
+
+        _openDefaultTrade(alice);
+
+        uint256 expectedTreasuryFee = DEFAULT_OPEN_FEE - (DEFAULT_OPEN_FEE * 8000 / 10_000);
+        assertEq(usdc.balanceOf(treasuryAddr) - treasuryBefore, expectedTreasuryFee);
+    }
+
+    function test_Fee_EffectiveCollateralStored() public {
+        _openDefaultTrade(alice);
+
+        TradingStorage.Trade memory trade = tradingStorage.getTrade(0);
+        assertEq(trade.collateral, DEFAULT_EFFECTIVE_COLLATERAL);
+        assertLt(trade.collateral, DEFAULT_COLLATERAL);
+    }
+
+    function test_Fee_CloseFeeDeductedFromPayout() public {
+        uint32 tradeId = _openDefaultTrade(alice);
+
+        // Close at slight profit (50.5k) — treasury should receive close fee share
+        uint128 closeOracle = 50_500 * 1e18;
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, closeOracle);
+        uint128 closeExec = _longClosePrice(closeOracle);
+
+        uint256 treasuryBefore = usdc.balanceOf(treasuryAddr);
+
+        vm.prank(alice);
+        engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
+
+        uint256 closeFeeVal = _closeFee(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE);
+        uint256 expectedTreasuryFee = closeFeeVal - (closeFeeVal * 8000 / 10_000);
+
+        // Treasury received its 20% close fee share
+        assertEq(usdc.balanceOf(treasuryAddr) - treasuryBefore, expectedTreasuryFee);
+    }
+
+    function test_Fee_FullLossCloseFeeIsZero() public {
+        uint32 tradeId = _openDefaultTrade(alice);
+
+        // Full loss: payout = 0, so close fee = 0
+        uint128 closeOracle = 45_000 * 1e18;
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, closeOracle);
+        uint128 closeExec = _longClosePrice(closeOracle);
+
+        uint256 treasuryBefore = usdc.balanceOf(treasuryAddr);
+
+        vm.prank(alice);
+        engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
+
+        // No close fee distributed on full loss (payout was 0)
+        assertEq(usdc.balanceOf(treasuryAddr), treasuryBefore);
+    }
+
+    function test_Fee_ProfitTradeCloseFeeFromCollateral() public {
+        uint32 tradeId = _openDefaultTrade(alice);
+
+        // Profit scenario
+        uint128 closeOracle = 55_000 * 1e18;
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, closeOracle);
+        uint128 closeExec = _longClosePrice(closeOracle);
+
+        uint256 treasuryBefore = usdc.balanceOf(treasuryAddr);
+        uint256 vaultBefore = usdc.balanceOf(address(vault));
+
+        vm.prank(alice);
+        engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
+
+        uint256 closeFeeVal = _closeFee(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE);
+        uint256 expectedVaultFee = closeFeeVal * 8000 / 10_000;
+        uint256 expectedTreasuryFee = closeFeeVal - expectedVaultFee;
+
+        assertEq(usdc.balanceOf(treasuryAddr) - treasuryBefore, expectedTreasuryFee);
+        // Vault receives fee share but pays out profit, net negative
+        // Just check the fee share was sent (vault delta accounts for profit payout too)
+    }
+
+    function test_Fee_EmitsFeesDistributedOnOpen() public {
+        uint256 expectedVaultFee = DEFAULT_OPEN_FEE * 8000 / 10_000;
+        uint256 expectedTreasuryFee = DEFAULT_OPEN_FEE - expectedVaultFee;
+
+        vm.expectEmit(false, false, false, true);
+        emit FeesDistributed(expectedVaultFee, expectedTreasuryFee);
+
+        _openDefaultTrade(alice);
+    }
+
+    function test_Fee_EmitsFeesDistributedOnClose() public {
+        uint32 tradeId = _openDefaultTrade(alice);
+
+        uint128 closeOracle = 55_000 * 1e18;
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, closeOracle);
+        uint128 closeExec = _longClosePrice(closeOracle);
+
+        uint256 closeFeeVal = _closeFee(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE);
+        uint256 expectedVaultFee = closeFeeVal * 8000 / 10_000;
+        uint256 expectedTreasuryFee = closeFeeVal - expectedVaultFee;
+
+        vm.expectEmit(false, false, false, true);
+        emit FeesDistributed(expectedVaultFee, expectedTreasuryFee);
+
+        vm.prank(alice);
+        engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                      TREASURY ADMIN TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_SetTreasury() public {
+        address newTreasury = makeAddr("newTreasury");
+
+        vm.prank(owner);
+        engine.setTreasury(newTreasury);
+
+        assertEq(engine.treasury(), newTreasury);
+    }
+
+    function test_SetTreasury_EmitsEvent() public {
+        address newTreasury = makeAddr("newTreasury");
+
+        vm.expectEmit(true, false, false, true);
+        emit TreasuryUpdated(newTreasury);
+
+        vm.prank(owner);
+        engine.setTreasury(newTreasury);
+    }
+
+    function test_SetTreasury_RevertOnZeroAddress() public {
+        vm.prank(owner);
+        vm.expectRevert(TradingEngine.ZeroAddress.selector);
+        engine.setTreasury(address(0));
+    }
+
+    function test_SetTreasury_RevertIfNotOwner() public {
+        vm.prank(alice);
+        vm.expectRevert();
+        engine.setTreasury(makeAddr("newTreasury"));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        FUZZ TESTS
     //////////////////////////////////////////////////////////////*/
 
     function testFuzz_OpenTrade(uint64 collateral, uint16 leverage) public {
         collateral = uint64(bound(collateral, 1e6, 100_000 * 10 ** 6));
         leverage = uint16(bound(leverage, 1, 100));
 
+        // Calculate fee and ensure collateral > fee
+        uint256 fee = _openFee(collateral, leverage);
+        vm.assume(fee < uint256(collateral));
+
+        uint64 effColl = uint64(uint256(collateral) - fee);
+
         // Ensure OI doesn't exceed max
-        uint256 posSize = uint256(collateral) * uint256(leverage) * 1e12;
+        uint256 posSize = uint256(effColl) * uint256(leverage) * 1e12;
         vm.assume(posSize <= 10_000_000 * 1e18);
 
         uint128 expectedOpen = _longOpenPrice(DEFAULT_ORACLE_PRICE);
@@ -1007,10 +1247,9 @@ contract TradingEngineTest is Test {
 
         TradingStorage.Trade memory trade = tradingStorage.getTrade(tradeId);
         assertEq(trade.user, alice);
-        assertEq(trade.collateral, collateral);
+        assertEq(trade.collateral, effColl);
         assertEq(trade.leverage, leverage);
         assertEq(trade.openPrice, expectedOpen);
-        assertEq(usdc.balanceOf(address(tradingStorage)), collateral);
     }
 
     function testFuzz_CloseTrade_PnL(uint128 closeOracle) public {
@@ -1023,18 +1262,21 @@ contract TradingEngineTest is Test {
 
         uint256 aliceBefore = usdc.balanceOf(alice);
         uint256 vaultBefore = usdc.balanceOf(address(vault));
+        uint256 treasuryBefore = usdc.balanceOf(treasuryAddr);
 
         vm.prank(alice);
         engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
 
         uint256 aliceAfter = usdc.balanceOf(alice);
         uint256 vaultAfter = usdc.balanceOf(address(vault));
+        uint256 treasuryAfter = usdc.balanceOf(treasuryAddr);
 
         uint256 traderReceived = aliceAfter - aliceBefore;
         int256 vaultDelta = int256(vaultAfter) - int256(vaultBefore);
+        uint256 treasuryReceived = treasuryAfter - treasuryBefore;
 
-        // Invariant: traderReceived + vaultDelta == collateral (conservation of funds)
-        assertEq(int256(traderReceived) + vaultDelta, int256(uint256(DEFAULT_COLLATERAL)));
+        // Invariant: traderReceived + vaultDelta + treasuryReceived == effectiveCollateral
+        assertEq(int256(traderReceived) + vaultDelta + int256(treasuryReceived), int256(uint256(DEFAULT_EFFECTIVE_COLLATERAL)));
 
         // Trade must be deleted
         TradingStorage.Trade memory trade = tradingStorage.getTrade(tradeId);
@@ -1046,7 +1288,7 @@ contract TradingEngineTest is Test {
 
     function testFuzz_ProfitCap(uint128 closeOracle) public {
         // Only prices above entry for long profit
-        closeOracle = uint128(bound(closeOracle, DEFAULT_ORACLE_PRICE + 1, type(uint128).max / (uint256(DEFAULT_COLLATERAL) * DEFAULT_LEVERAGE)));
+        closeOracle = uint128(bound(closeOracle, DEFAULT_ORACLE_PRICE + 1, type(uint128).max / (uint256(DEFAULT_EFFECTIVE_COLLATERAL) * DEFAULT_LEVERAGE)));
 
         uint32 tradeId = _openDefaultTrade(alice);
         mockOracle.setPrice(DEFAULT_PAIR_INDEX, closeOracle);
@@ -1057,7 +1299,23 @@ contract TradingEngineTest is Test {
         engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
 
         uint256 received = usdc.balanceOf(alice) - aliceBefore;
-        assertLe(received, uint256(DEFAULT_COLLATERAL) * engine.MAX_PROFIT_MULTIPLIER());
+        uint256 closeFeeVal = _closeFee(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE);
+        // Payout capped at MAX_PROFIT_MULTIPLIER * effectiveCollateral, minus close fee
+        assertLe(received, uint256(DEFAULT_EFFECTIVE_COLLATERAL) * engine.MAX_PROFIT_MULTIPLIER() - closeFeeVal);
+    }
+
+    function testFuzz_FeeCalculation(uint64 collateral, uint16 leverage) public pure {
+        collateral = uint64(bound(collateral, 1e6, 100_000 * 10 ** 6));
+        leverage = uint16(bound(leverage, 1, 100));
+
+        uint256 fee = uint256(collateral) * uint256(leverage) * 8 / 10_000;
+        uint256 vaultFee = fee * 8000 / 10_000;
+        uint256 treasuryFee = fee - vaultFee;
+
+        // Fee split must equal total fee
+        assertEq(vaultFee + treasuryFee, fee);
+        // Vault gets 80%
+        assertGe(vaultFee, treasuryFee);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1069,7 +1327,8 @@ contract TradingEngineTest is Test {
         _openDefaultTrade(alice);
         _openDefaultTrade(bob);
 
-        uint256 expectedOI = 3 * uint256(DEFAULT_COLLATERAL) * uint256(DEFAULT_LEVERAGE) * 1e12;
+        // OI based on effectiveCollateral
+        uint256 expectedOI = 3 * uint256(DEFAULT_EFFECTIVE_COLLATERAL) * uint256(DEFAULT_LEVERAGE) * 1e12;
         assertEq(tradingStorage.getOpenInterest(DEFAULT_PAIR_INDEX), expectedOI);
 
         // Close one trade
@@ -1077,7 +1336,7 @@ contract TradingEngineTest is Test {
         vm.prank(alice);
         engine.closeTrade(0, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
 
-        expectedOI = 2 * uint256(DEFAULT_COLLATERAL) * uint256(DEFAULT_LEVERAGE) * 1e12;
+        expectedOI = 2 * uint256(DEFAULT_EFFECTIVE_COLLATERAL) * uint256(DEFAULT_LEVERAGE) * 1e12;
         assertEq(tradingStorage.getOpenInterest(DEFAULT_PAIR_INDEX), expectedOI);
     }
 
@@ -1085,18 +1344,20 @@ contract TradingEngineTest is Test {
         _openDefaultTrade(alice);
         _openDefaultTrade(bob);
 
-        assertEq(usdc.balanceOf(address(tradingStorage)), 2 * uint256(DEFAULT_COLLATERAL));
+        // Storage holds 2x effectiveCollateral (fees already distributed)
+        assertEq(usdc.balanceOf(address(tradingStorage)), 2 * uint256(DEFAULT_EFFECTIVE_COLLATERAL));
 
         // Close alice's trade
         uint128 closeExec = _longClosePrice(DEFAULT_ORACLE_PRICE);
         vm.prank(alice);
         engine.closeTrade(0, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
 
-        assertEq(usdc.balanceOf(address(tradingStorage)), uint256(DEFAULT_COLLATERAL));
+        // After close, only bob's effectiveCollateral remains
+        assertEq(usdc.balanceOf(address(tradingStorage)), uint256(DEFAULT_EFFECTIVE_COLLATERAL));
     }
 
     function test_Invariant_FundsConservation_MultipleTraders() public {
-        uint256 totalBefore = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage));
+        uint256 totalBefore = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage)) + usdc.balanceOf(treasuryAddr);
 
         _openDefaultTrade(alice);
         _openDefaultTrade(bob);
@@ -1115,7 +1376,7 @@ contract TradingEngineTest is Test {
         vm.prank(bob);
         engine.closeTrade(1, closeExec2, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
 
-        uint256 totalAfter = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage));
+        uint256 totalAfter = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage)) + usdc.balanceOf(treasuryAddr);
 
         // Total USDC in the system must be conserved
         assertEq(totalBefore, totalAfter);

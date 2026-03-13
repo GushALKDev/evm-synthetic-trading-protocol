@@ -24,7 +24,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 | 1         | Core: Vault               | 8      | 8         | 100%     |
 | 2         | Core: Trading Engine      | 12     | 12        | 100%     |
 | 3         | Oracle (Pyth + Chainlink) | 10     | 10        | 100%     |
-| 4         | Fee System                | 5      | 0         | 0%       |
+| 4         | Fee System                | 5      | 5         | 100%     |
 | 5         | Funding Rates             | 4      | 0         | 0%       |
 | 6         | Risk Control (OI)         | 6      | 0         | 0%       |
 | 7         | Liquidations              | 8      | 0         | 0%       |
@@ -34,7 +34,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 | 11        | Governance Token          | 4      | 0         | 0%       |
 | 12        | Testing & Audit           | 8      | 0         | 0%       |
 | 13        | V2 Improvements           | 7      | 0         | 0%       |
-| **TOTAL** |                           | **94** | **30**    | **32%**  |
+| **TOTAL** |                           | **94** | **35**    | **37%**  |
 
 ---
 
@@ -176,19 +176,22 @@ Each phase should be completed before moving to the next. Within each phase, the
 
 > **Objective:** Implement fee collection.
 >
+> **Architecture Decision:** Fee logic integrated directly in TradingEngine (no separate FeeManager) — constant rate, fixed split, two recipients. A `treasury` address receives the 20% share; when Phase 9 (Assistant Fund) arrives, just point `treasury` to that contract.
+>
 > **Dependencies:** Phase 2
 
-- [ ] **4.1** Contract `FeeManager.sol` (or integrate in TradingEngine)
-- [ ] **4.2** Opening Fee (0.08% of size)
-- [ ] **4.3** Closing Fee (0.08% of size)
-- [ ] **4.4** Fee distribution (80% Vault, 20% Treasury/Assistant)
-- [ ] **4.5** Fee tests (verify correct distribution)
+- [x] **4.1** Fee logic integrated in TradingEngine (no separate FeeManager — simple constant fees don't justify extra contract/gas)
+- [x] **4.2** Opening Fee (0.08% of position size, deducted from collateral → stored trade has effectiveCollateral)
+- [x] **4.3** Closing Fee (0.08% of position size, deducted from payout — full loss = no close fee)
+- [x] **4.4** Fee distribution (80% Vault via sendCollateral, 20% treasury — `setTreasury()` admin function)
+- [x] **4.5** Fee tests (94 TradingEngine tests: fee calc, split 80/20, vault totalAssets increase, treasury balance, effective collateral, full loss no close fee, profit cap with fee, funds conservation invariant, fuzz)
 
 **Deliverables:**
 
 - Fees deducted automatically on open/close
-- Vault receives its fee portion
-- Treasury/Assistant receives its portion
+- Vault receives 80% fee share (increases totalAssets → LP yield)
+- Treasury receives 20% fee share (future Assistant Fund)
+- Events: `TradeOpened`/`TradeClosed` include `fee` field, new `FeesDistributed` event
 
 ---
 
@@ -394,6 +397,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 
 | Date       | Changes                 |
 | :--------- | :---------------------- |
+| 2026-03-13 | Phase 4: Fee system — open/close fees (0.08%), 80/20 split (Vault/treasury), integrated in TradingEngine |
 | 2026-02-27 | Phase 3: Oracle abstraction — IOracle interface, OracleAggregator→PythChainlinkOracle, TradingEngine decoupled from oracle impl |
 | 2026-02-26 | Phase 3: OracleAggregator + TradingEngine oracle integration complete (12/12) |
 | 2026-02-25 | Phase 3: Redesigned oracle from custom DON to Pyth + Chainlink (see ADR) |

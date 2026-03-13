@@ -26,6 +26,9 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     uint256 public constant MIN_COLLATERAL = 1e6; // 1 USDC
     uint256 public constant BASE_SPREAD_BPS = 5;
     uint256 public constant BPS_DENOMINATOR = 10_000;
+    uint256 public constant OPEN_FEE_BPS = 8; // 0.08% of position size
+    uint256 public constant CLOSE_FEE_BPS = 8; // 0.08% of position size
+    uint256 public constant FEE_VAULT_SPLIT_BPS = 8000; // 80% to Vault, 20% to treasury
 
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
@@ -37,15 +40,27 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     address public immutable ASSET;
 
     bool private _paused;
+    address public treasury;
 
     /*//////////////////////////////////////////////////////////////
                                 EVENTS
     //////////////////////////////////////////////////////////////*/
 
-    event TradeOpened(uint256 indexed tradeId, address indexed user, uint16 pairIndex, bool isLong, uint64 collateral, uint16 leverage, uint128 openPrice);
-    event TradeClosed(uint256 indexed tradeId, address indexed user, uint128 closePrice, int256 pnlUsdc, uint256 payoutUsdc);
+    event TradeOpened(
+        uint256 indexed tradeId,
+        address indexed user,
+        uint16 pairIndex,
+        bool isLong,
+        uint64 collateral,
+        uint16 leverage,
+        uint128 openPrice,
+        uint256 fee
+    );
+    event TradeClosed(uint256 indexed tradeId, address indexed user, uint128 closePrice, int256 pnlUsdc, uint256 payoutUsdc, uint256 fee);
+    event FeesDistributed(uint256 vaultFee, uint256 treasuryFee);
     event TpUpdated(uint256 indexed tradeId, uint128 newTp);
     event SlUpdated(uint256 indexed tradeId, uint128 newSl);
+    event TreasuryUpdated(address indexed newTreasury);
     event Paused(address account);
     event Unpaused(address account);
 
@@ -65,6 +80,8 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     error SlippageExceeded(uint128 executionPrice, uint128 expectedPrice, uint16 slippageBps);
     error TpAlreadyTriggered(uint128 tp, uint128 oraclePrice);
     error SlAlreadyTriggered(uint128 sl, uint128 oraclePrice);
+    error FeeExceedsCollateral(uint256 fee, uint64 collateral);
+    error ZeroFeeRecipient();
 
     /*//////////////////////////////////////////////////////////////
                               MODIFIERS
@@ -191,6 +208,50 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     }
 
     /**
+     * @dev Calculate fee in USDC (6 decimals) from collateral and leverage.
+     */
+    function _calculateFee(uint64 _collateral, uint16 _leverage, uint256 _feeBps) internal pure returns (uint256) {
+        return (uint256(_collateral) * uint256(_leverage) * _feeBps) / BPS_DENOMINATOR;
+    }
+
+    /**
+     * @dev Split and distribute fee: 80% to Vault, 20% to treasury via TradingStorage.sendCollateral.
+     */
+    function _distributeFees(uint256 _fee) internal {
+        if (_fee == 0) return;
+        uint256 vaultFee = (_fee * FEE_VAULT_SPLIT_BPS) / BPS_DENOMINATOR;
+        uint256 treasuryFee = _fee - vaultFee;
+        TRADING_STORAGE.sendCollateral(address(VAULT), vaultFee);
+        TRADING_STORAGE.sendCollateral(treasury, treasuryFee);
+        emit FeesDistributed(vaultFee, treasuryFee);
+    }
+
+    /**
+     * @dev Transfer collateral, deduct fee, store trade, track OI, emit event.
+     *      Extracted to a separate function to avoid stack-too-deep in openTrade.
+     */
+    function _executeOpen(
+        address _user,
+        uint16 _pairIndex,
+        bool _isLong,
+        uint64 _collateral,
+        uint16 _leverage,
+        uint128 _executionPrice,
+        uint128 _tp,
+        uint128 _sl
+    ) internal returns (uint32 tradeId) {
+        uint256 fee = _calculateFee(_collateral, _leverage, OPEN_FEE_BPS);
+        if (fee >= uint256(_collateral)) revert FeeExceedsCollateral(fee, _collateral);
+        ASSET.safeTransferFrom(_user, address(TRADING_STORAGE), uint256(_collateral));
+        uint64 effectiveCollateral = uint64(uint256(_collateral) - fee);
+        _distributeFees(fee);
+
+        tradeId = TRADING_STORAGE.storeTrade(_user, _isLong, _pairIndex, _leverage, effectiveCollateral, _executionPrice, _tp, _sl);
+        TRADING_STORAGE.increaseOpenInterest(_pairIndex, _positionSizeWad(effectiveCollateral, _leverage));
+        emit TradeOpened(tradeId, _user, _pairIndex, _isLong, effectiveCollateral, _leverage, _executionPrice, fee);
+    }
+
+    /**
      * @dev Validate pair is active and leverage is within bounds.
      */
     function _validatePair(uint16 _pairIndex, uint16 _leverage) internal view {
@@ -203,13 +264,15 @@ contract TradingEngine is Ownable, ReentrancyGuard {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address _tradingStorage, address _vault, address _oracle, address _asset, address _owner) {
-        if (_tradingStorage == address(0) || _vault == address(0) || _oracle == address(0) || _asset == address(0)) revert ZeroAddress();
+    constructor(address _tradingStorage, address _vault, address _oracle, address _asset, address _treasury, address _owner) {
+        if (_tradingStorage == address(0) || _vault == address(0) || _oracle == address(0) || _asset == address(0) || _treasury == address(0))
+            revert ZeroAddress();
         _initializeOwner(_owner);
         TRADING_STORAGE = TradingStorage(_tradingStorage);
         VAULT = Vault(_vault);
         ORACLE = IOracle(_oracle);
         ASSET = _asset;
+        treasury = _treasury;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -255,10 +318,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         _validateSlippage(oraclePrice, _expectedPrice, _slippageBps);
 
         // --- INTERACTIONS ---
-        ASSET.safeTransferFrom(msg.sender, address(TRADING_STORAGE), uint256(_collateral));
-        tradeId = TRADING_STORAGE.storeTrade(msg.sender, _isLong, _pairIndex, _leverage, _collateral, oraclePrice, _tp, _sl);
-        emit TradeOpened(tradeId, msg.sender, _pairIndex, _isLong, _collateral, _leverage, oraclePrice);
-        TRADING_STORAGE.increaseOpenInterest(_pairIndex, _positionSizeWad(_collateral, _leverage));
+        tradeId = _executeOpen(msg.sender, _pairIndex, _isLong, _collateral, _leverage, oraclePrice, _tp, _sl);
     }
 
     /**
@@ -285,25 +345,39 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         uint256 payoutUsdc = _calculatePayout(trade.collateral, pnlUsdc);
         uint256 positionSize = _positionSizeWad(trade.collateral, trade.leverage);
 
+        // Close fee deducted from payout
+        uint256 closeFee = _calculateFee(trade.collateral, trade.leverage, CLOSE_FEE_BPS);
+        if (closeFee >= payoutUsdc) {
+            closeFee = payoutUsdc;
+            payoutUsdc = 0;
+        } else {
+            payoutUsdc -= closeFee;
+        }
+
         // --- EFFECTS ---
         TRADING_STORAGE.deleteTrade(_tradeId);
         TRADING_STORAGE.decreaseOpenInterest(trade.pairIndex, positionSize);
-        emit TradeClosed(_tradeId, msg.sender, executionPrice, pnlUsdc, payoutUsdc);
+        emit TradeClosed(_tradeId, msg.sender, executionPrice, pnlUsdc, payoutUsdc, closeFee);
 
         // --- INTERACTIONS ---
+        // Distribute close fee from collateral in TradingStorage
+        _distributeFees(closeFee);
+
         if (payoutUsdc == 0) {
-            // Full loss: all collateral goes to Vault as LP profit
-            TRADING_STORAGE.sendCollateral(address(VAULT), uint256(trade.collateral));
-        } else if (payoutUsdc <= uint256(trade.collateral)) {
-            // Partial loss: remaining goes to trader, loss goes to Vault
-            uint256 lossAmount = uint256(trade.collateral) - payoutUsdc;
+            // Full loss (or fee consumed payout): remaining collateral goes to Vault
+            uint256 remaining = uint256(trade.collateral) - closeFee;
+            if (remaining > 0) TRADING_STORAGE.sendCollateral(address(VAULT), remaining);
+        } else if (payoutUsdc <= uint256(trade.collateral) - closeFee) {
+            // Partial loss: payout to trader, rest to Vault
             TRADING_STORAGE.sendCollateral(msg.sender, payoutUsdc);
-            TRADING_STORAGE.sendCollateral(address(VAULT), lossAmount);
+            uint256 toVault = uint256(trade.collateral) - closeFee - payoutUsdc;
+            if (toVault > 0) TRADING_STORAGE.sendCollateral(address(VAULT), toVault);
         } else {
-            // Profit: return full collateral to trader from Storage, profit from Vault
-            uint256 profitAmount = payoutUsdc - uint256(trade.collateral);
-            TRADING_STORAGE.sendCollateral(msg.sender, uint256(trade.collateral));
-            VAULT.sendPayout(msg.sender, profitAmount);
+            // Profit: return remaining collateral to trader from Storage, profit from Vault
+            uint256 storageToTrader = uint256(trade.collateral) - closeFee;
+            TRADING_STORAGE.sendCollateral(msg.sender, storageToTrader);
+            uint256 profitFromVault = payoutUsdc - storageToTrader;
+            VAULT.sendPayout(msg.sender, profitFromVault);
         }
     }
 
@@ -352,6 +426,12 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     /*//////////////////////////////////////////////////////////////
                             ADMIN FUNCTIONS
     //////////////////////////////////////////////////////////////*/
+
+    function setTreasury(address _treasury) external onlyOwner {
+        if (_treasury == address(0)) revert ZeroAddress();
+        treasury = _treasury;
+        emit TreasuryUpdated(_treasury);
+    }
 
     function pause() external onlyOwner whenNotPaused {
         _paused = true;
