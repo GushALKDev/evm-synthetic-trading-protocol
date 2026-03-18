@@ -7,6 +7,7 @@ import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 import {TradingStorage} from "./TradingStorage.sol";
 import {Vault} from "./Vault.sol";
 import {IOracle} from "./interfaces/IOracle.sol";
+import {FundingLib} from "./libraries/FundingLib.sol";
 
 /**
  * @title TradingEngine
@@ -56,7 +57,15 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         uint128 openPrice,
         uint256 fee
     );
-    event TradeClosed(uint256 indexed tradeId, address indexed user, uint128 closePrice, int256 pnlUsdc, uint256 payoutUsdc, uint256 fee);
+    event TradeClosed(
+        uint256 indexed tradeId,
+        address indexed user,
+        uint128 closePrice,
+        int256 pnlUsdc,
+        uint256 payoutUsdc,
+        uint256 fee,
+        int256 fundingOwedUsdc
+    );
     event FeesDistributed(uint256 vaultFee, uint256 treasuryFee);
     event TpUpdated(uint256 indexed tradeId, uint128 newTp);
     event SlUpdated(uint256 indexed tradeId, uint128 newSl);
@@ -227,6 +236,36 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     }
 
     /**
+     * @dev Update cumulative funding index for a pair based on time elapsed and OI imbalance.
+     *      Called before any OI change (open/close) to materialize accrued funding.
+     */
+    function _updateFundingIndex(uint256 _pairIndex) internal {
+        uint256 lastUpdated = TRADING_STORAGE.getFundingLastUpdated(_pairIndex);
+        if (lastUpdated == 0) {
+            // First interaction — initialize timestamp, index stays at 0
+            TRADING_STORAGE.updateFundingState(_pairIndex, 0, block.timestamp);
+            return;
+        }
+        uint256 deltaTime = block.timestamp - lastUpdated;
+        if (deltaTime == 0) return;
+
+        uint256 oiLong = TRADING_STORAGE.getOpenInterestLong(_pairIndex);
+        uint256 oiShort = TRADING_STORAGE.getOpenInterestShort(_pairIndex);
+        int256 indexDelta = FundingLib.calculateIndexDelta(oiLong, oiShort, deltaTime);
+        int256 newIndex = TRADING_STORAGE.getCumulativeFundingIndex(_pairIndex) + indexDelta;
+        TRADING_STORAGE.updateFundingState(_pairIndex, newIndex, block.timestamp);
+    }
+
+    /**
+     * @dev Calculate funding owed for a trade. Extracted to avoid stack-too-deep.
+     */
+    function _calculateFunding(uint256 _tradeId, uint256 _posSizeWad, bool _isLong, uint256 _pairIndex) internal view returns (int256) {
+        int256 currentIndex = TRADING_STORAGE.getCumulativeFundingIndex(_pairIndex);
+        int256 entryIndex = TRADING_STORAGE.getTradeFundingIndex(_tradeId);
+        return FundingLib.calculateFundingOwed(_posSizeWad, _isLong, currentIndex, entryIndex);
+    }
+
+    /**
      * @dev Transfer collateral, deduct fee, store trade, track OI, emit event.
      *      Extracted to a separate function to avoid stack-too-deep in openTrade.
      */
@@ -247,7 +286,8 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         _distributeFees(fee);
 
         tradeId = TRADING_STORAGE.storeTrade(_user, _isLong, _pairIndex, _leverage, effectiveCollateral, _executionPrice, _tp, _sl);
-        TRADING_STORAGE.increaseOpenInterest(_pairIndex, _positionSizeWad(effectiveCollateral, _leverage));
+        TRADING_STORAGE.setTradeFundingIndex(tradeId, TRADING_STORAGE.getCumulativeFundingIndex(_pairIndex));
+        TRADING_STORAGE.increaseOpenInterest(_pairIndex, _positionSizeWad(effectiveCollateral, _leverage), _isLong);
         emit TradeOpened(tradeId, _user, _pairIndex, _isLong, effectiveCollateral, _leverage, _executionPrice, fee);
     }
 
@@ -317,6 +357,9 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         oraclePrice = _applySpread(oraclePrice, _isLong, true);
         _validateSlippage(oraclePrice, _expectedPrice, _slippageBps);
 
+        // --- EFFECTS ---
+        _updateFundingIndex(_pairIndex);
+
         // --- INTERACTIONS ---
         tradeId = _executeOpen(msg.sender, _pairIndex, _isLong, _collateral, _leverage, oraclePrice, _tp, _sl);
     }
@@ -341,9 +384,16 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         uint128 executionPrice = _applySpread(oraclePrice, trade.isLong, false);
         _validateSlippage(executionPrice, _expectedPrice, _slippageBps);
 
+        // Update funding index before computing funding owed
+        _updateFundingIndex(trade.pairIndex);
+
         int256 pnlUsdc = _calculatePnl(trade.collateral, trade.leverage, trade.openPrice, executionPrice, trade.isLong);
-        uint256 payoutUsdc = _calculatePayout(trade.collateral, pnlUsdc);
         uint256 positionSize = _positionSizeWad(trade.collateral, trade.leverage);
+
+        // Calculate funding owed and adjust PnL
+        int256 fundingOwedUsdc = _calculateFunding(_tradeId, positionSize, trade.isLong, trade.pairIndex);
+        int256 adjustedPnl = pnlUsdc - fundingOwedUsdc;
+        uint256 payoutUsdc = _calculatePayout(trade.collateral, adjustedPnl);
 
         // Close fee deducted from payout
         uint256 closeFee = _calculateFee(trade.collateral, trade.leverage, CLOSE_FEE_BPS);
@@ -356,8 +406,8 @@ contract TradingEngine is Ownable, ReentrancyGuard {
 
         // --- EFFECTS ---
         TRADING_STORAGE.deleteTrade(_tradeId);
-        TRADING_STORAGE.decreaseOpenInterest(trade.pairIndex, positionSize);
-        emit TradeClosed(_tradeId, msg.sender, executionPrice, pnlUsdc, payoutUsdc, closeFee);
+        TRADING_STORAGE.decreaseOpenInterest(trade.pairIndex, positionSize, trade.isLong);
+        emit TradeClosed(_tradeId, msg.sender, executionPrice, pnlUsdc, payoutUsdc, closeFee, fundingOwedUsdc);
 
         // --- INTERACTIONS ---
         // Distribute close fee from collateral in TradingStorage

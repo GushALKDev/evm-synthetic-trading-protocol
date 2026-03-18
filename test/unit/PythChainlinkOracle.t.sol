@@ -54,17 +54,13 @@ contract PythChainlinkOracleTest is Test {
 
     function _createPriceUpdate(int64 price, uint64 conf, int32 expo) internal view returns (bytes[] memory) {
         bytes[] memory updateData = new bytes[](1);
-        updateData[0] = mockPyth.createPriceFeedUpdateData(
-            BTC_FEED_ID, price, conf, expo, price, conf, uint64(block.timestamp), uint64(block.timestamp - 1)
-        );
+        updateData[0] = mockPyth.createPriceFeedUpdateData(BTC_FEED_ID, price, conf, expo, price, conf, uint64(block.timestamp), uint64(block.timestamp - 1));
         return updateData;
     }
 
     function _createPriceUpdateWithTime(int64 price, uint64 conf, int32 expo, uint64 publishTime) internal view returns (bytes[] memory) {
         bytes[] memory updateData = new bytes[](1);
-        updateData[0] = mockPyth.createPriceFeedUpdateData(
-            BTC_FEED_ID, price, conf, expo, price, conf, publishTime, publishTime > 0 ? publishTime - 1 : 0
-        );
+        updateData[0] = mockPyth.createPriceFeedUpdateData(BTC_FEED_ID, price, conf, expo, price, conf, publishTime, publishTime > 0 ? publishTime - 1 : 0);
         return updateData;
     }
 
@@ -96,7 +92,7 @@ contract PythChainlinkOracleTest is Test {
     function test_Oracle_ReceiveEth() public {
         uint256 balBefore = address(oracle).balance;
         vm.deal(address(this), 1 ether);
-        (bool ok,) = address(oracle).call{value: 0.5 ether}("");
+        (bool ok, ) = address(oracle).call{value: 0.5 ether}("");
         assertTrue(ok);
         assertEq(address(oracle).balance, balBefore + 0.5 ether);
     }
@@ -231,7 +227,7 @@ contract PythChainlinkOracleTest is Test {
 
     function test_GetPrice_RevertOnWideConfidence() public {
         // Confidence = 3% of price (> MAX_CONFIDENCE_BPS of 2%)
-        uint64 wideConf = uint64(uint256(uint64(BTC_PRICE)) * 3 / 100);
+        uint64 wideConf = uint64((uint256(uint64(BTC_PRICE)) * 3) / 100);
         bytes[] memory updateData = _createPriceUpdate(BTC_PRICE, wideConf, BTC_EXPO);
 
         vm.expectRevert(abi.encodeWithSelector(PythChainlinkOracle.ConfidenceTooWide.selector, wideConf, BTC_PRICE));
@@ -240,7 +236,7 @@ contract PythChainlinkOracleTest is Test {
 
     function test_GetPrice_NarrowConfidencePasses() public {
         // Confidence = 0.5% of price (< MAX_CONFIDENCE_BPS of 2%)
-        uint64 narrowConf = uint64(uint256(uint64(BTC_PRICE)) * 5 / 1000);
+        uint64 narrowConf = uint64((uint256(uint64(BTC_PRICE)) * 5) / 1000);
         bytes[] memory updateData = _createPriceUpdate(BTC_PRICE, narrowConf, BTC_EXPO);
 
         uint128 price = _getPrice(updateData);
@@ -249,7 +245,7 @@ contract PythChainlinkOracleTest is Test {
 
     function test_GetPrice_EdgeConfidence2Percent() public {
         // Confidence = exactly 2% of price (= MAX_CONFIDENCE_BPS, should pass)
-        uint64 edgeConf = uint64(uint256(uint64(BTC_PRICE)) * 2 / 100);
+        uint64 edgeConf = uint64((uint256(uint64(BTC_PRICE)) * 2) / 100);
         bytes[] memory updateData = _createPriceUpdate(BTC_PRICE, edgeConf, BTC_EXPO);
 
         uint128 price = _getPrice(updateData);
@@ -262,7 +258,7 @@ contract PythChainlinkOracleTest is Test {
 
     function test_GetPrice_RevertOnExcessiveDeviation() public {
         // Set Chainlink 5% higher than Pyth (> MAX_DEVIATION_BPS of 3%)
-        mockChainlink.setAnswer(int256(CL_BTC_PRICE * 105 / 100));
+        mockChainlink.setAnswer(int256((CL_BTC_PRICE * 105) / 100));
 
         bytes[] memory updateData = _createPriceUpdate(BTC_PRICE, BTC_CONF, BTC_EXPO);
 
@@ -272,7 +268,7 @@ contract PythChainlinkOracleTest is Test {
 
     function test_GetPrice_WithinBoundsDeviation() public {
         // Set Chainlink 2% higher (< MAX_DEVIATION_BPS of 3%)
-        mockChainlink.setAnswer(int256(CL_BTC_PRICE * 102 / 100));
+        mockChainlink.setAnswer(int256((CL_BTC_PRICE * 102) / 100));
 
         bytes[] memory updateData = _createPriceUpdate(BTC_PRICE, BTC_CONF, BTC_EXPO);
 
@@ -282,7 +278,7 @@ contract PythChainlinkOracleTest is Test {
 
     function test_GetPrice_SymmetricDeviation() public {
         // Chainlink 2% lower than Pyth
-        mockChainlink.setAnswer(int256(CL_BTC_PRICE * 98 / 100));
+        mockChainlink.setAnswer(int256((CL_BTC_PRICE * 98) / 100));
 
         bytes[] memory updateData = _createPriceUpdate(BTC_PRICE, BTC_CONF, BTC_EXPO);
 
@@ -292,7 +288,7 @@ contract PythChainlinkOracleTest is Test {
 
     function test_GetPrice_EdgeDeviation3Percent() public {
         // Exactly 3% deviation (= MAX_DEVIATION_BPS, should pass)
-        mockChainlink.setAnswer(int256(CL_BTC_PRICE * 103 / 100));
+        mockChainlink.setAnswer(int256((CL_BTC_PRICE * 103) / 100));
 
         bytes[] memory updateData = _createPriceUpdate(BTC_PRICE, BTC_CONF, BTC_EXPO);
 
@@ -362,7 +358,14 @@ contract PythChainlinkOracleTest is Test {
 
         bytes[] memory updateData = new bytes[](1);
         updateData[0] = mockPyth.createPriceFeedUpdateData(
-            bytes32(uint256(2)), forexPrice, forexConf, forexExpo, forexPrice, forexConf, uint64(block.timestamp), uint64(block.timestamp - 1)
+            bytes32(uint256(2)),
+            forexPrice,
+            forexConf,
+            forexExpo,
+            forexPrice,
+            forexConf,
+            uint64(block.timestamp),
+            uint64(block.timestamp - 1)
         );
 
         uint128 price = oracle.getPrice(1, updateData);

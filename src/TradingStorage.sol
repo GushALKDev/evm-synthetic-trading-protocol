@@ -76,9 +76,29 @@ contract TradingStorage is Ownable {
     mapping(address => uint256[]) private _userTrades;
 
     /**
-     * @notice Total open interest per pair (18 decimals)
+     * @notice Long open interest per pair (18 decimals)
      */
-    mapping(uint256 => uint256) private _openInterest;
+    mapping(uint256 => uint256) private _openInterestLong;
+
+    /**
+     * @notice Short open interest per pair (18 decimals)
+     */
+    mapping(uint256 => uint256) private _openInterestShort;
+
+    /**
+     * @notice Cumulative funding index per pair (signed, 18 decimals)
+     */
+    mapping(uint256 => int256) private _cumulativeFundingIndex;
+
+    /**
+     * @notice Timestamp of last funding index update per pair
+     */
+    mapping(uint256 => uint256) private _fundingLastUpdated;
+
+    /**
+     * @notice Entry funding index per trade ID (signed, 18 decimals)
+     */
+    mapping(uint256 => int256) private _tradeFundingIndex;
 
     /**
      * @notice Trading pair configurations
@@ -93,7 +113,8 @@ contract TradingStorage is Ownable {
     event TradeDeleted(uint256 indexed tradeId, address indexed user);
     event TradeTpUpdated(uint256 indexed tradeId, uint128 newTp);
     event TradeSlUpdated(uint256 indexed tradeId, uint128 newSl);
-    event OpenInterestUpdated(uint256 indexed pairIndex, uint256 newOI);
+    event OpenInterestUpdated(uint256 indexed pairIndex, uint256 longOI, uint256 shortOI);
+    event CumulativeFundingIndexUpdated(uint256 indexed pairIndex, int256 newIndex, uint256 timestamp);
     event CollateralSent(address indexed to, uint256 amount);
     event PairAdded(uint256 indexed pairIndex, string name);
     event PairUpdated(uint256 indexed pairIndex);
@@ -277,26 +298,66 @@ contract TradingStorage is Ownable {
      * @notice Increase open interest for a pair
      * @param _pairIndex The pair index
      * @param _amount The amount to add (18 decimals)
+     * @param _isLong Whether this is a long position
      */
-    function increaseOpenInterest(uint256 _pairIndex, uint256 _amount) external onlyTradingEngine {
+    function increaseOpenInterest(uint256 _pairIndex, uint256 _amount, bool _isLong) external onlyTradingEngine {
         if (_pairIndex >= _pairs.length) revert PairNotFound(_pairIndex);
-        uint256 newOI = _openInterest[_pairIndex] + _amount;
+        uint256 longOI = _openInterestLong[_pairIndex];
+        uint256 shortOI = _openInterestShort[_pairIndex];
+        if (_isLong) {
+            longOI += _amount;
+            _openInterestLong[_pairIndex] = longOI;
+        } else {
+            shortOI += _amount;
+            _openInterestShort[_pairIndex] = shortOI;
+        }
+        uint256 totalOI = longOI + shortOI;
         uint128 maxOI = _pairs[_pairIndex].maxOI;
-        if (newOI > uint256(maxOI)) revert MaxOpenInterestExceeded(newOI, maxOI);
-        _openInterest[_pairIndex] = newOI;
-        emit OpenInterestUpdated(_pairIndex, newOI);
+        if (totalOI > uint256(maxOI)) revert MaxOpenInterestExceeded(totalOI, maxOI);
+        emit OpenInterestUpdated(_pairIndex, longOI, shortOI);
     }
 
     /**
      * @notice Decrease open interest for a pair
      * @param _pairIndex The pair index
      * @param _amount The amount to subtract (18 decimals)
+     * @param _isLong Whether this is a long position
      */
-    function decreaseOpenInterest(uint256 _pairIndex, uint256 _amount) external onlyTradingEngine {
+    function decreaseOpenInterest(uint256 _pairIndex, uint256 _amount, bool _isLong) external onlyTradingEngine {
         if (_pairIndex >= _pairs.length) revert PairNotFound(_pairIndex);
-        uint256 newOI = _openInterest[_pairIndex] - _amount;
-        _openInterest[_pairIndex] = newOI;
-        emit OpenInterestUpdated(_pairIndex, newOI);
+        uint256 longOI;
+        uint256 shortOI;
+        if (_isLong) {
+            longOI = _openInterestLong[_pairIndex] - _amount;
+            _openInterestLong[_pairIndex] = longOI;
+            shortOI = _openInterestShort[_pairIndex];
+        } else {
+            longOI = _openInterestLong[_pairIndex];
+            shortOI = _openInterestShort[_pairIndex] - _amount;
+            _openInterestShort[_pairIndex] = shortOI;
+        }
+        emit OpenInterestUpdated(_pairIndex, longOI, shortOI);
+    }
+
+    /**
+     * @notice Update the cumulative funding index and timestamp for a pair
+     * @param _pairIndex The pair index
+     * @param _newIndex The new cumulative funding index
+     * @param _timestamp The timestamp of the update
+     */
+    function updateFundingState(uint256 _pairIndex, int256 _newIndex, uint256 _timestamp) external onlyTradingEngine {
+        _cumulativeFundingIndex[_pairIndex] = _newIndex;
+        _fundingLastUpdated[_pairIndex] = _timestamp;
+        emit CumulativeFundingIndexUpdated(_pairIndex, _newIndex, _timestamp);
+    }
+
+    /**
+     * @notice Set the entry funding index for a trade
+     * @param _tradeId The trade ID
+     * @param _index The funding index at entry
+     */
+    function setTradeFundingIndex(uint256 _tradeId, int256 _index) external onlyTradingEngine {
+        _tradeFundingIndex[_tradeId] = _index;
     }
 
     /**
@@ -344,12 +405,57 @@ contract TradingStorage is Ownable {
     }
 
     /**
-     * @notice Get the total open interest for a pair
+     * @notice Get the total open interest for a pair (long + short)
      * @param _pairIndex The pair index
      * @return The total OI (18 decimals)
      */
     function getOpenInterest(uint256 _pairIndex) external view returns (uint256) {
-        return _openInterest[_pairIndex];
+        return _openInterestLong[_pairIndex] + _openInterestShort[_pairIndex];
+    }
+
+    /**
+     * @notice Get the long open interest for a pair
+     * @param _pairIndex The pair index
+     * @return The long OI (18 decimals)
+     */
+    function getOpenInterestLong(uint256 _pairIndex) external view returns (uint256) {
+        return _openInterestLong[_pairIndex];
+    }
+
+    /**
+     * @notice Get the short open interest for a pair
+     * @param _pairIndex The pair index
+     * @return The short OI (18 decimals)
+     */
+    function getOpenInterestShort(uint256 _pairIndex) external view returns (uint256) {
+        return _openInterestShort[_pairIndex];
+    }
+
+    /**
+     * @notice Get the cumulative funding index for a pair
+     * @param _pairIndex The pair index
+     * @return The cumulative funding index
+     */
+    function getCumulativeFundingIndex(uint256 _pairIndex) external view returns (int256) {
+        return _cumulativeFundingIndex[_pairIndex];
+    }
+
+    /**
+     * @notice Get the last funding update timestamp for a pair
+     * @param _pairIndex The pair index
+     * @return The timestamp of last update
+     */
+    function getFundingLastUpdated(uint256 _pairIndex) external view returns (uint256) {
+        return _fundingLastUpdated[_pairIndex];
+    }
+
+    /**
+     * @notice Get the entry funding index for a trade
+     * @param _tradeId The trade ID
+     * @return The entry funding index
+     */
+    function getTradeFundingIndex(uint256 _tradeId) external view returns (int256) {
+        return _tradeFundingIndex[_tradeId];
     }
 
     /**

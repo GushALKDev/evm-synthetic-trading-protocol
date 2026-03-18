@@ -25,7 +25,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 | 2         | Core: Trading Engine      | 12     | 12        | 100%     |
 | 3         | Oracle (Pyth + Chainlink) | 10     | 10        | 100%     |
 | 4         | Fee System                | 5      | 5         | 100%     |
-| 5         | Funding Rates             | 4      | 0         | 0%       |
+| 5         | Funding Rates             | 4      | 4         | 100%     |
 | 6         | Risk Control (OI)         | 6      | 0         | 0%       |
 | 7         | Liquidations              | 8      | 0         | 0%       |
 | 8         | Limit Orders (TP/SL)      | 5      | 0         | 0%       |
@@ -34,7 +34,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 | 11        | Governance Token          | 4      | 0         | 0%       |
 | 12        | Testing & Audit           | 8      | 0         | 0%       |
 | 13        | V2 Improvements           | 7      | 0         | 0%       |
-| **TOTAL** |                           | **94** | **35**    | **37%**  |
+| **TOTAL** |                           | **94** | **39**    | **41%**  |
 
 ---
 
@@ -201,10 +201,10 @@ Each phase should be completed before moving to the next. Within each phase, the
 >
 > **Dependencies:** Phase 2, Phase 4
 
-- [ ] **5.1** Contract `FundingLib.sol` (library)
-- [ ] **5.2** Funding Rate calculation based on Long vs Short OI
-- [ ] **5.3** Cumulative index (`cumulativeFundingIndex`)
-- [ ] **5.4** Apply funding when closing trades (based on time open)
+- [x] **5.1** Contract `FundingLib.sol` (library)
+- [x] **5.2** Funding Rate calculation based on Long vs Short OI
+- [x] **5.3** Cumulative index (`cumulativeFundingIndex`)
+- [x] **5.4** Apply funding when closing trades (based on time open)
 
 **Deliverables:**
 
@@ -397,6 +397,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 
 | Date       | Changes                 |
 | :--------- | :---------------------- |
+| 2026-03-18 | Phase 5: Funding rates — FundingLib, OI long/short split, cumulative index, funding deducted/credited on close |
 | 2026-03-13 | Phase 4: Fee system — open/close fees (0.08%), 80/20 split (Vault/treasury), integrated in TradingEngine |
 | 2026-02-27 | Phase 3: Oracle abstraction — IOracle interface, OracleAggregator→PythChainlinkOracle, TradingEngine decoupled from oracle impl |
 | 2026-02-26 | Phase 3: OracleAggregator + TradingEngine oracle integration complete (12/12) |

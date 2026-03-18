@@ -134,11 +134,11 @@ contract PythChainlinkOracleForkTest is Test {
         uint128 price = oracle.getPrice(PAIR_BTC, priceUpdate);
 
         // Also read Chainlink directly for logging
-        (, int256 clAnswer,,,) = AggregatorV3Interface(CHAINLINK_UBTC_USD).latestRoundData();
+        (, int256 clAnswer, , , ) = AggregatorV3Interface(CHAINLINK_UBTC_USD).latestRoundData();
         uint256 chainlink18 = uint256(clAnswer) * 1e10; // 8 dec → 18 dec
 
         uint256 diff = price > uint128(chainlink18) ? price - uint128(chainlink18) : uint128(chainlink18) - price;
-        uint256 deviationBps = diff * 10_000 / chainlink18;
+        uint256 deviationBps = (diff * 10_000) / chainlink18;
 
         console2.log("BTC Pyth (18 dec):", price);
         console2.log("BTC Chainlink (18 dec):", chainlink18);
@@ -152,11 +152,11 @@ contract PythChainlinkOracleForkTest is Test {
 
         uint128 price = oracle.getPrice(PAIR_ETH, priceUpdate);
 
-        (, int256 clAnswer,,,) = AggregatorV3Interface(CHAINLINK_UETH_USD).latestRoundData();
+        (, int256 clAnswer, , , ) = AggregatorV3Interface(CHAINLINK_UETH_USD).latestRoundData();
         uint256 chainlink18 = uint256(clAnswer) * 1e10;
 
         uint256 diff = price > uint128(chainlink18) ? price - uint128(chainlink18) : uint128(chainlink18) - price;
-        uint256 deviationBps = diff * 10_000 / chainlink18;
+        uint256 deviationBps = (diff * 10_000) / chainlink18;
 
         console2.log("ETH Pyth (18 dec):", price);
         console2.log("ETH Chainlink (18 dec):", chainlink18);
@@ -249,7 +249,7 @@ contract PythChainlinkOracleForkTest is Test {
         PythStructs.Price memory btcPrice = IPyth(PYTH).getPriceUnsafe(PYTH_BTC_USD);
 
         // Confidence should be < 2% of price (MAX_CONFIDENCE_BPS = 200)
-        uint256 confBps = uint256(btcPrice.conf) * 10_000 / uint256(uint64(btcPrice.price));
+        uint256 confBps = (uint256(btcPrice.conf) * 10_000) / uint256(uint64(btcPrice.price));
 
         console2.log("BTC confidence (bps):", confBps);
         console2.log("BTC confidence ($):", btcPrice.conf);

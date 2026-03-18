@@ -41,7 +41,8 @@ contract TradingStorageTest is Test {
     event TradeDeleted(uint256 indexed tradeId, address indexed user);
     event TradeTpUpdated(uint256 indexed tradeId, uint128 newTp);
     event TradeSlUpdated(uint256 indexed tradeId, uint128 newSl);
-    event OpenInterestUpdated(uint256 indexed pairIndex, uint256 newOI);
+    event OpenInterestUpdated(uint256 indexed pairIndex, uint256 longOI, uint256 shortOI);
+    event CumulativeFundingIndexUpdated(uint256 indexed pairIndex, int256 newIndex, uint256 timestamp);
     event CollateralSent(address indexed to, uint256 amount);
     event PairAdded(uint256 indexed pairIndex, string name);
     event PairUpdated(uint256 indexed pairIndex);
@@ -627,78 +628,123 @@ contract TradingStorageTest is Test {
                         OPEN INTEREST TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_IncreaseOpenInterest() public {
+    function test_IncreaseOpenInterest_Long() public {
         vm.prank(tradingEngine);
-        tradingStorage.increaseOpenInterest(0, 1_000 * 1e18);
+        tradingStorage.increaseOpenInterest(0, 1_000 * 1e18, true);
 
         assertEq(tradingStorage.getOpenInterest(0), 1_000 * 1e18);
+        assertEq(tradingStorage.getOpenInterestLong(0), 1_000 * 1e18);
+        assertEq(tradingStorage.getOpenInterestShort(0), 0);
+    }
+
+    function test_IncreaseOpenInterest_Short() public {
+        vm.prank(tradingEngine);
+        tradingStorage.increaseOpenInterest(0, 1_000 * 1e18, false);
+
+        assertEq(tradingStorage.getOpenInterest(0), 1_000 * 1e18);
+        assertEq(tradingStorage.getOpenInterestLong(0), 0);
+        assertEq(tradingStorage.getOpenInterestShort(0), 1_000 * 1e18);
     }
 
     function test_IncreaseOpenInterest_EmitsEvent() public {
         vm.expectEmit(true, false, false, true);
-        emit OpenInterestUpdated(0, 1_000 * 1e18);
+        emit OpenInterestUpdated(0, 1_000 * 1e18, 0);
 
         vm.prank(tradingEngine);
-        tradingStorage.increaseOpenInterest(0, 1_000 * 1e18);
+        tradingStorage.increaseOpenInterest(0, 1_000 * 1e18, true);
     }
 
     function test_IncreaseOpenInterest_Cumulative() public {
         vm.startPrank(tradingEngine);
-        tradingStorage.increaseOpenInterest(0, 1_000 * 1e18);
-        tradingStorage.increaseOpenInterest(0, 2_000 * 1e18);
+        tradingStorage.increaseOpenInterest(0, 1_000 * 1e18, true);
+        tradingStorage.increaseOpenInterest(0, 2_000 * 1e18, true);
         vm.stopPrank();
 
         assertEq(tradingStorage.getOpenInterest(0), 3_000 * 1e18);
     }
 
+    function test_IncreaseOpenInterest_LongAndShortSeparate() public {
+        vm.startPrank(tradingEngine);
+        tradingStorage.increaseOpenInterest(0, 1_000 * 1e18, true);
+        tradingStorage.increaseOpenInterest(0, 2_000 * 1e18, false);
+        vm.stopPrank();
+
+        assertEq(tradingStorage.getOpenInterestLong(0), 1_000 * 1e18);
+        assertEq(tradingStorage.getOpenInterestShort(0), 2_000 * 1e18);
+        assertEq(tradingStorage.getOpenInterest(0), 3_000 * 1e18);
+    }
+
+    function test_IncreaseOpenInterest_MaxOIOnTotal() public {
+        vm.prank(owner);
+        tradingStorage.updatePair(0, 100, 3_000 * 1e18, true);
+
+        vm.startPrank(tradingEngine);
+        tradingStorage.increaseOpenInterest(0, 2_000 * 1e18, true);
+        // Adding short that exceeds total maxOI should revert
+        vm.expectRevert(abi.encodeWithSelector(TradingStorage.MaxOpenInterestExceeded.selector, 3_001 * 1e18, 3_000 * 1e18));
+        tradingStorage.increaseOpenInterest(0, 1_001 * 1e18, false);
+        vm.stopPrank();
+    }
+
     function test_IncreaseOpenInterest_RevertIfNotTradingEngine() public {
         vm.prank(alice);
         vm.expectRevert(TradingStorage.CallerNotTradingEngine.selector);
-        tradingStorage.increaseOpenInterest(0, 1_000 * 1e18);
+        tradingStorage.increaseOpenInterest(0, 1_000 * 1e18, true);
     }
 
     function test_IncreaseOpenInterest_RevertIfPairNotFound() public {
         vm.prank(tradingEngine);
         vm.expectRevert(abi.encodeWithSelector(TradingStorage.PairNotFound.selector, 99));
-        tradingStorage.increaseOpenInterest(99, 1_000 * 1e18);
+        tradingStorage.increaseOpenInterest(99, 1_000 * 1e18, true);
     }
 
-    function test_DecreaseOpenInterest() public {
+    function test_DecreaseOpenInterest_Long() public {
         vm.startPrank(tradingEngine);
-        tradingStorage.increaseOpenInterest(0, 3_000 * 1e18);
-        tradingStorage.decreaseOpenInterest(0, 1_000 * 1e18);
+        tradingStorage.increaseOpenInterest(0, 3_000 * 1e18, true);
+        tradingStorage.decreaseOpenInterest(0, 1_000 * 1e18, true);
         vm.stopPrank();
 
+        assertEq(tradingStorage.getOpenInterestLong(0), 2_000 * 1e18);
+        assertEq(tradingStorage.getOpenInterest(0), 2_000 * 1e18);
+    }
+
+    function test_DecreaseOpenInterest_Short() public {
+        vm.startPrank(tradingEngine);
+        tradingStorage.increaseOpenInterest(0, 3_000 * 1e18, false);
+        tradingStorage.decreaseOpenInterest(0, 1_000 * 1e18, false);
+        vm.stopPrank();
+
+        assertEq(tradingStorage.getOpenInterestShort(0), 2_000 * 1e18);
         assertEq(tradingStorage.getOpenInterest(0), 2_000 * 1e18);
     }
 
     function test_DecreaseOpenInterest_EmitsEvent() public {
         vm.prank(tradingEngine);
-        tradingStorage.increaseOpenInterest(0, 3_000 * 1e18);
+        tradingStorage.increaseOpenInterest(0, 3_000 * 1e18, true);
 
         vm.expectEmit(true, false, false, true);
-        emit OpenInterestUpdated(0, 2_000 * 1e18);
+        emit OpenInterestUpdated(0, 2_000 * 1e18, 0);
 
         vm.prank(tradingEngine);
-        tradingStorage.decreaseOpenInterest(0, 1_000 * 1e18);
+        tradingStorage.decreaseOpenInterest(0, 1_000 * 1e18, true);
     }
 
     function test_DecreaseOpenInterest_RevertOnUnderflow() public {
         vm.prank(tradingEngine);
         vm.expectRevert();
-        tradingStorage.decreaseOpenInterest(0, 1_000 * 1e18);
+        tradingStorage.decreaseOpenInterest(0, 1_000 * 1e18, true);
     }
 
     function test_DecreaseOpenInterest_RevertIfPairNotFound() public {
         vm.prank(tradingEngine);
         vm.expectRevert(abi.encodeWithSelector(TradingStorage.PairNotFound.selector, 99));
-        tradingStorage.decreaseOpenInterest(99, 1_000 * 1e18);
+        tradingStorage.decreaseOpenInterest(99, 1_000 * 1e18, true);
     }
 
     function test_DecreaseOpenInterest_RevertIfNotTradingEngine() public {
         vm.prank(alice);
         vm.expectRevert(TradingStorage.CallerNotTradingEngine.selector);
-        tradingStorage.decreaseOpenInterest(0, 1_000 * 1e18);
+        tradingStorage.decreaseOpenInterest(0, 1_000 * 1e18, true);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -821,7 +867,7 @@ contract TradingStorageTest is Test {
         assertEq(tradingStorage.getOpenInterest(0), 0);
 
         vm.prank(tradingEngine);
-        tradingStorage.increaseOpenInterest(0, 1_000 * 1e18);
+        tradingStorage.increaseOpenInterest(0, 1_000 * 1e18, true);
 
         assertEq(tradingStorage.getOpenInterest(0), 1_000 * 1e18);
     }
@@ -850,6 +896,71 @@ contract TradingStorageTest is Test {
         _storeTrade(alice);
 
         assertEq(tradingStorage.getTradeCounter(), 1);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        FUNDING STATE TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_UpdateFundingState() public {
+        vm.prank(tradingEngine);
+        tradingStorage.updateFundingState(0, 100e18, 1_000_000);
+
+        assertEq(tradingStorage.getCumulativeFundingIndex(0), 100e18);
+        assertEq(tradingStorage.getFundingLastUpdated(0), 1_000_000);
+    }
+
+    function test_UpdateFundingState_EmitsEvent() public {
+        vm.expectEmit(true, false, false, true);
+        emit CumulativeFundingIndexUpdated(0, 100e18, 1_000_000);
+
+        vm.prank(tradingEngine);
+        tradingStorage.updateFundingState(0, 100e18, 1_000_000);
+    }
+
+    function test_UpdateFundingState_NegativeIndex() public {
+        vm.prank(tradingEngine);
+        tradingStorage.updateFundingState(0, -500e18, 2_000_000);
+
+        assertEq(tradingStorage.getCumulativeFundingIndex(0), -500e18);
+    }
+
+    function test_UpdateFundingState_RevertIfNotTradingEngine() public {
+        vm.prank(alice);
+        vm.expectRevert(TradingStorage.CallerNotTradingEngine.selector);
+        tradingStorage.updateFundingState(0, 100e18, 1_000_000);
+    }
+
+    function test_SetTradeFundingIndex() public {
+        vm.prank(tradingEngine);
+        tradingStorage.setTradeFundingIndex(0, 42e18);
+
+        assertEq(tradingStorage.getTradeFundingIndex(0), 42e18);
+    }
+
+    function test_SetTradeFundingIndex_Negative() public {
+        vm.prank(tradingEngine);
+        tradingStorage.setTradeFundingIndex(0, -42e18);
+
+        assertEq(tradingStorage.getTradeFundingIndex(0), -42e18);
+    }
+
+    function test_SetTradeFundingIndex_RevertIfNotTradingEngine() public {
+        vm.prank(alice);
+        vm.expectRevert(TradingStorage.CallerNotTradingEngine.selector);
+        tradingStorage.setTradeFundingIndex(0, 42e18);
+    }
+
+    function test_GetCumulativeFundingIndex_DefaultZero() public view {
+        assertEq(tradingStorage.getCumulativeFundingIndex(0), 0);
+    }
+
+    function test_GetFundingLastUpdated_DefaultZero() public view {
+        assertEq(tradingStorage.getFundingLastUpdated(0), 0);
+    }
+
+    function test_GetTradeFundingIndex_DefaultZero() public view {
+        assertEq(tradingStorage.getTradeFundingIndex(0), 0);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -920,13 +1031,13 @@ contract TradingStorageTest is Test {
         assertEq(usdc.balanceOf(address(tradingStorage)), depositAmount - sendAmount);
     }
 
-    function testFuzz_OpenInterest(uint256 increaseAmount, uint256 decreaseAmount) public {
+    function testFuzz_OpenInterest(uint256 increaseAmount, uint256 decreaseAmount, bool isLong) public {
         increaseAmount = bound(increaseAmount, 1, 10_000_000 * 1e18); // Bounded to pair maxOI
         decreaseAmount = bound(decreaseAmount, 0, increaseAmount);
 
         vm.startPrank(tradingEngine);
-        tradingStorage.increaseOpenInterest(0, increaseAmount);
-        tradingStorage.decreaseOpenInterest(0, decreaseAmount);
+        tradingStorage.increaseOpenInterest(0, increaseAmount, isLong);
+        tradingStorage.decreaseOpenInterest(0, decreaseAmount, isLong);
         vm.stopPrank();
 
         assertEq(tradingStorage.getOpenInterest(0), increaseAmount - decreaseAmount);
@@ -1010,10 +1121,10 @@ contract TradingStorageTest is Test {
 
         uint256 oiBefore = tradingStorage.getOpenInterest(0);
 
-        tradingStorage.increaseOpenInterest(0, 5_000 * 1e18);
-        tradingStorage.increaseOpenInterest(0, 3_000 * 1e18);
-        tradingStorage.decreaseOpenInterest(0, 5_000 * 1e18);
-        tradingStorage.decreaseOpenInterest(0, 3_000 * 1e18);
+        tradingStorage.increaseOpenInterest(0, 5_000 * 1e18, true);
+        tradingStorage.increaseOpenInterest(0, 3_000 * 1e18, false);
+        tradingStorage.decreaseOpenInterest(0, 5_000 * 1e18, true);
+        tradingStorage.decreaseOpenInterest(0, 3_000 * 1e18, false);
 
         uint256 oiAfter = tradingStorage.getOpenInterest(0);
 
