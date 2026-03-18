@@ -8,6 +8,7 @@ import {TradingStorage} from "./TradingStorage.sol";
 import {Vault} from "./Vault.sol";
 import {IOracle} from "./interfaces/IOracle.sol";
 import {FundingLib} from "./libraries/FundingLib.sol";
+import {SpreadManager} from "./SpreadManager.sol";
 
 /**
  * @title TradingEngine
@@ -25,7 +26,6 @@ contract TradingEngine is Ownable, ReentrancyGuard {
 
     uint256 public constant MAX_PROFIT_MULTIPLIER = 9;
     uint256 public constant MIN_COLLATERAL = 1e6; // 1 USDC
-    uint256 public constant BASE_SPREAD_BPS = 5;
     uint256 public constant BPS_DENOMINATOR = 10_000;
     uint256 public constant OPEN_FEE_BPS = 8; // 0.08% of position size
     uint256 public constant CLOSE_FEE_BPS = 8; // 0.08% of position size
@@ -39,6 +39,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     Vault public immutable VAULT;
     IOracle public immutable ORACLE;
     address public immutable ASSET;
+    SpreadManager public immutable SPREAD_MANAGER;
 
     bool private _paused;
     address public treasury;
@@ -127,15 +128,17 @@ contract TradingEngine is Ownable, ReentrancyGuard {
 
     /**
      * @dev Apply spread to oracle price. Spread makes execution worse for the trader.
-     *      Long open / Short close: price goes UP → price * (10000 + 5) / 10000
-     *      Long close / Short open: price goes DOWN → price * (10000 - 5) / 10000
+     *      Long open / Short close: price goes UP → price * (10000 + spread) / 10000
+     *      Long close / Short open: price goes DOWN → price * (10000 - spread) / 10000
      */
-    function _applySpread(uint128 _oraclePrice, bool _isLong, bool _isOpen) internal pure returns (uint128) {
+    function _applySpread(uint128 _oraclePrice, bool _isLong, bool _isOpen, uint16 _pairIndex) internal view returns (uint128) {
+        uint256 currentOI = TRADING_STORAGE.getOpenInterest(_pairIndex);
+        uint256 spreadBps = SPREAD_MANAGER.getSpreadBps(_pairIndex, currentOI);
         bool spreadUp = (_isLong && _isOpen) || (!_isLong && !_isOpen);
         if (spreadUp) {
-            return uint128((uint256(_oraclePrice) * (BPS_DENOMINATOR + BASE_SPREAD_BPS)) / BPS_DENOMINATOR);
+            return uint128((uint256(_oraclePrice) * (BPS_DENOMINATOR + spreadBps)) / BPS_DENOMINATOR);
         } else {
-            return uint128((uint256(_oraclePrice) * (BPS_DENOMINATOR - BASE_SPREAD_BPS)) / BPS_DENOMINATOR);
+            return uint128((uint256(_oraclePrice) * (BPS_DENOMINATOR - spreadBps)) / BPS_DENOMINATOR);
         }
     }
 
@@ -304,14 +307,21 @@ contract TradingEngine is Ownable, ReentrancyGuard {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address _tradingStorage, address _vault, address _oracle, address _asset, address _treasury, address _owner) {
-        if (_tradingStorage == address(0) || _vault == address(0) || _oracle == address(0) || _asset == address(0) || _treasury == address(0))
-            revert ZeroAddress();
+    constructor(address _tradingStorage, address _vault, address _oracle, address _asset, address _treasury, address _spreadManager, address _owner) {
+        if (
+            _tradingStorage == address(0) ||
+            _vault == address(0) ||
+            _oracle == address(0) ||
+            _asset == address(0) ||
+            _treasury == address(0) ||
+            _spreadManager == address(0)
+        ) revert ZeroAddress();
         _initializeOwner(_owner);
         TRADING_STORAGE = TradingStorage(_tradingStorage);
         VAULT = Vault(_vault);
         ORACLE = IOracle(_oracle);
         ASSET = _asset;
+        SPREAD_MANAGER = SpreadManager(_spreadManager);
         treasury = _treasury;
     }
 
@@ -354,7 +364,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         _validateTpSlAgainstOraclePrice(_tp, _sl, oraclePrice, _isLong);
 
         // Apply spread and validate slippage — reuse oraclePrice variable
-        oraclePrice = _applySpread(oraclePrice, _isLong, true);
+        oraclePrice = _applySpread(oraclePrice, _isLong, true, _pairIndex);
         _validateSlippage(oraclePrice, _expectedPrice, _slippageBps);
 
         // --- EFFECTS ---
@@ -381,7 +391,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         if (trade.user != msg.sender) revert NotTradeOwner(msg.sender, trade.user);
 
         uint128 oraclePrice = _getOraclePrice(trade.pairIndex, priceUpdate);
-        uint128 executionPrice = _applySpread(oraclePrice, trade.isLong, false);
+        uint128 executionPrice = _applySpread(oraclePrice, trade.isLong, false, trade.pairIndex);
         _validateSlippage(executionPrice, _expectedPrice, _slippageBps);
 
         // Update funding index before computing funding owed

@@ -6,6 +6,7 @@ import {TradingEngine} from "../../src/TradingEngine.sol";
 import {TradingStorage} from "../../src/TradingStorage.sol";
 import {Vault} from "../../src/Vault.sol";
 import {MockOracle} from "../mocks/MockOracle.sol";
+import {MockSpreadManager} from "../mocks/MockSpreadManager.sol";
 import {ERC20} from "solady/tokens/ERC20.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 
@@ -35,6 +36,7 @@ contract TradingEngineTest is Test {
     Vault vault;
     MockUSDC usdc;
     MockOracle mockOracle;
+    MockSpreadManager mockSpreadManager;
 
     address owner = makeAddr("owner");
     address alice = makeAddr("alice");
@@ -96,11 +98,20 @@ contract TradingEngineTest is Test {
         usdc = new MockUSDC();
         mockOracle = new MockOracle();
         mockOracle.setPrice(DEFAULT_PAIR_INDEX, DEFAULT_ORACLE_PRICE);
+        mockSpreadManager = new MockSpreadManager(5);
 
         vm.startPrank(owner);
         tradingStorage = new TradingStorage(address(usdc), owner);
         vault = new Vault(address(usdc), owner);
-        engine = new TradingEngine(address(tradingStorage), address(vault), address(mockOracle), address(usdc), treasuryAddr, owner);
+        engine = new TradingEngine(
+            address(tradingStorage),
+            address(vault),
+            address(mockOracle),
+            address(usdc),
+            treasuryAddr,
+            address(mockSpreadManager),
+            owner
+        );
 
         tradingStorage.setTradingEngine(address(engine));
         vault.setTradingEngine(address(engine));
@@ -209,29 +220,38 @@ contract TradingEngineTest is Test {
         assertEq(address(engine.ORACLE()), address(mockOracle));
     }
 
+    function test_Constructor_SetsSpreadManagerImmutable() public view {
+        assertEq(address(engine.SPREAD_MANAGER()), address(mockSpreadManager));
+    }
+
     function test_Constructor_RevertOnZeroTradingStorage() public {
         vm.expectRevert(TradingEngine.ZeroAddress.selector);
-        new TradingEngine(address(0), address(vault), address(mockOracle), address(usdc), treasuryAddr, owner);
+        new TradingEngine(address(0), address(vault), address(mockOracle), address(usdc), treasuryAddr, address(mockSpreadManager), owner);
     }
 
     function test_Constructor_RevertOnZeroVault() public {
         vm.expectRevert(TradingEngine.ZeroAddress.selector);
-        new TradingEngine(address(tradingStorage), address(0), address(mockOracle), address(usdc), treasuryAddr, owner);
+        new TradingEngine(address(tradingStorage), address(0), address(mockOracle), address(usdc), treasuryAddr, address(mockSpreadManager), owner);
     }
 
     function test_Constructor_RevertOnZeroOracle() public {
         vm.expectRevert(TradingEngine.ZeroAddress.selector);
-        new TradingEngine(address(tradingStorage), address(vault), address(0), address(usdc), treasuryAddr, owner);
+        new TradingEngine(address(tradingStorage), address(vault), address(0), address(usdc), treasuryAddr, address(mockSpreadManager), owner);
     }
 
     function test_Constructor_RevertOnZeroAsset() public {
         vm.expectRevert(TradingEngine.ZeroAddress.selector);
-        new TradingEngine(address(tradingStorage), address(vault), address(mockOracle), address(0), treasuryAddr, owner);
+        new TradingEngine(address(tradingStorage), address(vault), address(mockOracle), address(0), treasuryAddr, address(mockSpreadManager), owner);
     }
 
     function test_Constructor_RevertOnZeroTreasury() public {
         vm.expectRevert(TradingEngine.ZeroAddress.selector);
-        new TradingEngine(address(tradingStorage), address(vault), address(mockOracle), address(usdc), address(0), owner);
+        new TradingEngine(address(tradingStorage), address(vault), address(mockOracle), address(usdc), address(0), address(mockSpreadManager), owner);
+    }
+
+    function test_Constructor_RevertOnZeroSpreadManager() public {
+        vm.expectRevert(TradingEngine.ZeroAddress.selector);
+        new TradingEngine(address(tradingStorage), address(vault), address(mockOracle), address(usdc), treasuryAddr, address(0), owner);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -2012,5 +2032,93 @@ contract TradingEngineTest is Test {
             usdc.balanceOf(treasuryAddr);
 
         assertEq(totalBefore, totalAfter);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                      DYNAMIC SPREAD TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_Spread_HigherSpreadOnOpen() public {
+        // Set spread to 20 BPS
+        mockSpreadManager.setSpreadBps(20);
+
+        vm.prank(alice);
+        uint32 tradeId = engine.openTrade(
+            DEFAULT_PAIR_INDEX,
+            true,
+            DEFAULT_COLLATERAL,
+            DEFAULT_LEVERAGE,
+            uint128((uint256(DEFAULT_ORACLE_PRICE) * 10_020) / 10_000), // expected price with 20 BPS
+            DEFAULT_SLIPPAGE_BPS,
+            DEFAULT_TP,
+            DEFAULT_SL,
+            EMPTY_UPDATE
+        );
+
+        TradingStorage.Trade memory trade = tradingStorage.getTrade(tradeId);
+        // Long open: price * (10000 + 20) / 10000
+        uint128 expectedOpen = uint128((uint256(DEFAULT_ORACLE_PRICE) * 10_020) / 10_000);
+        assertEq(trade.openPrice, expectedOpen);
+        assertGt(trade.openPrice, DEFAULT_LONG_OPEN_PRICE); // Higher than 5 BPS spread
+    }
+
+    function test_Spread_HigherSpreadOnClose() public {
+        // Open with default 5 BPS
+        uint32 tradeId = _openDefaultTrade(alice);
+
+        // Set spread to 20 BPS for close
+        mockSpreadManager.setSpreadBps(20);
+
+        uint128 closeExec = uint128((uint256(DEFAULT_ORACLE_PRICE) * 9_980) / 10_000); // 20 BPS down
+        uint256 aliceBefore = usdc.balanceOf(alice);
+
+        vm.prank(alice);
+        engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
+
+        uint256 aliceAfter = usdc.balanceOf(alice);
+        // Higher spread on close means worse execution → less payout
+        assertLt(aliceAfter - aliceBefore, DEFAULT_EFFECTIVE_COLLATERAL);
+    }
+
+    function test_Spread_ZeroSpreadNoAdjustment() public {
+        // Deploy a new engine with a mock that returns 0 spread
+        MockSpreadManager zeroSpreadManager = new MockSpreadManager(0);
+        vm.startPrank(owner);
+        TradingStorage ts2 = new TradingStorage(address(usdc), owner);
+        Vault v2 = new Vault(address(usdc), owner);
+        TradingEngine engine2 = new TradingEngine(
+            address(ts2),
+            address(v2),
+            address(mockOracle),
+            address(usdc),
+            treasuryAddr,
+            address(zeroSpreadManager),
+            owner
+        );
+        ts2.setTradingEngine(address(engine2));
+        v2.setTradingEngine(address(engine2));
+        ts2.addPair("BTC/USD", 100, 10_000_000 * 1e18);
+        vm.stopPrank();
+
+        usdc.mint(alice, 1_000_000 * 10 ** 6);
+        vm.prank(alice);
+        usdc.approve(address(engine2), type(uint256).max);
+
+        vm.prank(alice);
+        uint32 tradeId = engine2.openTrade(
+            DEFAULT_PAIR_INDEX,
+            true,
+            DEFAULT_COLLATERAL,
+            DEFAULT_LEVERAGE,
+            DEFAULT_ORACLE_PRICE,
+            DEFAULT_SLIPPAGE_BPS,
+            DEFAULT_TP,
+            DEFAULT_SL,
+            EMPTY_UPDATE
+        );
+
+        TradingStorage.Trade memory trade = ts2.getTrade(tradeId);
+        // Zero spread → open price equals oracle price
+        assertEq(trade.openPrice, DEFAULT_ORACLE_PRICE);
     }
 }

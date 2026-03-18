@@ -83,16 +83,16 @@ struct Trade {
 
 ```solidity
 /// @notice Configuration for a trading pair
+/// @dev Packed into 2 storage slots
 struct Pair {
-    string name;            // e.g., "BTC/USD"
-    bytes32 pythFeedId;     // Pyth price feed ID
-    address chainlinkFeed;  // Chainlink AggregatorV3 address (deviation anchor)
-    uint256 spreadBps;      // Base spread in basis points (100 = 1%)
-    uint256 maxOI;          // Maximum open interest allowed (USD, 18 decimals)
-    uint256 maxLeverage;    // Maximum leverage for this pair
-    uint256 fundingFactor;  // Funding rate multiplier
-    bool isActive;          // Can be paused independently
+    string name;         // Slot 0 (pointer), e.g., "BTC/USD"
+    uint128 maxOI;       // 16 bytes ─┐
+    uint16 maxLeverage;  //  2 bytes  │  Slot 1 (19 bytes)
+    bool isActive;       //  1 byte  ─┘
 }
+// Note: spreadBps removed from Pair — spread is now computed by SpreadManager
+// Note: pythFeedId/chainlinkFeed are in PairFeed struct (PythChainlinkOracle)
+// Note: fundingFactor is a global constant in FundingLib
 ```
 
 ### Oracle Price
@@ -448,31 +448,17 @@ function liquidate(uint256 tradeId) external nonReentrant whenNotPaused {
 ### Dynamic Spread
 
 ```solidity
-function getExecutionPrice(
-    uint256 pairIndex,
-    bool isLong,
-    bool isOpen
-) external returns (uint256 executionPrice) {
-    (uint256 oraclePrice,) = getPrice(pairIndex);
-    
-    Pair storage pair = pairs[pairIndex];
-    
-    // Calculate spread based on utilization
-    uint256 utilization = openInterest[pairIndex].divWad(vault.totalAssets());
-    uint256 dynamicSpread = pair.spreadBps + utilization.mulWad(pair.impactFactor);
-    
-    // Cap spread at maximum
-    if (dynamicSpread > MAX_SPREAD_BPS) {
-        dynamicSpread = MAX_SPREAD_BPS;
-    }
-    
-    // Apply spread based on direction
-    bool worsePrice = (isLong && isOpen) || (!isLong && !isOpen);
-    
-    if (worsePrice) {
-        executionPrice = oraclePrice.mulWad(WAD + dynamicSpread * WAD / 10000);
+/// @dev Apply spread to oracle price. Delegates to SpreadManager for dynamic spread computation.
+///      Long open / Short close: price goes UP (worse for trader)
+///      Long close / Short open: price goes DOWN (worse for trader)
+function _applySpread(uint128 _oraclePrice, bool _isLong, bool _isOpen, uint16 _pairIndex) internal view returns (uint128) {
+    uint256 currentOI = TRADING_STORAGE.getOpenInterest(_pairIndex);
+    uint256 spreadBps = SPREAD_MANAGER.getSpreadBps(_pairIndex, currentOI);
+    bool spreadUp = (_isLong && _isOpen) || (!_isLong && !_isOpen);
+    if (spreadUp) {
+        return uint128((uint256(_oraclePrice) * (BPS_DENOMINATOR + spreadBps)) / BPS_DENOMINATOR);
     } else {
-        executionPrice = oraclePrice.mulWad(WAD - dynamicSpread * WAD / 10000);
+        return uint128((uint256(_oraclePrice) * (BPS_DENOMINATOR - spreadBps)) / BPS_DENOMINATOR);
     }
 }
 ```

@@ -238,55 +238,48 @@ $$FundingOwed = Size \\times (currentIndex - positionEntryIndex)$$
 
 ---
 
-## 6. Adaptive OI (Dynamic Open Interest)
+## 6. Dynamic Spread via SpreadManager
 
-The system adjusts Open Interest limits based on **asset volatility** to protect the Vault during periods of high uncertainty.
+The protocol uses a standalone `SpreadManager` contract to compute execution spreads based on **OI** and **per-pair volatility**. This is the primary risk mechanism for protecting the Vault — higher risk conditions automatically widen spreads, making new positions more expensive.
 
-### Maximum OI Formula
+### Implementation
 
-$$MaxOI_{pair} = BaseMaxOI \\times VolatilityMultiplier$$
+The spread formula from §3 is implemented in `SpreadManager.getSpreadBps(pairIndex, currentOI)`:
 
-Where:
+```solidity
+spreadBps = baseSpreadBps + (currentOI * impactFactor / OI_PRECISION) + (pairVolatility * volFactor / VOL_PRECISION);
+if (spreadBps > maxSpreadBps) spreadBps = maxSpreadBps;
+```
 
-$$VolatilityMultiplier = \\frac{TargetVolatility}{max(CurrentVolatility, MinVolatility)}$$
+Where `OI_PRECISION = 1e30` and `VOL_PRECISION = 1e18`.
 
-- **BaseMaxOI:** Base maximum OI for the pair (set by governance)
-- **TargetVolatility:** Expected "normal" volatility (e.g., 3% for BTC)
-- **CurrentVolatility:** Current asset volatility (σ 24h)
-- **MinVolatility:** Floor to avoid division by very small numbers
+### BPS Calibration
 
-### Example: BTC/USD
+| Parameter | Default | Example Effect |
+|:---|:---|:---|
+| `baseSpreadBps` | 5 (0.05%) | Fixed floor |
+| `impactFactor` | 3e5 | 3 BPS at 10M OI (`1e25 * 3e5 / 1e30 = 3`) |
+| `volFactor` | 100 | 3 BPS at 3% vol (`3e16 * 100 / 1e18 = 3`) |
+| `maxSpreadBps` | 100 (1%) | Hard ceiling |
 
-| Scenario | σ 24h | VolatilityMultiplier | Effective MaxOI |
-|:---|:---|:---|:---|
-| **Low volatility** | 1.5% | 3% / 1.5% = 2.0 | $10M × 2.0 = **$20M** |
-| **Normal volatility** | 3% | 3% / 3% = 1.0 | $10M × 1.0 = **$10M** |
-| **High volatility** | 6% | 3% / 6% = 0.5 | $10M × 0.5 = **$5M** |
-| **Extreme volatility** | 10% | 3% / 10% = 0.3 | $10M × 0.3 = **$3M** |
+### Volatility Update
 
-### Combined Behavior: Spread + OI
+- **Frequency:** Every hour (or every X blocks)
+- **Source:** Calculated off-chain (24h realized σ), published by authorized keeper
+- **Validation:** Maximum change per update bounded by ±`maxVolatilityChangeBps` (default: 200 = 2%) to prevent manipulation. First update for a pair skips bounds check.
 
-During high volatility, the protocol applies **double protection**:
-
-1. **Higher Spread:** Worse execution price for new positions.
-2. **Lower OI Cap:** Fewer positions can be opened.
+### Behavior During High Volatility
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    HIGH VOLATILITY (σ > 5%)                          │
 ├─────────────────────────────────────────────────────────────────────┤
 │  • Spread: 0.05% + 0.03%(OI) + 0.15%(Vol) = 0.23%                   │
-│  • MaxOI: $10M × 0.6 = $6M                                          │
-│  • New positions: More expensive and limited                        │
-│  • Existing positions: Unaffected (already entered)                 │
+│  • New positions: More expensive due to wider spread                │
+│  • Existing positions: Unaffected (entered at their spread)        │
+│  • When volatility returns to normal: spread decreases gradually   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
-
-### Volatility Update
-
-- **Frequency:** Every hour (or every X blocks)
-- **Source:** Calculated off-chain, published by authorized keeper
-- **Validation:** Maximum change per update (e.g., ±2%) to prevent manipulation
 
 ---
 
@@ -325,18 +318,17 @@ $$CR = \\frac{TotalUSDC_{Vault}}{TotalLPDeposits}$$
 | `MAX_LEVERAGE` | 100x | TradingEngine | Maximum allowed leverage |
 | `LIQUIDATION_THRESHOLD` | 90% | TradingEngine | % loss for liquidation |
 | `MAX_MULTIPLIER` | 7x-9x | Market | Profit cap (max payout) |
-| `BASE_SPREAD` | 0.05% | PricingLib | Fixed minimum spread |
-| `OI_IMPACT_FACTOR` | Variable | PricingLib | OI impact factor |
-| `VOLATILITY_FACTOR` | Variable | PricingLib | Volatility impact factor |
-| `TARGET_VOLATILITY` | 3% (BTC) | OIManager | Base volatility for OI cap calculation |
-| `BASE_MAX_OI` | $10M | OIManager | Base maximum OI per pair |
+| `BASE_SPREAD` | 0.05% (5 BPS) | SpreadManager | Fixed minimum spread |
+| `OI_IMPACT_FACTOR` | 3e5 | SpreadManager | OI impact multiplier (3 BPS at 10M OI) |
+| `VOLATILITY_FACTOR` | 100 | SpreadManager | Volatility impact multiplier (3 BPS at 3% vol) |
+| `MAX_SPREAD` | 1% (100 BPS) | SpreadManager | Maximum spread cap |
 | `FUNDING_FACTOR` | 0.0001% | FundingLib | Funding rate multiplier |
 | `SAFE_CR_THRESHOLD` | 110% | SolvencyManager | Ratio to activate buyback |
 | `DEFICIT_CR_THRESHOLD` | 100% | SolvencyManager | Ratio to activate solvency |
 | `FEE_SPLIT_ASSISTANT` | 20% | FeeManager | % fees → Assistant Fund |
 | `LIQUIDATOR_REWARD` | 10% | TradingEngine | % of remaining for liquidator |
 | `VOLATILITY_UPDATE_FREQ` | 1 hour | Keeper | σ update frequency |
-| `MAX_VOLATILITY_CHANGE` | ±2% | OIManager | Maximum change per update |
+| `MAX_VOLATILITY_CHANGE` | ±2% (200 BPS) | SpreadManager | Maximum volatility change per keeper update |
 
 ---
 

@@ -186,30 +186,19 @@ function _calculatePayout(
 
 #### Dynamic Spreads
 
-The `PricingLib` contract applies additional spread based on **Vault utilization**:
+The standalone `SpreadManager` contract computes dynamic spread based on **OI** and **per-pair volatility**:
 
 ```solidity
-function calculateSpread(
-    uint256 baseSpreadBps,
-    uint256 totalOI,
-    uint256 totalAssets,
-    uint256 impactFactor
-) internal pure returns (uint256 spreadBps) {
-    // Utilization = OI / Assets (e.g., 50% = 0.5e18)
-    uint256 utilization = totalOI.divWad(totalAssets);
-    
-    // Spread = Base + (Utilization × ImpactFactor)
-    // Example: 0.05% + (0.5 × 0.1%) = 0.10%
-    uint256 dynamicComponent = utilization.mulWad(impactFactor);
-    
-    spreadBps = baseSpreadBps + dynamicComponent;
-    
-    // Maximum cap
-    if (spreadBps > MAX_SPREAD_BPS) {
-        spreadBps = MAX_SPREAD_BPS;
-    }
+/// @notice Calculate total spread in BPS for a pair given its current OI
+function getSpreadBps(uint256 _pairIndex, uint256 _currentOI) external view returns (uint256 spreadBps) {
+    uint256 oiImpact = (_currentOI * impactFactor) / OI_PRECISION;    // OI_PRECISION = 1e30
+    uint256 volImpact = (_pairVolatility[_pairIndex] * volFactor) / VOL_PRECISION; // VOL_PRECISION = 1e18
+    spreadBps = baseSpreadBps + oiImpact + volImpact;
+    if (spreadBps > maxSpreadBps) spreadBps = maxSpreadBps;
 }
 ```
+
+TradingEngine reads OI from TradingStorage and delegates to `SPREAD_MANAGER.getSpreadBps()` in `_applySpread`.
 
 ### Layer 2: Reactive (Assistant Fund)
 
@@ -346,131 +335,54 @@ function checkAndAct() external {
 
 ---
 
-## 5. Initial Risk Mitigation: Adaptive OI Based on Volatility
+## 5. Initial Risk Mitigation: Dynamic Spread via SpreadManager
 
-The protocol dynamically adjusts Open Interest limits based on **asset volatility**. Higher volatility = lower OI allowed and higher spread.
+The protocol uses a standalone `SpreadManager` contract to dynamically adjust execution spreads based on **OI** and **per-pair volatility**. Higher risk conditions automatically widen spreads, making new positions more expensive and protecting the Vault.
 
-### Why volatility?
+### Why dynamic spreads?
 
-- **High volatility = Greater risk of extreme movements**
-- **Automatic protection:** Protocol "closes" during periods of uncertainty
-- **No manual intervention:** Parameters adjust algorithmically
+- **High OI = Greater protocol exposure** → wider spread discourages additional positions
+- **High volatility = Greater risk of extreme movements** → wider spread compensates for risk
+- **Automatic protection:** Spread adjusts algorithmically via keeper-updated volatility
+- **No position blocking:** Unlike dynamic OI caps, spread-based protection allows all trades but at a worse price
 
-### Maximum OI Formula by Volatility
-
-```solidity
-/// @notice Calculate max OI based on current volatility
-/// @param pairIndex The trading pair
-/// @return maxOI Maximum open interest allowed for this pair
-function calculateMaxOI(uint256 pairIndex) public view returns (uint256 maxOI) {
-    Pair storage pair = pairs[pairIndex];
-    
-    // Get current volatility (σ 24h), updated by keeper
-    uint256 currentVolatility = pairVolatility[pairIndex];
-    
-    // Volatility multiplier: at target volatility = 1.0
-    // Lower volatility = higher multiplier (more OI allowed)
-    // Higher volatility = lower multiplier (less OI allowed)
-    uint256 volatilityMultiplier;
-    
-    if (currentVolatility <= pair.minVolatility) {
-        // Floor: don't allow infinite OI in extremely low vol
-        volatilityMultiplier = MAX_VOLATILITY_MULTIPLIER; // e.g., 2.0x
-    } else {
-        // Formula: targetVol / currentVol (capped at max)
-        volatilityMultiplier = pair.targetVolatility.divWad(currentVolatility);
-        if (volatilityMultiplier > MAX_VOLATILITY_MULTIPLIER) {
-            volatilityMultiplier = MAX_VOLATILITY_MULTIPLIER;
-        }
-    }
-    
-    // Apply multiplier to base OI
-    maxOI = pair.baseMaxOI.mulWad(volatilityMultiplier);
-    
-    // Also cap by vault utilization
-    uint256 maxFromVault = vault.totalAssets().mulWad(MAX_UTILIZATION);
-    
-    return min(maxOI, maxFromVault);
-}
-```
-
-### Example: BTC/USD
-
-| Scenario | σ 24h | Multiplier | Effective MaxOI |
-|:---|:---|:---|:---|
-| **Low volatility** | 1.5% | 3% / 1.5% = 2.0 | $10M × 2.0 = **$20M** |
-| **Normal volatility** | 3% | 3% / 3% = 1.0 | $10M × 1.0 = **$10M** |
-| **High volatility** | 6% | 3% / 6% = 0.5 | $10M × 0.5 = **$5M** |
-| **Extreme volatility** | 10% | 3% / 10% = 0.3 | $10M × 0.3 = **$3M** |
-
-### Dynamic Spread with Volatility
-
-Spread also increases with volatility:
+### SpreadManager Architecture
 
 ```solidity
-function calculateSpread(uint256 pairIndex) public view returns (uint256 spreadBps) {
-    Pair storage pair = pairs[pairIndex];
-    
-    uint256 oiUtilization = openInterest[pairIndex].divWad(calculateMaxOI(pairIndex));
-    uint256 currentVolatility = pairVolatility[pairIndex];
-    
-    // Spread = Base + OI impact + Volatility impact
-    spreadBps = pair.baseSpreadBps 
-        + oiUtilization.mulWad(pair.oiImpactFactor)
-        + currentVolatility.mulWad(pair.volatilityImpactFactor);
-    
-    // Cap at maximum spread
-    if (spreadBps > MAX_SPREAD_BPS) {
-        spreadBps = MAX_SPREAD_BPS;
+/// @notice Computes dynamic spread BPS based on OI impact and per-pair volatility
+contract SpreadManager is Ownable {
+    uint256 public constant OI_PRECISION = 1e30;
+    uint256 public constant VOL_PRECISION = 1e18;
+
+    uint256 public baseSpreadBps;        // Fixed floor (default: 5 = 0.05%)
+    uint256 public impactFactor;         // OI impact multiplier (default: 3e5)
+    uint256 public volFactor;            // Volatility multiplier (default: 100)
+    uint256 public maxSpreadBps;         // Ceiling (default: 100 = 1%)
+    uint256 public maxVolatilityChangeBps; // Max per-update vol change (default: 200 = 2%)
+    address public keeper;
+    mapping(uint256 => uint256) private _pairVolatility; // 18 decimals
+
+    function getSpreadBps(uint256 _pairIndex, uint256 _currentOI) external view returns (uint256 spreadBps) {
+        uint256 oiImpact = (_currentOI * impactFactor) / OI_PRECISION;
+        uint256 volImpact = (_pairVolatility[_pairIndex] * volFactor) / VOL_PRECISION;
+        spreadBps = baseSpreadBps + oiImpact + volImpact;
+        if (spreadBps > maxSpreadBps) spreadBps = maxSpreadBps;
     }
 }
 ```
+
+### BPS Calibration
+
+| Parameter | Default | Example Effect |
+|:---|:---|:---|
+| `baseSpreadBps` | 5 (0.05%) | Fixed floor for all conditions |
+| `impactFactor` | 3e5 | 3 BPS at 10M OI (`1e25 * 3e5 / 1e30 = 3`) |
+| `volFactor` | 100 | 3 BPS at 3% vol (`3e16 * 100 / 1e18 = 3`) |
+| `maxSpreadBps` | 100 (1%) | Hard ceiling |
 
 ### Volatility Update
 
-```solidity
-/// @notice Update volatility for a pair (called by authorized keeper)
-/// @param pairIndex The pair to update
-/// @param newVolatility The new 24h realized volatility
-function updateVolatility(uint256 pairIndex, uint256 newVolatility) external onlyKeeper {
-    uint256 currentVolatility = pairVolatility[pairIndex];
-    
-    // Limit maximum change per update to prevent manipulation
-    uint256 maxChange = currentVolatility.mulWad(MAX_VOLATILITY_CHANGE_PCT);
-    
-    if (newVolatility > currentVolatility + maxChange) {
-        newVolatility = currentVolatility + maxChange;
-    } else if (newVolatility < currentVolatility - maxChange) {
-        newVolatility = currentVolatility - maxChange;
-    }
-    
-    pairVolatility[pairIndex] = newVolatility;
-    lastVolatilityUpdate[pairIndex] = block.timestamp;
-    
-    emit VolatilityUpdated(pairIndex, newVolatility);
-}
-```
-
-### Validation on Trade Opening
-
-```solidity
-function openTrade(...) external {
-    // ... other validations ...
-    
-    uint256 pairMaxOI = calculateMaxOI(pairIndex);
-    uint256 newPairOI = openInterest[pairIndex] + positionSize;
-    
-    if (newPairOI > pairMaxOI) {
-        revert MaxOIExceeded(newPairOI, pairMaxOI);
-    }
-    
-    // Get execution price with volatility-adjusted spread
-    uint256 spreadBps = calculateSpread(pairIndex);
-    uint256 executionPrice = applySpread(oraclePrice, spreadBps, isLong, true);
-    
-    // ... continue with opening ...
-}
-```
+The keeper updates per-pair volatility on-chain. Changes are bounded by `±maxVolatilityChangeBps` (default: 200 = 2%) to prevent manipulation. First update for a pair skips bounds check.
 
 ### Behavior During High Volatility Events
 
@@ -481,19 +393,17 @@ function openTrade(...) external {
 │                                                                      │
 │  1. Keeper detects σ 24h = 12% (normally 3%)                        │
 │  2. Keeper calls updateVolatility(BTC_INDEX, 12%)                   │
-│  3. System recalculates:                                             │
-│     • MaxOI: $10M × (3%/12%) = $2.5M                                │
-│     • Spread: 0.05% + 0.03% + 0.36% = 0.44%                         │
+│     (bounded by ±2% per update, so multiple updates needed)         │
+│  3. System recalculates spread:                                     │
+│     • Spread: 0.05% + 0.03%(OI) + 0.36%(Vol) = 0.44%               │
 │                                                                      │
-│  4. If current OI ($8M) > new MaxOI ($2.5M):                        │
-│     • Existing positions NOT closed                                 │
-│     • New positions: BLOCKED until OI drops                         │
-│     • Closes: Allowed (help reduce OI)                              │
+│  4. New positions: Allowed but at wider spread (more expensive)     │
+│     • Existing positions: Unaffected (entered at their spread)      │
+│     • Closes: Allowed (spread on close also wider)                  │
 │                                                                      │
 │  5. When volatility returns to normal:                              │
-│     • MaxOI increases gradually                                     │
 │     • Spread decreases gradually                                    │
-│     • New positions: Allowed again                                  │
+│     • New positions: Back to normal pricing                         │
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```

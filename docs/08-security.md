@@ -202,7 +202,7 @@ function closeTrade(uint256 tradeId) external nonReentrant {
 - **Pyth sub-second updates:** 400ms refresh rate from first-party publishers significantly narrows the arbitrage window.
 - **Strict staleness:** `MAX_STALENESS` of 10-30 seconds ensures the price included in the transaction is recent.
 - **Adversarial price selection defense:** User submits the price, but it must pass staleness + confidence + Chainlink deviation checks. They cannot submit an old favorable price.
-- Dynamic spread based on OI (Phase 4).
+- Dynamic spread based on OI and volatility (Phase 6 — SpreadManager).
 
 ### 4.4 Sandwich Attack on LP Withdrawals
 

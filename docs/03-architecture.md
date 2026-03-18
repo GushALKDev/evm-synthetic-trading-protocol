@@ -172,7 +172,7 @@ Every price goes through 4 checks before being accepted. Failure at any stage re
 Pyth provides a confidence interval (`conf`) with every price, representing publisher disagreement. This is a unique advantage over other oracles:
 
 - **Normal conditions:** `conf/price < 0.1%` — proceed normally
-- **Moderate uncertainty:** `conf/price ~ 0.5%` — protocol could widen spreads (Phase 4)
+- **Moderate uncertainty:** `conf/price ~ 0.5%` — protocol could widen spreads (Phase 6 — SpreadManager)
 - **High uncertainty:** `conf/price > 1%` — revert, do not execute trades
 - **Liquidations:** Use conservative price (`price - conf` for longs, `price + conf` for shorts) to prevent unfair liquidations during volatility
 

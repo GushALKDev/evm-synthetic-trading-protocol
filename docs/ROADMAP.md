@@ -26,7 +26,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 | 3         | Oracle (Pyth + Chainlink) | 10     | 10        | 100%     |
 | 4         | Fee System                | 5      | 5         | 100%     |
 | 5         | Funding Rates             | 4      | 4         | 100%     |
-| 6         | Risk Control (OI)         | 6      | 0         | 0%       |
+| 6         | Dynamic Spread            | 6      | 6         | 100%     |
 | 7         | Liquidations              | 8      | 0         | 0%       |
 | 8         | Limit Orders (TP/SL)      | 5      | 0         | 0%       |
 | 9         | Solvency (Assistant Fund) | 5      | 0         | 0%       |
@@ -34,7 +34,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 | 11        | Governance Token          | 4      | 0         | 0%       |
 | 12        | Testing & Audit           | 8      | 0         | 0%       |
 | 13        | V2 Improvements           | 7      | 0         | 0%       |
-| **TOTAL** |                           | **94** | **39**    | **41%**  |
+| **TOTAL** |                           | **94** | **45**    | **48%**  |
 
 ---
 
@@ -147,7 +147,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 - [x] **3.7** Price-dependent validations
     - [x] 3.7.1 Validate TP/SL not already triggered on `openTrade` against oracle price
     - [x] 3.7.2 Validate TP/SL not already triggered on `updateTp`/`updateSl` against oracle price
-    - [x] 3.7.4 Fixed base spread on execution price: `P_execution = P_oracle × (1 ± BASE_SPREAD_BPS/10000)` (5 bps)
+    - [x] 3.7.4 Base spread on execution price: `P_execution = P_oracle × (1 ± spreadBps/10000)` (initially fixed 5 bps, upgraded to dynamic in Phase 6)
 - [x] **3.8** TradingStorage adaptations
     - [x] 3.8.1 Storage validates TP/SL against openPrice (execution price with spread baked in); Engine validates against oracle price
     - [x] 3.8.2 OI tracking kept as nominal (`collateral × leverage × 1e12`), unchanged
@@ -215,26 +215,29 @@ Each phase should be completed before moving to the next. Within each phase, the
 
 ---
 
-## Phase 6: Risk Control (Open Interest)
+## Phase 6: Dynamic Spread (Volatility + OI Impact)
 
-> **Objective:** Limit protocol exposure based on volatility.
+> **Objective:** Replace fixed base spread with a dynamic formula: `Spread = BaseSpread + (OI × ImpactFactor) + (Volatility × VolFactor)`, capped at maxSpreadBps.
 >
-> **Dependencies:** Phase 3
+> **Architecture Decision:** Standalone `SpreadManager` contract. Keeper updates per-pair volatility on-chain; OI read from TradingStorage at execution time. TradingEngine delegates spread computation via `SPREAD_MANAGER.getSpreadBps()`.
+>
+> **Dependencies:** Phase 3, Phase 5
 
-- [ ] **6.1** Contract `OIManager.sol`
-- [ ] **6.2** Open Interest tracking per pair
-- [ ] **6.3** Global Open Interest tracking
-- [ ] **6.4** Per-pair volatility (updatable by keeper)
-- [ ] **6.5** Dynamic MaxOI calculation based on volatility
-- [ ] **6.6** Validation in `openTrade()` against MaxOI
+- [x] **6.1** Contract `SpreadManager.sol` (Ownable, keeper-updated per-pair volatility, OI + vol spread formula)
+- [x] **6.2** `getSpreadBps(pairIndex, currentOI)` view function with OI impact, vol impact, and max cap
+- [x] **6.3** `updateVolatility()` keeper function with bounds check (±maxVolatilityChangeBps)
+- [x] **6.4** Admin setters (baseSpreadBps, impactFactor, volFactor, maxSpreadBps, maxVolatilityChangeBps, keeper)
+- [x] **6.5** TradingEngine integration (SPREAD_MANAGER immutable, `_applySpread` reads OI and delegates to SpreadManager)
+- [x] **6.6** SpreadManager + TradingEngine tests (48 SpreadManager, 113 TradingEngine — fuzz monotonicity, cap invariant, bounds enforcement)
 
 **Deliverables:**
 
-- OI limited automatically
-- Higher volatility = lower OI allowed
-- New positions blocked if OI exceeds limit
+- Spread increases with OI and volatility (wider spread = more protocol protection)
+- Keeper-updatable per-pair volatility with bounds enforcement
+- All existing spread behavior preserved via MockSpreadManager(5) in tests
+- `BASE_SPREAD_BPS` constant removed from TradingEngine — fully delegated to SpreadManager
 
-**Reference:** [02-mathematics.md](./02-mathematics.md) - Adaptive OI Section
+**Reference:** [02-mathematics.md](./02-mathematics.md) - Spread Section
 
 ---
 
@@ -397,6 +400,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 
 | Date       | Changes                 |
 | :--------- | :---------------------- |
+| 2026-03-18 | Phase 6: Dynamic spread — SpreadManager (OI + volatility formula), TradingEngine delegates spread via SPREAD_MANAGER immutable |
 | 2026-03-18 | Phase 5: Funding rates — FundingLib, OI long/short split, cumulative index, funding deducted/credited on close |
 | 2026-03-13 | Phase 4: Fee system — open/close fees (0.08%), 80/20 split (Vault/treasury), integrated in TradingEngine |
 | 2026-02-27 | Phase 3: Oracle abstraction — IOracle interface, OracleAggregator→PythChainlinkOracle, TradingEngine decoupled from oracle impl |
