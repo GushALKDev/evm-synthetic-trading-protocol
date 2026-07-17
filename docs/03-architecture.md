@@ -128,8 +128,8 @@ sequenceDiagram
     Hermes-->>Frontend: priceUpdate (signed bytes)
     Frontend->>User: Include priceUpdate in tx calldata
 
-    User->>Engine: openTrade(pair, collateral, ..., priceUpdate)
-    Engine->>Oracle: getPrice(pairIndex, priceUpdate)
+    User->>Engine: openTrade{value: fee}(pair, collateral, ..., priceUpdate)
+    Engine->>Oracle: getPrice{value: msg.value}(pairIndex, priceUpdate)
 
     Oracle->>Pyth: updatePriceFeeds{value: fee}(priceUpdate)
     Pyth-->>Oracle: Price verified (Wormhole signature valid)
@@ -144,8 +144,9 @@ sequenceDiagram
 
     Note over Oracle: Check 4: |pythPrice - chainlinkPrice| ≤ MAX_DEVIATION<br/>If deviation too high → revert (circuit breaker)
 
-    Oracle-->>Engine: validatedPrice (uint128, 18 decimals)
+    Oracle-->>Engine: validatedPrice (uint128, 18 decimals) + refund surplus ETH
     Engine->>Engine: Execute trade with validated price
+    Engine-->>User: refund leftover ETH
 ```
 
 ### Validation Pipeline
@@ -174,7 +175,7 @@ Pyth provides a confidence interval (`conf`) with every price, representing publ
 - **Normal conditions:** `conf/price < 0.1%` — proceed normally
 - **Moderate uncertainty:** `conf/price ~ 0.5%` — protocol could widen spreads (Phase 6 — SpreadManager)
 - **High uncertainty:** `conf/price > 1%` — revert, do not execute trades
-- **Liquidations:** Use conservative price (`price - conf` for longs, `price + conf` for shorts) to prevent unfair liquidations during volatility
+- **Liquidations:** Use the most trader-favorable end of the confidence band (`price + conf` for longs, `price - conf` for shorts) to prevent unfair liquidations during volatility. A long liquidates when price falls, so the higher band edge shrinks its loss; a short liquidates when price rises, so the lower band edge shrinks its loss. Since positions liquidate at 90% (a ~10% buffer remains), giving the trader the benefit of the doubt on a noisy tick does not create bad debt for the Vault.
 
 ---
 
@@ -254,9 +255,9 @@ The `IOracle` interface abstraction allows adding new oracle backends (e.g., Cha
 
 - Phase 3 reduced from ~3 months to ~3 weeks
 - Engineering effort focused on core protocol features (Phases 4-8)
-- TradingEngine functions that need prices must accept `bytes[] calldata priceUpdate` (not payable — oracle self-funds fees)
-- Frontend must integrate with Pyth Hermes API
-- Keeper bots (liquidations, TP/SL execution) must also fetch and submit Pyth price updates
+- TradingEngine functions that need prices are `payable` and forward `msg.value` to the oracle to fund the Pyth fee; the oracle refunds the surplus, which the engine sweeps back to the caller (the engine never holds ETH)
+- Frontend must integrate with Pyth Hermes API and attach the Pyth fee as `msg.value` (the ETH is already needed for gas, so this is negligible friction)
+- Keeper bots (liquidations, TP/SL execution) must also fetch and submit Pyth price updates, funding the fee via `msg.value`
 
 ---
 
@@ -318,6 +319,16 @@ If violated, the transaction reverts. Rationale:
 
 TradingStorage retains its own structural validations (Long: `tp > openPrice`, `sl < openPrice`; Short: inverse) as a defense-in-depth layer that doesn't depend on the oracle.
 
+**Liquidations (`liquidate`) — design decisions:**
+
+- **Permissionless and not pausable.** `liquidate` is the protocol's solvency valve, so it is deliberately **not** gated by `whenNotPaused`. Pausing halts opening/closing but must never freeze the mechanism that clears underwater positions.
+- **Funding-consistent condition.** Liquidatability is evaluated on `adjustedPnl = pricePnl − fundingOwed`, exactly like `closeTrade`. A position solvent by price alone can still be liquidated once accrued funding pushes the loss past the 90% threshold.
+- **Caller funds the oracle fee.** Like all price-consuming functions, `liquidate` is `payable` and forwards `msg.value` to the oracle. This removes any dependency on a pre-funded oracle ETH balance — the liquidator, who is already incentivized, always pays for a fresh price.
+- **Pyth outage policy (accepted risk).** During a Pyth outage (stale price, wide confidence, or Chainlink deviation) the oracle **reverts**, so `liquidate` reverts too. This is intentional: the protocol never liquidates at a stale or unverified price. Bad debt that may accrue while the oracle is unavailable is absorbed by the Vault's solvency layers (see `docs/07-vault-ssl.md`) rather than by forcing liquidations at a dubious price. Because the liquidator now funds the fee directly, the previous "oracle ran out of ETH" pseudo-outage no longer exists.
+- **Reward incentive floor.** The liquidator reward is 10% of the remaining collateral, which shrinks as a position sinks toward 100% loss. `MIN_COLLATERAL = 10 USDC` guarantees that at the 90% threshold the reward stays above realistic L2 gas, so no position is too small to be worth liquidating (avoiding dust that would otherwise decay straight into bad debt).
+- **Payout order.** The Vault is paid before the liquidator reward, so a liquidator blacklisted by the collateral token can only block their own reward, not the Vault's settlement.
+- **Rounding favors the pool.** PnL truncates `exitValue` toward the pool in both directions (longs floor, shorts ceil), upholding the invariant that the Vault never loses value to sub-USDC rounding.
+
 ### 4.3 `TradingStorage.sol` (State Layer)
 
 **Role:** Stores all persistent data. Allows logic upgrades without data migration.
@@ -335,21 +346,21 @@ uint256 public lastFundingTime;
 
 ### 4.4 `PythChainlinkOracle.sol` (implements `IOracle`)
 
-**Role:** Validates Pyth prices with staleness, confidence, and Chainlink deviation checks. Self-funds Pyth fees from its own ETH balance.
+**Role:** Validates Pyth prices with staleness, confidence, and Chainlink deviation checks. The caller funds the Pyth fee via `msg.value`; the oracle refunds the surplus.
 
 | Function                                | Description                                                                    |
 | :-------------------------------------- | :----------------------------------------------------------------------------- |
-| `getPrice(pairIndex, priceData)`        | Updates Pyth price on-chain, validates, returns normalized price (18 decimals) |
+| `getPrice(pairIndex, priceData)`        | `payable` — updates Pyth price on-chain, validates, returns normalized price (18 decimals) + confidence, refunds surplus ETH |
 | `getPairFeed(pairIndex)`                | Returns PairFeed config for a pair                                             |
 
-**Interface:** `IOracle { getPrice(uint256 pairIndex, bytes[] calldata priceData) → uint128 price18 }` — technology-agnostic. TradingEngine only depends on this interface, not the implementation.
+**Interface:** `IOracle { getPrice(uint256 pairIndex, bytes[] calldata priceData) payable → (uint128 price18, uint128 conf18) }` — technology-agnostic. TradingEngine only depends on this interface, not the implementation.
 
 **Validation pipeline (all checks must pass or transaction reverts):**
 
 ```solidity
-// 0. Compute fee and pay from own ETH balance
+// 0. Caller funds the fee via msg.value; require enough, refund the surplus at the end
 uint256 fee = PYTH.getUpdateFee(priceData);
-if (address(this).balance < fee) revert InsufficientEthForFee();
+if (msg.value < fee) revert InsufficientFee(msg.value, fee);
 
 // 1. Update Pyth price on-chain (user-submitted signed data)
 PYTH.updatePriceFeeds{value: fee}(priceData);
@@ -399,7 +410,7 @@ if (deviation > MAX_DEVIATION) revert PriceDeviationTooHigh();
 
 ## 5. Detailed Execution Flows
 
-> **Note:** All trading functions that require a price accept `bytes[] calldata priceUpdate` as a parameter. The frontend fetches signed price data from Pyth Hermes API and includes it in the transaction calldata (pull oracle model). TradingEngine is NOT payable — the oracle implementation (PythChainlinkOracle) self-funds Pyth fees from its own ETH balance.
+> **Note:** All trading functions that require a price accept `bytes[] calldata priceUpdate` as a parameter. The frontend fetches signed price data from Pyth Hermes API and includes it in the transaction calldata (pull oracle model). These functions are `payable`: the caller attaches the Pyth fee as `msg.value`, TradingEngine forwards it to the oracle, and any surplus is refunded back to the caller (TradingEngine never retains ETH).
 
 ### 5.1 Open Trade Flow
 

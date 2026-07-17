@@ -27,14 +27,14 @@ Each phase should be completed before moving to the next. Within each phase, the
 | 4         | Fee System                | 5      | 5         | 100%     |
 | 5         | Funding Rates             | 4      | 4         | 100%     |
 | 6         | Dynamic Spread            | 6      | 6         | 100%     |
-| 7         | Liquidations              | 8      | 0         | 0%       |
+| 7         | Liquidations              | 9      | 9         | 100%     |
 | 8         | Limit Orders (TP/SL)      | 5      | 0         | 0%       |
 | 9         | Solvency (Assistant Fund) | 5      | 0         | 0%       |
 | 10        | Solvency (Bonding)        | 6      | 0         | 0%       |
 | 11        | Governance Token          | 4      | 0         | 0%       |
 | 12        | Testing & Audit           | 8      | 0         | 0%       |
 | 13        | V2 Improvements           | 7      | 0         | 0%       |
-| **TOTAL** |                           | **94** | **45**    | **48%**  |
+| **TOTAL** |                           | **95** | **54**    | **57%**  |
 
 ---
 
@@ -142,8 +142,8 @@ Each phase should be completed before moving to the next. Within each phase, the
     - [x] 3.6.1 `openTrade` signature: add `priceUpdate`, `_openPrice` renamed to `_expectedPrice` (oracle provides execution price)
     - [x] 3.6.2 `closeTrade` signature: add `priceUpdate`, `_closePrice` renamed to `_expectedPrice`
     - [x] 3.6.3 `updateTp`/`updateSl`: add `priceUpdate` to validate TP/SL not already reached at current price
-    - [x] 3.6.4 Oracle self-funds Pyth fees from its own ETH balance (via `receive()`)
-    - [x] 3.6.5 TradingEngine uses `IOracle` interface — no fee logic or `receive()`
+    - [x] 3.6.4 Caller funds Pyth fees via `msg.value`; oracle refunds surplus (redesigned in Phase 7 — was oracle self-funding)
+    - [x] 3.6.5 TradingEngine uses `IOracle` interface — no fee logic; forwards `msg.value` and sweeps refunds to caller
 - [x] **3.7** Price-dependent validations
     - [x] 3.7.1 Validate TP/SL not already triggered on `openTrade` against oracle price
     - [x] 3.7.2 Validate TP/SL not already triggered on `updateTp`/`updateSl` against oracle price
@@ -151,10 +151,10 @@ Each phase should be completed before moving to the next. Within each phase, the
 - [x] **3.8** TradingStorage adaptations
     - [x] 3.8.1 Storage validates TP/SL against openPrice (execution price with spread baked in); Engine validates against oracle price
     - [x] 3.8.2 OI tracking kept as nominal (`collateral × leverage × 1e12`), unchanged
-- [x] **3.9** Pyth fee handling
-    - [x] 3.9.1 Oracle has `receive() external payable` for ETH funding
-    - [x] 3.9.2 Oracle self-pays Pyth fees from own balance (protocol subsidizes)
-    - [x] 3.9.3 `InsufficientEthForFee` error on oracle if balance too low
+- [x] **3.9** Pyth fee handling (redesigned in Phase 7: caller-funded instead of oracle-subsidized)
+    - [x] 3.9.1 `getPrice` is `payable`; caller attaches the fee as `msg.value`, oracle refunds surplus to `msg.sender`
+    - [x] 3.9.2 TradingEngine forwards `msg.value` to the oracle and sweeps any refund back to the caller (never holds ETH)
+    - [x] 3.9.3 `InsufficientFee(provided, required)` error on oracle if `msg.value` too low
 - [x] **3.10** Mock Oracle for local tests (MockOracle + MockChainlinkFeed)
 - [x] **3.11** Oracle tests (31 tests: staleness, confidence, deviation, normalization, receive ETH, fuzz)
 - [x] **3.12** Update TradingEngine tests for oracle integration (76 tests: spread, TP/SL oracle validation, all PnL recalculated)
@@ -247,14 +247,21 @@ Each phase should be completed before moving to the next. Within each phase, the
 >
 > **Dependencies:** Phase 3, Phase 6
 
-- [ ] **7.1** Function `liquidate()` in TradingEngine
-- [ ] **7.2** Liquidation price calculation
-- [ ] **7.3** Liquidation condition verification (loss >= 90%)
-- [ ] **7.4** Remaining collateral distribution (liquidator vs vault)
-- [ ] **7.5** Liquidator reward (10% of remainder)
-- [ ] **7.6** Reject positions that are pre-liquidable after spread application (moved from Phase 3)
-- [ ] **7.7** Confidence-based conservative pricing for liquidation checks (moved from Phase 3)
-- [ ] **7.8** Liquidation tests (edge case fuzzing)
+- [x] **7.1** Function `liquidate()` in TradingEngine
+- [x] **7.2** Liquidation price calculation
+- [x] **7.3** Liquidation condition verification (loss >= 90%)
+- [x] **7.4** Remaining collateral distribution (liquidator vs vault)
+- [x] **7.5** Liquidator reward (10% of remainder)
+- [x] **7.6** Reject positions that are pre-liquidable after spread application (moved from Phase 3)
+- [x] **7.7** Confidence-based conservative pricing for liquidation checks (moved from Phase 3) — `IOracle.getPrice` now returns `(price18, conf18)`; liquidate() uses the trader-favorable band edge (long: price + conf, short: price - conf)
+- [x] **7.8** Liquidation tests (edge case fuzzing)
+- [x] **7.9** Post-review hardening
+    - [x] 7.9.1 `liquidate` is `payable` and caller-funds the oracle fee — removes dependency on a pre-funded oracle ETH balance
+    - [x] 7.9.2 `liquidate` no longer gated by `whenNotPaused` — solvency valve stays live while trading is paused
+    - [x] 7.9.3 Pyth outage policy documented: oracle reverts → liquidation reverts (no liquidating at unverified prices); bad debt handled by Vault solvency layers
+    - [x] 7.9.4 `MIN_COLLATERAL` raised to 10 USDC so the liquidator reward stays above L2 gas (no undercollateralized dust that never liquidates)
+    - [x] 7.9.5 PnL rounding always favors the pool (longs floor, shorts ceil `exitValue`)
+    - [x] 7.9.6 Vault paid before liquidator reward — a blacklisted liquidator only blocks their own reward
 
 **Deliverables:**
 
@@ -400,6 +407,8 @@ Each phase should be completed before moving to the next. Within each phase, the
 
 | Date       | Changes                 |
 | :--------- | :---------------------- |
+| 2026-07-17 | Phase 7 (7.9): Post-review hardening — caller-funded payable oracle fee (refunds surplus), `liquidate` unpausable, Pyth outage policy documented, `MIN_COLLATERAL` → 10 USDC, PnL rounding favors the pool (short ceil), Vault paid before liquidator reward |
+| 2026-07-17 | Phase 7 (7.1–7.8): Liquidations — permissionless `liquidate` at 90% threshold on funding-adjusted PnL, 10% liquidator reward, pre-liquidation open guard, confidence-based conservative pricing (`IOracle.getPrice` → `(price18, conf18)`) |
 | 2026-03-18 | Phase 6: Dynamic spread — SpreadManager (OI + volatility formula), TradingEngine delegates spread via SPREAD_MANAGER immutable |
 | 2026-03-18 | Phase 5: Funding rates — FundingLib, OI long/short split, cumulative index, funding deducted/credited on close |
 | 2026-03-13 | Phase 4: Fee system — open/close fees (0.08%), 80/20 split (Vault/treasury), integrated in TradingEngine |

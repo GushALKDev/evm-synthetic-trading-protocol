@@ -227,13 +227,16 @@ This project showcases advanced smart contract development skills through **orig
 - [x] Security patterns (CEI, access control, circuit breakers)
 - [x] Production-grade architecture documentation (~8,200 lines)
 
-**Implementation (In Progress):**
+**Implementation (In Progress — Phases 1–7 complete, 54/95 items):**
 
 - [x] Core contracts (Vault, TradingStorage)
-- [ ] Core contracts (TradingEngine, Oracle)
+- [x] Core contracts (TradingEngine, PythChainlinkOracle via IOracle)
+- [x] Fee system, funding rates, dynamic spread (SpreadManager)
+- [x] Liquidations (permissionless, funding-adjusted, conf-based conservative pricing)
+- [x] Testing (unit + fuzz + fork; 411 tests)
 - [ ] Solvency system (Assistant Fund, Bond Depository)
-- [ ] Comprehensive testing (unit, fuzz, invariant)
-- [ ] Deployment scripts
+- [ ] Limit orders / automatic TP/SL (Phase 8)
+- [ ] Invariant testing, deployment scripts
 
 ---
 

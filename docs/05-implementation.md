@@ -243,12 +243,13 @@ pragma solidity ^0.8.24;
 interface IOracle {
     /// @notice Get a validated price for a trading pair
     /// @dev Implementation-specific: may use Pyth, Chainlink, or any other source.
-    ///      NOT payable — if the oracle needs ETH (e.g., Pyth fees), it self-funds from its own balance.
+    ///      `payable` — the caller funds any oracle fee (e.g., Pyth) via msg.value; the oracle refunds the surplus.
     ///      `priceData` is used by pull-based oracles (e.g., Pyth); push-based oracles ignore it.
     /// @param pairIndex The pair index to get price for
     /// @param priceData Oracle-specific signed price data (empty for push-based oracles)
     /// @return price18 Validated price normalized to 18 decimals
-    function getPrice(uint256 pairIndex, bytes[] calldata priceData) external returns (uint128 price18);
+    /// @return conf18 Confidence band normalized to 18 decimals (0 for push-based oracles)
+    function getPrice(uint256 pairIndex, bytes[] calldata priceData) external payable returns (uint128 price18, uint128 conf18);
 }
 ```
 
