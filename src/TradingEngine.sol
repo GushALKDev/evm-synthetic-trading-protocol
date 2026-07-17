@@ -25,11 +25,13 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     uint256 public constant MAX_PROFIT_MULTIPLIER = 9;
-    uint256 public constant MIN_COLLATERAL = 1e6; // 1 USDC
+    uint256 public constant MIN_COLLATERAL = 10e6; // 10 USDC — floor keeps the liquidator reward above L2 gas
     uint256 public constant BPS_DENOMINATOR = 10_000;
     uint256 public constant OPEN_FEE_BPS = 8; // 0.08% of position size
     uint256 public constant CLOSE_FEE_BPS = 8; // 0.08% of position size
     uint256 public constant FEE_VAULT_SPLIT_BPS = 8000; // 80% to Vault, 20% to treasury
+    uint256 public constant LIQUIDATION_THRESHOLD_BPS = 9000; // liquidatable when loss >= 90% of collateral
+    uint256 public constant LIQUIDATOR_REWARD_BPS = 1000; // 10% of remaining collateral to liquidator
 
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
@@ -70,6 +72,16 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     event FeesDistributed(uint256 vaultFee, uint256 treasuryFee);
     event TpUpdated(uint256 indexed tradeId, uint128 newTp);
     event SlUpdated(uint256 indexed tradeId, uint128 newSl);
+    event TradeLiquidated(
+        uint256 indexed tradeId,
+        address indexed user,
+        address indexed liquidator,
+        uint128 closePrice,
+        int256 pnlUsdc,
+        int256 fundingOwedUsdc,
+        uint256 liquidatorReward,
+        uint256 vaultAmount
+    );
     event TreasuryUpdated(address indexed newTreasury);
     event Paused(address account);
     event Unpaused(address account);
@@ -92,6 +104,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     error SlAlreadyTriggered(uint128 sl, uint128 oraclePrice);
     error FeeExceedsCollateral(uint256 fee, uint64 collateral);
     error ZeroFeeRecipient();
+    error NotLiquidatable(uint256 tradeId, uint256 loss, uint256 threshold);
 
     /*//////////////////////////////////////////////////////////////
                               MODIFIERS
@@ -120,10 +133,37 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev Get oracle-validated price via the IOracle interface.
+     * @dev Sweep any ETH left on the contract back to the caller. The oracle refunds the fee
+     *      surplus here; this returns it to the trader/liquidator. The engine never holds ETH.
      */
-    function _getOraclePrice(uint256 _pairIndex, bytes[] calldata _priceUpdate) internal returns (uint128) {
-        return ORACLE.getPrice(_pairIndex, _priceUpdate);
+    function _refundEth() internal {
+        uint256 balance = address(this).balance;
+        if (balance > 0) msg.sender.safeTransferETH(balance);
+    }
+
+    /**
+     * @dev Get oracle-validated price via the IOracle interface. Confidence band is discarded.
+     *      Forwards msg.value to fund the oracle fee; the oracle refunds any surplus to this contract,
+     *      which is swept back to the trader by _refundEth.
+     */
+    function _getOraclePrice(uint256 _pairIndex, bytes[] calldata _priceUpdate) internal returns (uint128 price18) {
+        (price18, ) = ORACLE.getPrice{value: msg.value}(_pairIndex, _priceUpdate);
+    }
+
+    /**
+     * @dev Get oracle price with confidence band, then apply conservative pricing for liquidation checks.
+     *      Uses the most trader-favorable end of the [price - conf, price + conf] band so a noisy,
+     *      high-uncertainty tick cannot force an unfair liquidation:
+     *        Long  (liquidates when price falls) → price + conf (higher price → smaller loss)
+     *        Short (liquidates when price rises) → price - conf (lower price → smaller loss)
+     *      Floors at 0 for the short case if conf ever exceeds price.
+     */
+    function _getConservativeLiqPrice(uint256 _pairIndex, bytes[] calldata _priceUpdate, bool _isLong) internal returns (uint128) {
+        (uint128 price18, uint128 conf18) = ORACLE.getPrice{value: msg.value}(_pairIndex, _priceUpdate);
+        if (_isLong) {
+            return price18 + conf18;
+        }
+        return conf18 >= price18 ? 0 : price18 - conf18;
     }
 
     /**
@@ -171,12 +211,15 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     function _calculatePnl(uint64 _collateral, uint16 _leverage, uint128 _openPrice, uint128 _closePrice, bool _isLong) internal pure returns (int256 pnlUsdc) {
         // size in USDC precision (6 decimals)
         uint256 size = uint256(_collateral) * uint256(_leverage);
-        // exitValue = closePrice * size / openPrice (USDC precision)
-        uint256 exitValue = (uint256(_closePrice) * size) / uint256(_openPrice);
 
         if (_isLong) {
+            // Floor exitValue → larger loss for the trader → rounding favors the pool
+            uint256 exitValue = (uint256(_closePrice) * size) / uint256(_openPrice);
             pnlUsdc = int256(exitValue) - int256(size);
         } else {
+            // Ceil exitValue → larger loss for the trader → rounding favors the pool (short PnL = size - exitValue)
+            uint256 num = uint256(_closePrice) * size;
+            uint256 exitValue = (num + uint256(_openPrice) - 1) / uint256(_openPrice);
             pnlUsdc = int256(size) - int256(exitValue);
         }
     }
@@ -295,6 +338,38 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     }
 
     /**
+     * @dev Reject positions that would already be liquidatable right after opening.
+     *      The applied spread creates an instant unrealized loss (openPrice vs fair oraclePrice).
+     *      If that loss already reaches the liquidation threshold, the trade is rejected so it
+     *      cannot be opened straight into the liquidation zone.
+     */
+    function _validateNotPreLiquidatable(uint64 _collateral, uint16 _leverage, uint128 _openPrice, uint128 _oraclePrice, bool _isLong) internal pure {
+        int256 instantPnl = _calculatePnl(_collateral, _leverage, _openPrice, _oraclePrice, _isLong);
+        uint256 threshold = (uint256(_collateral) * LIQUIDATION_THRESHOLD_BPS) / BPS_DENOMINATOR;
+        uint256 loss = instantPnl < 0 ? uint256(-instantPnl) : 0;
+        if (loss >= threshold) revert NotLiquidatable(0, loss, threshold);
+    }
+
+    /**
+     * @dev Apply open-direction spread to the oracle price and validate slippage and pre-liquidation.
+     *      Extracted to keep openTrade below the stack-too-deep limit.
+     * @return executionPrice The spread-adjusted price the trade opens at.
+     */
+    function _computeOpenPrice(
+        uint16 _pairIndex,
+        bool _isLong,
+        uint64 _collateral,
+        uint16 _leverage,
+        uint128 _oraclePrice,
+        uint128 _expectedPrice,
+        uint16 _slippageBps
+    ) internal view returns (uint128 executionPrice) {
+        executionPrice = _applySpread(_oraclePrice, _isLong, true, _pairIndex);
+        _validateSlippage(executionPrice, _expectedPrice, _slippageBps);
+        _validateNotPreLiquidatable(_collateral, _leverage, executionPrice, _oraclePrice, _isLong);
+    }
+
+    /**
      * @dev Validate pair is active and leverage is within bounds.
      */
     function _validatePair(uint16 _pairIndex, uint16 _leverage) internal view {
@@ -325,6 +400,11 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         treasury = _treasury;
     }
 
+    /**
+     * @dev Accept ETH refunds from the oracle. Any residual is swept back to the caller via _refundEth.
+     */
+    receive() external payable {}
+
     /*//////////////////////////////////////////////////////////////
                           TRADING FUNCTIONS
     //////////////////////////////////////////////////////////////*/
@@ -354,7 +434,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         uint128 _tp,
         uint128 _sl,
         bytes[] calldata priceUpdate
-    ) external nonReentrant whenNotPaused returns (uint32 tradeId) {
+    ) external payable nonReentrant whenNotPaused returns (uint32 tradeId) {
         // --- CHECKS ---
         if (_collateral < MIN_COLLATERAL) revert BelowMinCollateral(_collateral);
         if (_leverage == 0) revert ZeroLeverage();
@@ -363,15 +443,16 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         uint128 oraclePrice = _getOraclePrice(_pairIndex, priceUpdate);
         _validateTpSlAgainstOraclePrice(_tp, _sl, oraclePrice, _isLong);
 
-        // Apply spread and validate slippage — reuse oraclePrice variable
-        oraclePrice = _applySpread(oraclePrice, _isLong, true, _pairIndex);
-        _validateSlippage(oraclePrice, _expectedPrice, _slippageBps);
+        // Apply spread, validate slippage and pre-liquidation; oraclePrice becomes the execution price.
+        oraclePrice = _computeOpenPrice(_pairIndex, _isLong, _collateral, _leverage, oraclePrice, _expectedPrice, _slippageBps);
 
         // --- EFFECTS ---
         _updateFundingIndex(_pairIndex);
 
         // --- INTERACTIONS ---
         tradeId = _executeOpen(msg.sender, _pairIndex, _isLong, _collateral, _leverage, oraclePrice, _tp, _sl);
+
+        _refundEth();
     }
 
     /**
@@ -385,7 +466,12 @@ contract TradingEngine is Ownable, ReentrancyGuard {
      * @param _slippageBps Maximum allowed slippage in basis points (e.g. 50 = 0.5%)
      * @param priceUpdate Pyth price update data
      */
-    function closeTrade(uint256 _tradeId, uint128 _expectedPrice, uint16 _slippageBps, bytes[] calldata priceUpdate) external nonReentrant whenNotPaused {
+    function closeTrade(
+        uint256 _tradeId,
+        uint128 _expectedPrice,
+        uint16 _slippageBps,
+        bytes[] calldata priceUpdate
+    ) external payable nonReentrant whenNotPaused {
         TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(_tradeId);
         if (trade.user == address(0)) revert TradeNotFound(_tradeId);
         if (trade.user != msg.sender) revert NotTradeOwner(msg.sender, trade.user);
@@ -439,6 +525,79 @@ contract TradingEngine is Ownable, ReentrancyGuard {
             uint256 profitFromVault = payoutUsdc - storageToTrader;
             VAULT.sendPayout(msg.sender, profitFromVault);
         }
+
+        _refundEth();
+    }
+
+    /**
+     * @notice Liquidate a position whose loss has reached the liquidation threshold
+     * @dev Permissionless. Loss is computed on adjustedPnl (price PnL minus funding owed),
+     *      evaluated at the spread-adjusted execution price (close direction), exactly like closeTrade.
+     *      Reverts with NotLiquidatable if the position is still solvent.
+     *      Remaining collateral (collateral - loss) is split: 10% to the liquidator, 90% to the Vault.
+     *      The loss portion is also sent to the Vault. No close fee is charged on liquidation.
+     *      Collateral flow: TradingStorage → Vault (rest) + TradingStorage → liquidator (reward).
+     *
+     *      Not gated by whenNotPaused: liquidation is the protocol's solvency valve and must stay live
+     *      even while trading is paused. During a Pyth outage the oracle reverts (stale/deviation), so
+     *      liquidation is unavailable by design — see docs/03-architecture.md for the accepted risk.
+     * @param _tradeId The trade ID to liquidate
+     * @param priceUpdate Pyth price update data
+     */
+    function liquidate(uint256 _tradeId, bytes[] calldata priceUpdate) external payable nonReentrant {
+        TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(_tradeId);
+        if (trade.user == address(0)) revert TradeNotFound(_tradeId);
+
+        // Conservative pricing: price + conf (long) / price - conf (short) makes liquidation harder,
+        // protecting the trader from unfair liquidation during high-uncertainty periods.
+        uint128 conservativePrice = _getConservativeLiqPrice(trade.pairIndex, priceUpdate, trade.isLong);
+        uint128 executionPrice = _applySpread(conservativePrice, trade.isLong, false, trade.pairIndex);
+
+        _updateFundingIndex(trade.pairIndex);
+
+        int256 pnlUsdc = _calculatePnl(trade.collateral, trade.leverage, trade.openPrice, executionPrice, trade.isLong);
+        uint256 positionSize = _positionSizeWad(trade.collateral, trade.leverage);
+        int256 fundingOwedUsdc = _calculateFunding(_tradeId, positionSize, trade.isLong, trade.pairIndex);
+        int256 adjustedPnl = pnlUsdc - fundingOwedUsdc;
+
+        // Position is liquidatable only when the loss reaches the threshold
+        uint256 threshold = (uint256(trade.collateral) * LIQUIDATION_THRESHOLD_BPS) / BPS_DENOMINATOR;
+        uint256 loss = adjustedPnl < 0 ? uint256(-adjustedPnl) : 0;
+        if (loss < threshold) revert NotLiquidatable(_tradeId, loss, threshold);
+
+        // Remaining collateral after covering the loss (0 if loss exceeds collateral)
+        uint256 remaining = loss >= uint256(trade.collateral) ? 0 : uint256(trade.collateral) - loss;
+        uint256 liquidatorReward = (remaining * LIQUIDATOR_REWARD_BPS) / BPS_DENOMINATOR;
+
+        _executeLiquidation(trade, _tradeId, positionSize, executionPrice, pnlUsdc, fundingOwedUsdc, liquidatorReward);
+
+        _refundEth();
+    }
+
+    /**
+     * @dev Settle a liquidation: delete trade, decrease OI, emit, and distribute collateral.
+     *      Extracted to keep liquidate below the stack-too-deep limit.
+     */
+    function _executeLiquidation(
+        TradingStorage.Trade memory _trade,
+        uint256 _tradeId,
+        uint256 _positionSize,
+        uint128 _executionPrice,
+        int256 _pnlUsdc,
+        int256 _fundingOwedUsdc,
+        uint256 _liquidatorReward
+    ) internal {
+        uint256 vaultAmount = uint256(_trade.collateral) - _liquidatorReward;
+
+        // --- EFFECTS ---
+        TRADING_STORAGE.deleteTrade(_tradeId);
+        TRADING_STORAGE.decreaseOpenInterest(_trade.pairIndex, _positionSize, _trade.isLong);
+        emit TradeLiquidated(_tradeId, _trade.user, msg.sender, _executionPrice, _pnlUsdc, _fundingOwedUsdc, _liquidatorReward, vaultAmount);
+
+        // --- INTERACTIONS ---
+        // Vault first, liquidator reward after: a blacklisted liquidator only blocks their own reward payout.
+        TRADING_STORAGE.sendCollateral(address(VAULT), vaultAmount);
+        if (_liquidatorReward > 0) TRADING_STORAGE.sendCollateral(msg.sender, _liquidatorReward);
     }
 
     /**
@@ -447,7 +606,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
      * @param _newTp The new take profit price (0 to clear)
      * @param priceUpdate Pyth price update data
      */
-    function updateTp(uint256 _tradeId, uint128 _newTp, bytes[] calldata priceUpdate) external whenNotPaused {
+    function updateTp(uint256 _tradeId, uint128 _newTp, bytes[] calldata priceUpdate) external payable whenNotPaused {
         TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(_tradeId);
         if (trade.user == address(0)) revert TradeNotFound(_tradeId);
         if (trade.user != msg.sender) revert NotTradeOwner(msg.sender, trade.user);
@@ -460,6 +619,8 @@ contract TradingEngine is Ownable, ReentrancyGuard {
 
         TRADING_STORAGE.updateTradeTp(_tradeId, _newTp);
         emit TpUpdated(_tradeId, _newTp);
+
+        _refundEth();
     }
 
     /**
@@ -468,7 +629,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
      * @param _newSl The new stop loss price (0 to clear)
      * @param priceUpdate Pyth price update data
      */
-    function updateSl(uint256 _tradeId, uint128 _newSl, bytes[] calldata priceUpdate) external whenNotPaused {
+    function updateSl(uint256 _tradeId, uint128 _newSl, bytes[] calldata priceUpdate) external payable whenNotPaused {
         TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(_tradeId);
         if (trade.user == address(0)) revert TradeNotFound(_tradeId);
         if (trade.user != msg.sender) revert NotTradeOwner(msg.sender, trade.user);
@@ -481,6 +642,8 @@ contract TradingEngine is Ownable, ReentrancyGuard {
 
         TRADING_STORAGE.updateTradeSl(_tradeId, _newSl);
         emit SlUpdated(_tradeId, _newSl);
+
+        _refundEth();
     }
 
     /*//////////////////////////////////////////////////////////////

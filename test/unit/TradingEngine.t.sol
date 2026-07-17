@@ -385,9 +385,10 @@ contract TradingEngineTest is Test {
     }
 
     function test_OpenTrade_RevertBelowMinCollateral() public {
+        uint64 belowMin = uint64(engine.MIN_COLLATERAL()) - 1;
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(TradingEngine.BelowMinCollateral.selector, uint64(999_999)));
-        engine.openTrade(DEFAULT_PAIR_INDEX, true, 999_999, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.BelowMinCollateral.selector, belowMin));
+        engine.openTrade(DEFAULT_PAIR_INDEX, true, belowMin, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE);
     }
 
     function test_OpenTrade_RevertOnZeroLeverage() public {
@@ -1077,9 +1078,9 @@ contract TradingEngineTest is Test {
 
         uint256 received = usdc.balanceOf(alice) - aliceBefore;
 
-        // Verify math for short: pnl = size - exitValue
+        // Verify math for short: pnl = size - exitValue (exitValue ceil'd to round toward the pool)
         uint256 size = uint256(effColl) * uint256(DEFAULT_LEVERAGE);
-        uint256 exitValue = (uint256(closeExec) * size) / uint256(shortOpenExec);
+        uint256 exitValue = (uint256(closeExec) * size + uint256(shortOpenExec) - 1) / uint256(shortOpenExec);
         int256 pnl = int256(size) - int256(exitValue);
         uint256 rawPayout = uint256(pnl) + uint256(effColl);
         uint256 closeFeeVal = _closeFee(effColl, DEFAULT_LEVERAGE);
@@ -1375,7 +1376,7 @@ contract TradingEngineTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function testFuzz_OpenTrade(uint64 collateral, uint16 leverage) public {
-        collateral = uint64(bound(collateral, 1e6, 100_000 * 10 ** 6));
+        collateral = uint64(bound(collateral, 10e6, 100_000 * 10 ** 6));
         leverage = uint16(bound(leverage, 1, 100));
 
         // Calculate fee and ensure collateral > fee
@@ -1639,7 +1640,7 @@ contract TradingEngineTest is Test {
         uint64 shortEffColl = DEFAULT_EFFECTIVE_COLLATERAL;
         uint256 size = uint256(shortEffColl) * uint256(DEFAULT_LEVERAGE);
         uint128 shortOpenExec = DEFAULT_SHORT_OPEN_PRICE;
-        uint256 exitValue = (uint256(closeExec) * size) / uint256(shortOpenExec);
+        uint256 exitValue = (uint256(closeExec) * size + uint256(shortOpenExec) - 1) / uint256(shortOpenExec); // ceil: short rounding favors the pool
         int256 pnl = int256(size) - int256(exitValue);
         uint256 rawPayout;
         if (pnl >= 0) {
@@ -1699,7 +1700,7 @@ contract TradingEngineTest is Test {
         uint64 shortEffColl = DEFAULT_EFFECTIVE_COLLATERAL;
         uint256 size = uint256(shortEffColl) * uint256(DEFAULT_LEVERAGE);
         uint128 shortOpenExec = DEFAULT_SHORT_OPEN_PRICE;
-        uint256 exitValue = (uint256(closeExec) * size) / uint256(shortOpenExec);
+        uint256 exitValue = (uint256(closeExec) * size + uint256(shortOpenExec) - 1) / uint256(shortOpenExec); // ceil: short rounding favors the pool
         int256 pnl = int256(size) - int256(exitValue);
         uint256 rawPayout;
         if (pnl >= 0) {
@@ -1837,7 +1838,7 @@ contract TradingEngineTest is Test {
         uint64 shortEffColl = DEFAULT_EFFECTIVE_COLLATERAL;
         uint256 size = uint256(shortEffColl) * uint256(DEFAULT_LEVERAGE);
         uint128 shortOpenExec = DEFAULT_SHORT_OPEN_PRICE;
-        uint256 exitValue = (uint256(closeExec) * size) / uint256(shortOpenExec);
+        uint256 exitValue = (uint256(closeExec) * size + uint256(shortOpenExec) - 1) / uint256(shortOpenExec); // ceil: short rounding favors the pool
         int256 pnl = int256(size) - int256(exitValue);
         uint256 rawPayout;
         if (pnl >= 0) {
@@ -2120,5 +2121,524 @@ contract TradingEngineTest is Test {
         TradingStorage.Trade memory trade = ts2.getTrade(tradeId);
         // Zero spread → open price equals oracle price
         assertEq(trade.openPrice, DEFAULT_ORACLE_PRICE);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                          LIQUIDATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    event TradeLiquidated(
+        uint256 indexed tradeId,
+        address indexed user,
+        address indexed liquidator,
+        uint128 closePrice,
+        int256 pnlUsdc,
+        int256 fundingOwedUsdc,
+        uint256 liquidatorReward,
+        uint256 vaultAmount
+    );
+
+    // Threshold = effectiveCollateral * 9000 / 10000
+    function _liqThreshold(uint64 effectiveCollateral) internal pure returns (uint256) {
+        return (uint256(effectiveCollateral) * 9000) / 10_000;
+    }
+
+    /**
+     * @dev Oracle price that puts a default long (leverage 10x, openPrice = spread-adjusted) at exactly
+     *      `lossBps` of collateral lost, accounting for the close-direction spread (×9995/10000).
+     *      long loss = size * (openPrice - closePrice) / openPrice ; closePrice = oracle * 9995/10000
+     */
+    function _oracleForLongLoss(uint128 openPrice, uint256 lossBps) internal pure returns (uint128) {
+        // want closePrice such that (openPrice - closePrice)/openPrice = lossBps/(10000*leverage)
+        // closePrice = openPrice * (1 - lossBps/(10000*leverage))
+        uint256 denom = uint256(10_000) * DEFAULT_LEVERAGE;
+        uint256 closePrice = (uint256(openPrice) * (denom - lossBps)) / denom;
+        // oracle = closePrice / (9995/10000)
+        return uint128((closePrice * 10_000) / 9_995);
+    }
+
+    function test_Liquidate_Long_Success() public {
+        uint32 tradeId = _openDefaultTrade(alice);
+
+        // Move oracle so the long is well past the 90% loss threshold
+        uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 9200); // 92% loss
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
+
+        uint256 storageBefore = usdc.balanceOf(address(tradingStorage));
+        uint256 vaultBefore = usdc.balanceOf(address(vault));
+        uint256 bobBefore = usdc.balanceOf(bob);
+
+        vm.prank(bob);
+        engine.liquidate(tradeId, EMPTY_UPDATE);
+
+        // Trade deleted
+        TradingStorage.Trade memory trade = tradingStorage.getTrade(tradeId);
+        assertEq(trade.user, address(0));
+
+        // All effective collateral left TradingStorage
+        assertEq(usdc.balanceOf(address(tradingStorage)), storageBefore - DEFAULT_EFFECTIVE_COLLATERAL);
+
+        // Liquidator + vault together received the full collateral
+        uint256 bobReward = usdc.balanceOf(bob) - bobBefore;
+        uint256 vaultGain = usdc.balanceOf(address(vault)) - vaultBefore;
+        assertEq(bobReward + vaultGain, DEFAULT_EFFECTIVE_COLLATERAL);
+
+        // At 92% loss, remaining ≈ 8% collateral; reward = 10% of remaining
+        assertGt(bobReward, 0);
+    }
+
+    function test_Liquidate_Short_Success() public {
+        vm.prank(alice);
+        uint32 tradeId = engine.openTrade(
+            DEFAULT_PAIR_INDEX,
+            false,
+            DEFAULT_COLLATERAL,
+            DEFAULT_LEVERAGE,
+            DEFAULT_SHORT_OPEN_PRICE,
+            DEFAULT_SLIPPAGE_BPS,
+            0,
+            0,
+            EMPTY_UPDATE
+        );
+
+        // Short loses when price goes UP. closePrice = oracle * 10005/10000.
+        // want (closePrice - openPrice)/openPrice = 0.092 → closePrice = openPrice * 1.092
+        uint256 shortDenom = uint256(10_000) * DEFAULT_LEVERAGE;
+        uint256 closePrice = (uint256(DEFAULT_SHORT_OPEN_PRICE) * (shortDenom + 9200)) / shortDenom;
+        uint128 liqOracle = uint128((closePrice * 10_000) / 10_005);
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
+
+        uint256 vaultBefore = usdc.balanceOf(address(vault));
+        uint256 bobBefore = usdc.balanceOf(bob);
+
+        vm.prank(bob);
+        engine.liquidate(tradeId, EMPTY_UPDATE);
+
+        assertEq(tradingStorage.getTrade(tradeId).user, address(0));
+        uint256 total = (usdc.balanceOf(bob) - bobBefore) + (usdc.balanceOf(address(vault)) - vaultBefore);
+        assertEq(total, DEFAULT_EFFECTIVE_COLLATERAL);
+    }
+
+    function test_Liquidate_RewardSplit() public {
+        uint32 tradeId = _openDefaultTrade(alice);
+        uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 9200);
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
+
+        uint256 bobBefore = usdc.balanceOf(bob);
+        uint256 vaultBefore = usdc.balanceOf(address(vault));
+
+        // Compute expected reward from the actual execution price
+        uint128 execPrice = _longClosePrice(liqOracle);
+        int256 pnl = _calcLongPnl(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, execPrice);
+        uint256 loss = uint256(-pnl);
+        uint256 remaining = loss >= DEFAULT_EFFECTIVE_COLLATERAL ? 0 : DEFAULT_EFFECTIVE_COLLATERAL - loss;
+        uint256 expectedReward = (remaining * 1000) / 10_000;
+        uint256 expectedVault = DEFAULT_EFFECTIVE_COLLATERAL - expectedReward;
+
+        vm.prank(bob);
+        engine.liquidate(tradeId, EMPTY_UPDATE);
+
+        assertEq(usdc.balanceOf(bob) - bobBefore, expectedReward);
+        assertEq(usdc.balanceOf(address(vault)) - vaultBefore, expectedVault);
+    }
+
+    function test_Liquidate_EmitsEvent() public {
+        uint32 tradeId = _openDefaultTrade(alice);
+        uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 9200);
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
+
+        uint128 execPrice = _longClosePrice(liqOracle);
+        int256 pnl = _calcLongPnl(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, execPrice);
+        uint256 loss = uint256(-pnl);
+        uint256 remaining = loss >= DEFAULT_EFFECTIVE_COLLATERAL ? 0 : DEFAULT_EFFECTIVE_COLLATERAL - loss;
+        uint256 expectedReward = (remaining * 1000) / 10_000;
+        uint256 expectedVault = DEFAULT_EFFECTIVE_COLLATERAL - expectedReward;
+
+        vm.expectEmit(true, true, true, true);
+        emit TradeLiquidated(tradeId, alice, bob, execPrice, pnl, 0, expectedReward, expectedVault);
+        vm.prank(bob);
+        engine.liquidate(tradeId, EMPTY_UPDATE);
+    }
+
+    function test_Liquidate_DecreasesOpenInterest() public {
+        uint32 tradeId = _openDefaultTrade(alice);
+        uint256 oiBefore = tradingStorage.getOpenInterest(DEFAULT_PAIR_INDEX);
+        assertGt(oiBefore, 0);
+
+        uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 9200);
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
+
+        vm.prank(bob);
+        engine.liquidate(tradeId, EMPTY_UPDATE);
+
+        assertEq(tradingStorage.getOpenInterest(DEFAULT_PAIR_INDEX), 0);
+    }
+
+    function test_Liquidate_LossExceedsCollateral_ZeroReward() public {
+        uint32 tradeId = _openDefaultTrade(alice);
+
+        // Push loss beyond 100% of collateral → remaining = 0, reward = 0, all to vault
+        uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 10_500); // 105% loss
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
+
+        uint256 bobBefore = usdc.balanceOf(bob);
+        uint256 vaultBefore = usdc.balanceOf(address(vault));
+
+        vm.prank(bob);
+        engine.liquidate(tradeId, EMPTY_UPDATE);
+
+        assertEq(usdc.balanceOf(bob), bobBefore); // no reward
+        assertEq(usdc.balanceOf(address(vault)) - vaultBefore, DEFAULT_EFFECTIVE_COLLATERAL);
+    }
+
+    function test_Liquidate_RevertWhenNotLiquidatable() public {
+        uint32 tradeId = _openDefaultTrade(alice);
+
+        // Only 50% loss — below the 90% threshold
+        uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 5000);
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
+
+        vm.prank(bob);
+        vm.expectRevert();
+        engine.liquidate(tradeId, EMPTY_UPDATE);
+    }
+
+    function test_Liquidate_RevertWhenProfitable() public {
+        uint32 tradeId = _openDefaultTrade(alice);
+        // Price up → long is in profit, definitely not liquidatable
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, 55_000 * 1e18);
+
+        vm.prank(bob);
+        vm.expectRevert();
+        engine.liquidate(tradeId, EMPTY_UPDATE);
+    }
+
+    function test_Liquidate_RevertOnTradeNotFound() public {
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.TradeNotFound.selector, uint256(999)));
+        engine.liquidate(999, EMPTY_UPDATE);
+    }
+
+    function test_Liquidate_WorksWhilePaused() public {
+        // Liquidation is the solvency valve and must stay live even while trading is paused.
+        uint32 tradeId = _openDefaultTrade(alice);
+        uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 9200);
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
+
+        vm.prank(owner);
+        engine.pause();
+
+        uint256 bobBefore = usdc.balanceOf(bob);
+        vm.prank(bob);
+        engine.liquidate(tradeId, EMPTY_UPDATE);
+
+        assertGt(usdc.balanceOf(bob), bobBefore);
+        assertEq(tradingStorage.getTrade(tradeId).user, address(0));
+    }
+
+    function test_Liquidate_Permissionless_OwnerCanLiquidate() public {
+        // The trade owner can also liquidate their own position
+        uint32 tradeId = _openDefaultTrade(alice);
+        uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 9200);
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
+
+        uint256 aliceBefore = usdc.balanceOf(alice);
+        vm.prank(alice);
+        engine.liquidate(tradeId, EMPTY_UPDATE);
+
+        // Alice receives the liquidator reward as msg.sender
+        assertGt(usdc.balanceOf(alice), aliceBefore);
+        assertEq(tradingStorage.getTrade(tradeId).user, address(0));
+    }
+
+    function testFuzz_Liquidate_TotalConserved(uint256 lossBps) public {
+        // Loss between threshold (90%) and 150%
+        lossBps = bound(lossBps, 9000, 15_000);
+
+        uint32 tradeId = _openDefaultTrade(alice);
+        uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, lossBps);
+        vm.assume(liqOracle > 0);
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
+
+        uint256 bobBefore = usdc.balanceOf(bob);
+        uint256 vaultBefore = usdc.balanceOf(address(vault));
+
+        vm.prank(bob);
+        engine.liquidate(tradeId, EMPTY_UPDATE);
+
+        // Full collateral is always conserved between liquidator and vault
+        uint256 total = (usdc.balanceOf(bob) - bobBefore) + (usdc.balanceOf(address(vault)) - vaultBefore);
+        assertEq(total, DEFAULT_EFFECTIVE_COLLATERAL);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    PRE-LIQUIDATION OPEN GUARD (7.6)
+    //////////////////////////////////////////////////////////////*/
+
+    function test_OpenTrade_RevertWhenPreLiquidatable() public {
+        // A spread large enough to open straight into the liquidation zone must be rejected.
+        // At 100x leverage, a ~90 bps spread already means 90% instant loss.
+        mockSpreadManager.setSpreadBps(100); // 1% spread
+        uint16 highLeverage = 100;
+
+        vm.prank(alice);
+        vm.expectRevert();
+        engine.openTrade(
+            DEFAULT_PAIR_INDEX,
+            true,
+            DEFAULT_COLLATERAL,
+            highLeverage,
+            0, // no expected price constraint
+            10_000, // 100% slippage tolerance so slippage doesn't revert first
+            0,
+            0,
+            EMPTY_UPDATE
+        );
+    }
+
+    function test_OpenTrade_AllowsNormalSpread() public {
+        // Default 5 bps spread at 10x = 0.05% instant loss, far below threshold — must succeed
+        uint32 tradeId = _openDefaultTrade(alice);
+        assertEq(tradingStorage.getTrade(tradeId).user, alice);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+              CONF-BASED CONSERVATIVE LIQ PRICING (7.7)
+    //////////////////////////////////////////////////////////////*/
+
+    function test_Liquidate_Long_ConfProtectsTrader() public {
+        uint32 tradeId = _openDefaultTrade(alice);
+
+        // At the raw price the long is at ~92% loss → liquidatable.
+        uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 9200);
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
+
+        // A wide confidence band raises the effective price (price + conf for longs),
+        // shrinking the loss below the 90% threshold → no longer liquidatable.
+        mockOracle.setConf(DEFAULT_PAIR_INDEX, uint128(uint256(liqOracle) / 20)); // 5% conf
+
+        vm.prank(bob);
+        vm.expectRevert();
+        engine.liquidate(tradeId, EMPTY_UPDATE);
+    }
+
+    function test_Liquidate_Short_ConfProtectsTrader() public {
+        vm.prank(alice);
+        uint32 tradeId = engine.openTrade(
+            DEFAULT_PAIR_INDEX,
+            false,
+            DEFAULT_COLLATERAL,
+            DEFAULT_LEVERAGE,
+            DEFAULT_SHORT_OPEN_PRICE,
+            DEFAULT_SLIPPAGE_BPS,
+            0,
+            0,
+            EMPTY_UPDATE
+        );
+
+        // Short loses when price rises; at this oracle it is ~92% loss → liquidatable.
+        uint256 shortDenom = uint256(10_000) * DEFAULT_LEVERAGE;
+        uint256 closePrice = (uint256(DEFAULT_SHORT_OPEN_PRICE) * (shortDenom + 9200)) / shortDenom;
+        uint128 liqOracle = uint128((closePrice * 10_000) / 10_005);
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
+
+        // Wide conf lowers the effective price (price - conf for shorts) → loss shrinks below threshold.
+        mockOracle.setConf(DEFAULT_PAIR_INDEX, uint128(uint256(liqOracle) / 20)); // 5% conf
+
+        vm.prank(bob);
+        vm.expectRevert();
+        engine.liquidate(tradeId, EMPTY_UPDATE);
+    }
+
+    function test_Liquidate_Long_SmallConfStillLiquidatable() public {
+        uint32 tradeId = _openDefaultTrade(alice);
+
+        // Deep loss (~110%) so a tiny conf cannot rescue the position.
+        uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 11_000);
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
+        mockOracle.setConf(DEFAULT_PAIR_INDEX, uint128(uint256(liqOracle) / 10_000)); // 1 bps conf
+
+        uint256 total0 = usdc.balanceOf(bob) + usdc.balanceOf(address(vault));
+        vm.prank(bob);
+        engine.liquidate(tradeId, EMPTY_UPDATE);
+
+        // Still liquidated: trade gone and collateral conserved
+        assertEq(tradingStorage.getTrade(tradeId).user, address(0));
+        uint256 total1 = usdc.balanceOf(bob) + usdc.balanceOf(address(vault));
+        assertEq(total1 - total0, DEFAULT_EFFECTIVE_COLLATERAL);
+    }
+
+    function test_Liquidate_Long_ConfAppliedToExecutionPrice() public {
+        uint32 tradeId = _openDefaultTrade(alice);
+
+        uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 11_000);
+        uint128 conf = uint128(uint256(liqOracle) / 200); // 0.5% conf
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
+        mockOracle.setConf(DEFAULT_PAIR_INDEX, conf);
+
+        // Effective price for a long is (price + conf), then close-direction spread (×9995/10000)
+        uint128 conservative = liqOracle + conf;
+        uint128 expectedExec = _longClosePrice(conservative);
+        int256 expectedPnl = _calcLongPnl(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, expectedExec);
+
+        uint256 loss = uint256(-expectedPnl);
+        uint256 remaining = loss >= DEFAULT_EFFECTIVE_COLLATERAL ? 0 : DEFAULT_EFFECTIVE_COLLATERAL - loss;
+        uint256 expectedReward = (remaining * 1000) / 10_000;
+        uint256 expectedVault = DEFAULT_EFFECTIVE_COLLATERAL - expectedReward;
+
+        vm.expectEmit(true, true, true, true);
+        emit TradeLiquidated(tradeId, alice, bob, expectedExec, expectedPnl, 0, expectedReward, expectedVault);
+        vm.prank(bob);
+        engine.liquidate(tradeId, EMPTY_UPDATE);
+    }
+
+    function test_Liquidate_ZeroConf_MatchesRawPricing() public {
+        // conf = 0 (default) must behave exactly like plain price liquidation
+        uint32 tradeId = _openDefaultTrade(alice);
+        uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 9200);
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
+        // no setConf → conf stays 0
+
+        uint128 expectedExec = _longClosePrice(liqOracle);
+        int256 expectedPnl = _calcLongPnl(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, expectedExec);
+
+        vm.expectEmit(true, true, true, false);
+        emit TradeLiquidated(tradeId, alice, bob, expectedExec, expectedPnl, 0, 0, 0);
+        vm.prank(bob);
+        engine.liquidate(tradeId, EMPTY_UPDATE);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    LIQUIDATION EDGE CASES (review follow-ups)
+    //////////////////////////////////////////////////////////////*/
+
+    function test_Liquidate_FundingInducedWhilePriceSolvent() public {
+        // Only a long is open → max OI imbalance → the long pays funding over time.
+        uint32 tradeId = _openDefaultTrade(alice);
+
+        // Keep the oracle at entry so price PnL is ~0 (a solvent position by price alone).
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, DEFAULT_ORACLE_PRICE);
+
+        // Sanity: at t=0 the position is NOT liquidatable (price-only loss is negligible).
+        vm.prank(bob);
+        vm.expectRevert();
+        engine.liquidate(tradeId, EMPTY_UPDATE);
+
+        // Accrue funding for 4h — enough for funding alone to exceed the 90% threshold.
+        vm.warp(block.timestamp + 4 hours);
+
+        uint256 bobBefore = usdc.balanceOf(bob);
+        uint256 vaultBefore = usdc.balanceOf(address(vault));
+
+        vm.prank(bob);
+        engine.liquidate(tradeId, EMPTY_UPDATE);
+
+        // Liquidated purely by funding: trade gone, collateral conserved to liquidator + vault.
+        assertEq(tradingStorage.getTrade(tradeId).user, address(0));
+        uint256 total = (usdc.balanceOf(bob) - bobBefore) + (usdc.balanceOf(address(vault)) - vaultBefore);
+        assertEq(total, DEFAULT_EFFECTIVE_COLLATERAL);
+    }
+
+    function test_Liquidate_UnderwaterVaultMadeWhole() public {
+        // Deep loss (>100%) so remaining = 0: liquidator gets nothing, the full collateral backs the vault.
+        uint32 tradeId = _openDefaultTrade(alice);
+        uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 12_000); // 120% loss
+        vm.assume(liqOracle > 0);
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
+
+        uint256 storageBefore = usdc.balanceOf(address(tradingStorage));
+        uint256 vaultTotalBefore = vault.totalAssets();
+        uint256 vaultBalBefore = usdc.balanceOf(address(vault));
+        uint256 bobBefore = usdc.balanceOf(bob);
+
+        vm.prank(bob);
+        engine.liquidate(tradeId, EMPTY_UPDATE);
+
+        // Liquidator reward is 0 when the position is fully underwater.
+        assertEq(usdc.balanceOf(bob), bobBefore);
+
+        // The entire effective collateral moved from storage into the vault, and the vault's
+        // balance-based accounting absorbed it exactly (made whole).
+        assertEq(storageBefore - usdc.balanceOf(address(tradingStorage)), DEFAULT_EFFECTIVE_COLLATERAL);
+        assertEq(usdc.balanceOf(address(vault)) - vaultBalBefore, DEFAULT_EFFECTIVE_COLLATERAL);
+        assertEq(vault.totalAssets() - vaultTotalBefore, DEFAULT_EFFECTIVE_COLLATERAL);
+    }
+
+    function testFuzz_Liquidate_ShortRoundingFavorsPool(uint256 lossBps) public {
+        // Rounding-direction invariant: for a short, the vault must never lose value to truncation.
+        // The engine ceils exitValue for shorts; a floor'd mirror would (weakly) understate the loss,
+        // so the engine's loss must be >= the floor mirror → vault gets at least as much.
+        lossBps = bound(lossBps, 9000, 14_000);
+
+        vm.prank(alice);
+        uint32 tradeId = engine.openTrade(
+            DEFAULT_PAIR_INDEX,
+            false,
+            DEFAULT_COLLATERAL,
+            DEFAULT_LEVERAGE,
+            DEFAULT_SHORT_OPEN_PRICE,
+            DEFAULT_SLIPPAGE_BPS,
+            0,
+            0,
+            EMPTY_UPDATE
+        );
+
+        // Oracle that puts the short at the target loss (short loses when price rises).
+        uint256 denom = uint256(10_000) * DEFAULT_LEVERAGE;
+        uint256 closePrice = (uint256(DEFAULT_SHORT_OPEN_PRICE) * (denom + lossBps)) / denom;
+        uint128 liqOracle = uint128((closePrice * 10_000) / 10_005);
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
+
+        uint256 vaultBefore = usdc.balanceOf(address(vault));
+        uint256 bobBefore = usdc.balanceOf(bob);
+
+        vm.prank(bob);
+        engine.liquidate(tradeId, EMPTY_UPDATE);
+
+        // Conservation holds exactly regardless of rounding direction.
+        uint256 total = (usdc.balanceOf(bob) - bobBefore) + (usdc.balanceOf(address(vault)) - vaultBefore);
+        assertEq(total, DEFAULT_EFFECTIVE_COLLATERAL);
+
+        // Vault never receives LESS than the floor-rounded accounting would have given it,
+        // i.e. rounding is not adverse to the pool.
+        uint128 execPrice = _shortClosePrice(liqOracle);
+        uint256 size = uint256(DEFAULT_EFFECTIVE_COLLATERAL) * DEFAULT_LEVERAGE;
+        uint256 exitFloor = (uint256(execPrice) * size) / uint256(DEFAULT_SHORT_OPEN_PRICE);
+        int256 pnlFloor = int256(size) - int256(exitFloor); // floor mirror (weakly smaller loss)
+        uint256 lossFloor = pnlFloor < 0 ? uint256(-pnlFloor) : 0;
+        uint256 remainingFloor = lossFloor >= DEFAULT_EFFECTIVE_COLLATERAL ? 0 : DEFAULT_EFFECTIVE_COLLATERAL - lossFloor;
+        uint256 vaultFloorLowerBound = DEFAULT_EFFECTIVE_COLLATERAL - (remainingFloor * 1000) / 10_000;
+
+        assertGe(usdc.balanceOf(address(vault)) - vaultBefore, vaultFloorLowerBound);
+    }
+
+    function test_Liquidate_RevertOnOracleOutage() public {
+        // A stale / high-deviation oracle makes getPrice revert; liquidation must revert too
+        // (no liquidating at an unverified price) — the accepted outage behavior.
+        uint32 tradeId = _openDefaultTrade(alice);
+        uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 9200);
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
+
+        // Simulate the oracle outage.
+        mockOracle.setShouldRevert(true);
+
+        vm.prank(bob);
+        vm.expectRevert(MockOracle.OracleUnavailable.selector);
+        engine.liquidate(tradeId, EMPTY_UPDATE);
+
+        // Recovery: once the oracle is back, the same position liquidates normally.
+        mockOracle.setShouldRevert(false);
+        vm.prank(bob);
+        engine.liquidate(tradeId, EMPTY_UPDATE);
+        assertEq(tradingStorage.getTrade(tradeId).user, address(0));
+    }
+
+    /**
+     * @dev Local mirror of the engine's long PnL formula in USDC precision.
+     */
+    function _calcLongPnl(uint64 collateral, uint16 leverage, uint128 openPrice, uint128 closePrice) internal pure returns (int256) {
+        uint256 size = uint256(collateral) * uint256(leverage);
+        uint256 exitValue = (uint256(closePrice) * size) / uint256(openPrice);
+        return int256(exitValue) - int256(size);
     }
 }

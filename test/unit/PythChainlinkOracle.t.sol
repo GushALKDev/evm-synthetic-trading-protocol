@@ -44,8 +44,8 @@ contract PythChainlinkOracleTest is Test {
         vm.prank(owner);
         oracle.setPairFeed(PAIR_INDEX, BTC_FEED_ID, address(mockChainlink), CHAINLINK_HEARTBEAT);
 
-        // Fund oracle with ETH for Pyth fees
-        vm.deal(address(oracle), 1 ether);
+        // Caller funds Pyth fees via msg.value on getPrice
+        vm.deal(address(this), 1 ether);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -64,8 +64,8 @@ contract PythChainlinkOracleTest is Test {
         return updateData;
     }
 
-    function _getPrice(bytes[] memory updateData) internal returns (uint128) {
-        return oracle.getPrice(PAIR_INDEX, updateData);
+    function _getPrice(bytes[] memory updateData) internal returns (uint128 price) {
+        (price, ) = oracle.getPrice{value: 1 ether}(PAIR_INDEX, updateData);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -83,18 +83,6 @@ contract PythChainlinkOracleTest is Test {
     function test_Constructor_RevertOnZeroPyth() public {
         vm.expectRevert(PythChainlinkOracle.InvalidPairFeed.selector);
         new PythChainlinkOracle(address(0), owner);
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                        RECEIVE ETH TESTS
-    //////////////////////////////////////////////////////////////*/
-
-    function test_Oracle_ReceiveEth() public {
-        uint256 balBefore = address(oracle).balance;
-        vm.deal(address(this), 1 ether);
-        (bool ok, ) = address(oracle).call{value: 0.5 ether}("");
-        assertTrue(ok);
-        assertEq(address(oracle).balance, balBefore + 0.5 ether);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -158,7 +146,7 @@ contract PythChainlinkOracleTest is Test {
         bytes[] memory updateData = _createPriceUpdate(BTC_PRICE, BTC_CONF, BTC_EXPO);
 
         vm.expectRevert(abi.encodeWithSelector(PythChainlinkOracle.PairFeedNotSet.selector, 999));
-        oracle.getPrice(999, updateData);
+        oracle.getPrice{value: 1 ether}(999, updateData);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -184,7 +172,7 @@ contract PythChainlinkOracleTest is Test {
         bytes[] memory updateData = _createPriceUpdateWithTime(BTC_PRICE, BTC_CONF, BTC_EXPO, staleTime);
 
         vm.expectRevert(abi.encodeWithSelector(PythChainlinkOracle.StalePrice.selector, BTC_FEED_ID, staleTime, block.timestamp));
-        oracle.getPrice(PAIR_INDEX, updateData);
+        oracle.getPrice{value: 1 ether}(PAIR_INDEX, updateData);
     }
 
     function test_GetPrice_FreshPricePasses() public {
@@ -218,7 +206,7 @@ contract PythChainlinkOracleTest is Test {
                 block.timestamp
             )
         );
-        oracle.getPrice(PAIR_INDEX, updateData);
+        oracle.getPrice{value: 1 ether}(PAIR_INDEX, updateData);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -231,7 +219,7 @@ contract PythChainlinkOracleTest is Test {
         bytes[] memory updateData = _createPriceUpdate(BTC_PRICE, wideConf, BTC_EXPO);
 
         vm.expectRevert(abi.encodeWithSelector(PythChainlinkOracle.ConfidenceTooWide.selector, wideConf, BTC_PRICE));
-        oracle.getPrice(PAIR_INDEX, updateData);
+        oracle.getPrice{value: 1 ether}(PAIR_INDEX, updateData);
     }
 
     function test_GetPrice_NarrowConfidencePasses() public {
@@ -263,7 +251,7 @@ contract PythChainlinkOracleTest is Test {
         bytes[] memory updateData = _createPriceUpdate(BTC_PRICE, BTC_CONF, BTC_EXPO);
 
         vm.expectRevert(); // PriceDeviationTooHigh
-        oracle.getPrice(PAIR_INDEX, updateData);
+        oracle.getPrice{value: 1 ether}(PAIR_INDEX, updateData);
     }
 
     function test_GetPrice_WithinBoundsDeviation() public {
@@ -304,7 +292,7 @@ contract PythChainlinkOracleTest is Test {
         bytes[] memory updateData = _createPriceUpdate(0, 0, BTC_EXPO);
 
         vm.expectRevert(); // ZeroPrice or PythUtils revert
-        oracle.getPrice(PAIR_INDEX, updateData);
+        oracle.getPrice{value: 1 ether}(PAIR_INDEX, updateData);
     }
 
     function test_GetPrice_RevertOnZeroChainlinkPrice() public {
@@ -313,14 +301,14 @@ contract PythChainlinkOracleTest is Test {
         bytes[] memory updateData = _createPriceUpdate(BTC_PRICE, BTC_CONF, BTC_EXPO);
 
         vm.expectRevert(PythChainlinkOracle.ZeroPrice.selector);
-        oracle.getPrice(PAIR_INDEX, updateData);
+        oracle.getPrice{value: 1 ether}(PAIR_INDEX, updateData);
     }
 
     function test_GetPrice_RevertOnNegativePythPrice() public {
         bytes[] memory updateData = _createPriceUpdate(-1, 0, BTC_EXPO);
 
         vm.expectRevert(); // ZeroPrice (price <= 0)
-        oracle.getPrice(PAIR_INDEX, updateData);
+        oracle.getPrice{value: 1 ether}(PAIR_INDEX, updateData);
     }
 
     function test_GetPrice_RevertOnNegativeChainlinkPrice() public {
@@ -329,7 +317,7 @@ contract PythChainlinkOracleTest is Test {
         bytes[] memory updateData = _createPriceUpdate(BTC_PRICE, BTC_CONF, BTC_EXPO);
 
         vm.expectRevert(PythChainlinkOracle.ZeroPrice.selector);
-        oracle.getPrice(PAIR_INDEX, updateData);
+        oracle.getPrice{value: 1 ether}(PAIR_INDEX, updateData);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -368,27 +356,30 @@ contract PythChainlinkOracleTest is Test {
             uint64(block.timestamp - 1)
         );
 
-        uint128 price = oracle.getPrice(1, updateData);
+        (uint128 price, ) = oracle.getPrice{value: 1 ether}(1, updateData);
         // 130500 * 10^(18-5) = 130500 * 1e13 = 1.305e18
         assertEq(price, 1_305_000_000_000_000_000);
     }
 
     /*//////////////////////////////////////////////////////////////
-                    INSUFFICIENT ETH TESTS
+                    INSUFFICIENT FEE TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_GetPrice_RevertOnInsufficientEthForFee() public {
-        // Deploy a fresh oracle with no ETH
-        vm.prank(owner);
-        PythChainlinkOracle emptyOracle = new PythChainlinkOracle(address(mockPyth), owner);
-
-        vm.prank(owner);
-        emptyOracle.setPairFeed(PAIR_INDEX, BTC_FEED_ID, address(mockChainlink), CHAINLINK_HEARTBEAT);
-
+    function test_GetPrice_RevertOnInsufficientFee() public {
         bytes[] memory updateData = _createPriceUpdate(BTC_PRICE, BTC_CONF, BTC_EXPO);
 
-        vm.expectRevert(abi.encodeWithSelector(PythChainlinkOracle.InsufficientEthForFee.selector, 0, 1));
-        emptyOracle.getPrice(PAIR_INDEX, updateData);
+        // Sending no ETH cannot cover the 1 wei Pyth fee
+        vm.expectRevert(abi.encodeWithSelector(PythChainlinkOracle.InsufficientFee.selector, 0, 1));
+        oracle.getPrice(PAIR_INDEX, updateData);
+    }
+
+    function test_GetPrice_RefundsSurplus() public {
+        bytes[] memory updateData = _createPriceUpdate(BTC_PRICE, BTC_CONF, BTC_EXPO);
+
+        uint256 balBefore = address(this).balance;
+        oracle.getPrice{value: 1 ether}(PAIR_INDEX, updateData);
+        // Only the 1 wei fee is consumed; the rest is refunded
+        assertEq(address(this).balance, balBefore - 1);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -426,7 +417,7 @@ contract PythChainlinkOracleTest is Test {
 
         bytes[] memory updateData = _createPriceUpdate(rawPrice, conf, expo);
 
-        uint128 price = oracle.getPrice(PAIR_INDEX, updateData);
+        (uint128 price, ) = oracle.getPrice{value: 1 ether}(PAIR_INDEX, updateData);
         assertEq(uint256(price), pyth18);
     }
 

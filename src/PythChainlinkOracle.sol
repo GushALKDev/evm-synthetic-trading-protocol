@@ -2,6 +2,7 @@
 pragma solidity 0.8.24;
 
 import {Ownable} from "solady/auth/Ownable.sol";
+import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 import {IPyth} from "@pythnetwork/pyth-sdk-solidity/IPyth.sol";
 import {PythStructs} from "@pythnetwork/pyth-sdk-solidity/PythStructs.sol";
 import {PythUtils} from "@pythnetwork/pyth-sdk-solidity/PythUtils.sol";
@@ -15,9 +16,11 @@ import {IOracle} from "./interfaces/IOracle.sol";
  * @dev Pyth is pull-based: callers submit signed priceData bytes, verified on-chain.
  *      Chainlink is ONLY used as a deviation anchor — if Pyth is stale, we REVERT (no fallback).
  *      Validation pipeline: Feed active → Pyth staleness → Non-zero → Confidence → Normalize → Chainlink staleness → Deviation
- *      The oracle pays Pyth fees from its own ETH balance (funded via receive()).
+ *      The caller funds the Pyth fee via msg.value on getPrice; any surplus is refunded to the caller.
  */
 contract PythChainlinkOracle is IOracle, Ownable {
+    using SafeTransferLib for address;
+
     /*//////////////////////////////////////////////////////////////
                               CONSTANTS
     //////////////////////////////////////////////////////////////*/
@@ -65,7 +68,7 @@ contract PythChainlinkOracle is IOracle, Ownable {
     error PriceDeviationTooHigh(uint256 pythPrice18, uint256 chainlinkPrice18);
     error ChainlinkStalePrice(address feed, uint256 updatedAt, uint256 blockTime);
     error InvalidPairFeed();
-    error InsufficientEthForFee(uint256 available, uint256 required);
+    error InsufficientFee(uint256 provided, uint256 required);
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -78,30 +81,25 @@ contract PythChainlinkOracle is IOracle, Ownable {
     }
 
     /*//////////////////////////////////////////////////////////////
-                            RECEIVE ETH
-    //////////////////////////////////////////////////////////////*/
-
-    receive() external payable {}
-
-    /*//////////////////////////////////////////////////////////////
                           CORE FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
     /**
      * @notice Get a validated price for a trading pair
      * @dev Pipeline: Feed active → Update Pyth → Staleness → Non-zero → Confidence → Normalize → Chainlink check → Deviation.
-     *      Pyth fee paid from contract's own ETH balance.
+     *      The caller funds the Pyth fee via msg.value; any surplus is refunded to msg.sender.
      * @param pairIndex The pair index to get price for
      * @param priceData Pyth-signed price update data (submitted by user, verified on-chain)
      * @return price18 Validated price normalized to 18 decimals
+     * @return conf18 Pyth confidence band normalized to 18 decimals
      */
-    function getPrice(uint256 pairIndex, bytes[] calldata priceData) external returns (uint128 price18) {
+    function getPrice(uint256 pairIndex, bytes[] calldata priceData) external payable returns (uint128 price18, uint128 conf18) {
         PairFeed storage feed = _pairFeeds[pairIndex];
         if (!feed.active) revert PairFeedNotSet(pairIndex);
 
-        // Compute fee and pay from own balance
+        // Caller funds the fee; require enough and refund the surplus at the end
         uint256 fee = PYTH.getUpdateFee(priceData);
-        if (address(this).balance < fee) revert InsufficientEthForFee(address(this).balance, fee);
+        if (msg.value < fee) revert InsufficientFee(msg.value, fee);
 
         PYTH.updatePriceFeeds{value: fee}(priceData);
 
@@ -122,8 +120,9 @@ contract PythChainlinkOracle is IOracle, Ownable {
             revert ConfidenceTooWide(pythPrice.conf, pythPrice.price);
         }
 
-        // Normalize Pyth price to 18 decimals
+        // Normalize Pyth price and confidence band to 18 decimals (conf shares the price exponent)
         uint256 pythNormalized = PythUtils.convertToUint(pythPrice.price, pythPrice.expo, TARGET_DECIMALS);
+        uint256 confNormalized = PythUtils.convertToUint(int64(pythPrice.conf), pythPrice.expo, TARGET_DECIMALS);
 
         // Chainlink deviation anchor
         uint256 chainlinkNormalized = _getChainlinkPrice18(feed.chainlinkFeed, feed.chainlinkHeartbeat);
@@ -135,6 +134,11 @@ contract PythChainlinkOracle is IOracle, Ownable {
         }
 
         price18 = uint128(pythNormalized);
+        conf18 = uint128(confNormalized);
+
+        // Refund any ETH sent above the fee
+        uint256 surplus = msg.value - fee;
+        if (surplus > 0) msg.sender.safeTransferETH(surplus);
     }
 
     /*//////////////////////////////////////////////////////////////

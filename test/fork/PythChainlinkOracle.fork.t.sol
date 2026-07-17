@@ -56,8 +56,8 @@ contract PythChainlinkOracleForkTest is Test {
         oracle.setPairFeed(PAIR_ETH, PYTH_ETH_USD, CHAINLINK_UETH_USD, CHAINLINK_HEARTBEAT);
         vm.stopPrank();
 
-        // Fund oracle with ETH for Pyth fees
-        vm.deal(address(oracle), 10 ether);
+        // Caller funds Pyth fees via msg.value on getPrice
+        vm.deal(address(this), 10 ether);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -100,7 +100,7 @@ contract PythChainlinkOracleForkTest is Test {
     function test_Fork_GetPrice_BTC() public skipIfNoFork {
         bytes[] memory priceUpdate = _fetchHermesPriceUpdate(PYTH_BTC_USD);
 
-        uint128 price = oracle.getPrice(PAIR_BTC, priceUpdate);
+        (uint128 price, ) = oracle.getPrice{value: 0.01 ether}(PAIR_BTC, priceUpdate);
 
         // BTC should be between $10k and $500k (18 decimals)
         assertGt(price, 10_000 * 1e18, "BTC price too low");
@@ -113,7 +113,7 @@ contract PythChainlinkOracleForkTest is Test {
     function test_Fork_GetPrice_ETH() public skipIfNoFork {
         bytes[] memory priceUpdate = _fetchHermesPriceUpdate(PYTH_ETH_USD);
 
-        uint128 price = oracle.getPrice(PAIR_ETH, priceUpdate);
+        (uint128 price, ) = oracle.getPrice{value: 0.01 ether}(PAIR_ETH, priceUpdate);
 
         // ETH should be between $500 and $50k (18 decimals)
         assertGt(price, 500 * 1e18, "ETH price too low");
@@ -131,7 +131,7 @@ contract PythChainlinkOracleForkTest is Test {
         bytes[] memory priceUpdate = _fetchHermesPriceUpdate(PYTH_BTC_USD);
 
         // If deviation exceeds 3%, this call reverts with PriceDeviationTooHigh
-        uint128 price = oracle.getPrice(PAIR_BTC, priceUpdate);
+        (uint128 price, ) = oracle.getPrice{value: 0.01 ether}(PAIR_BTC, priceUpdate);
 
         // Also read Chainlink directly for logging
         (, int256 clAnswer, , , ) = AggregatorV3Interface(CHAINLINK_UBTC_USD).latestRoundData();
@@ -150,7 +150,7 @@ contract PythChainlinkOracleForkTest is Test {
     function test_Fork_PythChainlinkDeviation_ETH() public skipIfNoFork {
         bytes[] memory priceUpdate = _fetchHermesPriceUpdate(PYTH_ETH_USD);
 
-        uint128 price = oracle.getPrice(PAIR_ETH, priceUpdate);
+        (uint128 price, ) = oracle.getPrice{value: 0.01 ether}(PAIR_ETH, priceUpdate);
 
         (, int256 clAnswer, , , ) = AggregatorV3Interface(CHAINLINK_UETH_USD).latestRoundData();
         uint256 chainlink18 = uint256(clAnswer) * 1e10;
@@ -172,7 +172,7 @@ contract PythChainlinkOracleForkTest is Test {
     function test_Fork_PriceNormalization_18Decimals() public skipIfNoFork {
         bytes[] memory priceUpdate = _fetchHermesPriceUpdate(PYTH_BTC_USD);
 
-        uint128 price = oracle.getPrice(PAIR_BTC, priceUpdate);
+        (uint128 price, ) = oracle.getPrice{value: 0.01 ether}(PAIR_BTC, priceUpdate);
 
         // BTC at ~$90k = 90000e18 = 9e22 — much larger than 1e18
         assertGt(price, 1e18, "Price not normalized to 18 decimals");
@@ -192,24 +192,6 @@ contract PythChainlinkOracleForkTest is Test {
 
         assertEq(btcPrice.expo, -8, "BTC Pyth expo should be -8");
         assertEq(ethPrice.expo, -8, "ETH Pyth expo should be -8");
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                    INSUFFICIENT ETH TESTS
-    //////////////////////////////////////////////////////////////*/
-
-    function test_Fork_RevertOnInsufficientEthForFee() public skipIfNoFork {
-        // Deploy a fresh oracle with no ETH
-        vm.prank(owner);
-        PythChainlinkOracle emptyOracle = new PythChainlinkOracle(PYTH, owner);
-
-        vm.prank(owner);
-        emptyOracle.setPairFeed(PAIR_BTC, PYTH_BTC_USD, CHAINLINK_UBTC_USD, CHAINLINK_HEARTBEAT);
-
-        bytes[] memory priceUpdate = _fetchHermesPriceUpdate(PYTH_BTC_USD);
-
-        vm.expectRevert();
-        emptyOracle.getPrice(PAIR_BTC, priceUpdate);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -264,10 +246,10 @@ contract PythChainlinkOracleForkTest is Test {
 
     function test_Fork_ConsecutivePriceFetches() public skipIfNoFork {
         bytes[] memory btcUpdate = _fetchHermesPriceUpdate(PYTH_BTC_USD);
-        uint128 btcPrice = oracle.getPrice(PAIR_BTC, btcUpdate);
+        (uint128 btcPrice, ) = oracle.getPrice{value: 0.01 ether}(PAIR_BTC, btcUpdate);
 
         bytes[] memory ethUpdate = _fetchHermesPriceUpdate(PYTH_ETH_USD);
-        uint128 ethPrice = oracle.getPrice(PAIR_ETH, ethUpdate);
+        (uint128 ethPrice, ) = oracle.getPrice{value: 0.01 ether}(PAIR_ETH, ethUpdate);
 
         // BTC should always be more expensive than ETH
         assertGt(btcPrice, ethPrice, "BTC should be more expensive than ETH");
@@ -287,7 +269,7 @@ contract PythChainlinkOracleForkTest is Test {
     function test_Fork_StalenessDetected_AfterWarp() public skipIfNoFork {
         // Fetch fresh update and validate it works
         bytes[] memory priceUpdate = _fetchHermesPriceUpdate(PYTH_BTC_USD);
-        oracle.getPrice(PAIR_BTC, priceUpdate);
+        oracle.getPrice{value: 0.01 ether}(PAIR_BTC, priceUpdate);
 
         // Warp 60s forward — exceeds MAX_STALENESS (30s)
         vm.warp(block.timestamp + 60);
@@ -295,7 +277,7 @@ contract PythChainlinkOracleForkTest is Test {
         // Same update data is now stale — calling getPrice should revert
         // Note: updatePriceFeeds succeeds (Pyth accepts old data) but staleness check fails
         vm.expectRevert();
-        oracle.getPrice(PAIR_BTC, priceUpdate);
+        oracle.getPrice{value: 0.01 ether}(PAIR_BTC, priceUpdate);
     }
 
     receive() external payable {}
