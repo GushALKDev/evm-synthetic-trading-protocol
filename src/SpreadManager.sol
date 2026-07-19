@@ -56,6 +56,15 @@ contract SpreadManager is Ownable {
     error VolatilityChangeExceeded(uint256 delta, uint256 maxDelta);
 
     /*//////////////////////////////////////////////////////////////
+                              MODIFIERS
+    //////////////////////////////////////////////////////////////*/
+
+    modifier onlyKeeper() {
+        _requireKeeper();
+        _;
+    }
+
+    /*//////////////////////////////////////////////////////////////
                           INTERNAL HELPERS
     //////////////////////////////////////////////////////////////*/
 
@@ -113,8 +122,7 @@ contract SpreadManager is Ownable {
     /**
      * @notice Update per-pair volatility (18 decimals). First update skips bounds check.
      */
-    function updateVolatility(uint256 _pairIndex, uint256 _newVolatility) external {
-        _requireKeeper();
+    function updateVolatility(uint256 _pairIndex, uint256 _newVolatility) external onlyKeeper {
         uint256 current = _pairVolatility[_pairIndex];
         if (current != 0) {
             uint256 delta = _newVolatility > current ? _newVolatility - current : current - _newVolatility;
