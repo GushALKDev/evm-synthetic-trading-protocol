@@ -29,12 +29,12 @@ Each phase should be completed before moving to the next. Within each phase, the
 | 6         | Dynamic Spread            | 6      | 6         | 100%     |
 | 7         | Liquidations              | 9      | 9         | 100%     |
 | 8         | Limit Orders (TP/SL)      | 5      | 5         | 100%     |
-| 9         | Solvency (Assistant Fund) | 5      | 0         | 0%       |
+| 9         | Solvency (Assistant Fund) | 5      | 5         | 100%     |
 | 10        | Solvency (Bonding)        | 6      | 0         | 0%       |
 | 11        | Governance Token          | 4      | 0         | 0%       |
 | 12        | Testing & Audit           | 8      | 0         | 0%       |
 | 13        | V2 Improvements           | 8      | 0         | 0%       |
-| **TOTAL** |                           | **96** | **59**    | **61%**  |
+| **TOTAL** |                           | **96** | **64**    | **67%**  |
 
 ---
 
@@ -307,16 +307,22 @@ Each phase should be completed before moving to the next. Within each phase, the
 >
 > **Dependencies:** Phase 4
 
-- [ ] **9.1** Contract `AssistantFund.sol`
-- [ ] **9.2** Reception of 20% of fees
-- [ ] **9.3** Function `injectFunds()` (only SolvencyManager)
-- [ ] **9.4** Balance and target cap tracking
-- [ ] **9.5** Assistant Fund tests
+- [x] **9.1** Contract `AssistantFund.sol`
+- [x] **9.2** Reception of 20% of fees (via `treasury` pointed at AssistantFund — plain USDC transfers, no engine changes)
+- [x] **9.3** Function `injectFunds()` (only SolvencyManager)
+- [x] **9.4** Balance and target cap tracking (`targetCap`, `isFunded`, `skim` overflow to Vault)
+- [x] **9.5** Assistant Fund tests (fee reception, inject access control, skim overflow + conservation fuzz, admin setters)
+
+**Design decisions:**
+
+- **Fees arrive as plain transfers.** The TradingEngine `treasury` is pointed at `AssistantFund`; the existing 20% fee share lands as a plain USDC transfer with no engine changes (0 bytes added to the near-full TradingEngine).
+- **`injectFunds` is `onlySolvencyManager`** (Phase 10 orchestrator). The manager address is set by the owner via `setSolvencyManager`, so Phase 9 does not depend on Phase 10 being deployed; until it is, injection reverts `SolvencyManagerNotSet`.
+- **Overflow skimmed lazily via permissionless `skim()`.** Since plain transfers have no hook, excess above `targetCap` is not redirected on arrival; anyone (or a keeper) calls `skim()` to send `balance - targetCap` to the Vault, keeping the reserve from over-accumulating fees at the LPs' expense.
 
 **Deliverables:**
 
-- Reserve accumulating fees automatically
-- Injection controlled by SolvencyManager
+- Reserve accumulating fees automatically (treasury → AssistantFund)
+- Injection controlled by SolvencyManager; overflow skimmable to the Vault
 
 **Reference:** [07-vault-ssl.md](./07-vault-ssl.md)
 
@@ -415,6 +421,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 
 | Date       | Changes                 |
 | :--------- | :---------------------- |
+| 2026-07-19 | Phase 9: Assistant Fund — USDC reserve (Layer 2 solvency), receives 20% fee share via treasury, `injectFunds` onlySolvencyManager, permissionless `skim` of overflow above `targetCap` to the Vault. No TradingEngine changes |
 | 2026-07-17 | Phase 8: Limit orders — permissionless `executeLimit` for automatic TP/SL, trigger on oracle price, settle like closeTrade, 0.1% executor reward carved from trader payout (replaces onlyKeeper/Chainlink Automation) |
 | 2026-07-17 | Phase 7 (7.9): Post-review hardening — caller-funded payable oracle fee (refunds surplus), `liquidate` unpausable, Pyth outage policy documented, `MIN_COLLATERAL` → 10 USDC, PnL rounding favors the pool (short ceil), Vault paid before liquidator reward |
 | 2026-07-17 | Phase 7 (7.1–7.8): Liquidations — permissionless `liquidate` at 90% threshold on funding-adjusted PnL, 10% liquidator reward, pre-liquidation open guard, confidence-based conservative pricing (`IOracle.getPrice` → `(price18, conf18)`) |

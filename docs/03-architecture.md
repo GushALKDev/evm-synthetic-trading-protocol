@@ -396,12 +396,23 @@ if (deviation > MAX_DEVIATION) revert PriceDeviationTooHigh();
 | `activateBonding()` | AssistantFund insufficient | Start bond sales          |
 | `executeBuyback()`  | CR > 110%                  | Buy and burn $SYNTH       |
 
-### 4.6 `AssistantFund.sol`
+### 4.6 `AssistantFund.sol` (implemented — Layer 2)
 
-**Role:** Emergency reserve in USDC.
+**Role:** Emergency USDC reserve (Layer 2 of the solvency system).
 
-- **Input:** 20% of all trading fees.
-- **Output:** Only callable by `SolvencyManager` under deficit.
+| Function                       | Access           | Description                                             |
+| :----------------------------- | :--------------- | :----------------------------------------------------- |
+| `injectFunds(amount)`          | SolvencyManager  | Transfer reserve USDC to the Vault to cover a deficit  |
+| `skim()`                       | Public           | Send `balance - targetCap` overflow to the Vault       |
+| `balance()` / `isFunded()`     | View             | Current reserve; whether it has reached `targetCap`    |
+| `setSolvencyManager(addr)`     | Owner            | Set the Phase 10 orchestrator allowed to inject        |
+| `setTargetCap(cap)`            | Owner            | Set the reserve cap above which fees overflow           |
+
+**Design decisions:**
+
+- **Input:** 20% of all trading fees, received as **plain USDC transfers** by pointing the TradingEngine `treasury` at this contract — no engine changes and no per-transfer hook.
+- **Injection:** only callable by `SolvencyManager` (Phase 10). The address is owner-settable (`setSolvencyManager`), so Phase 9 does not depend on Phase 10; until it is set, `injectFunds` reverts `SolvencyManagerNotSet`.
+- **Overflow:** because plain transfers have no hook, the excess above `targetCap` is skimmed lazily by the permissionless `skim()` (anyone or a keeper), sending `balance - targetCap` to the Vault so the reserve does not over-accumulate fees at the LPs' expense.
 
 ### 4.7 `BondDepository.sol`
 
