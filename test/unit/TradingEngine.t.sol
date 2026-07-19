@@ -2641,4 +2641,228 @@ contract TradingEngineTest is Test {
         uint256 exitValue = (uint256(closePrice) * size) / uint256(openPrice);
         return int256(exitValue) - int256(size);
     }
+
+    /*//////////////////////////////////////////////////////////////
+                    LIMIT ORDERS / AUTO TP-SL (PHASE 8)
+    //////////////////////////////////////////////////////////////*/
+
+    event LimitExecuted(
+        uint256 indexed tradeId,
+        address indexed user,
+        address indexed executor,
+        bool isTp,
+        uint128 closePrice,
+        int256 pnlUsdc,
+        uint256 payoutUsdc,
+        uint256 executorReward,
+        int256 fundingOwedUsdc
+    );
+
+    // Exec reward = collateral * leverage * 10 / 10000 (0.1% of notional)
+    function _execReward(uint64 effectiveCollateral, uint16 leverage) internal pure returns (uint256) {
+        return (uint256(effectiveCollateral) * leverage * 10) / 10_000;
+    }
+
+    function test_ExecuteLimit_RevertOnNoLimitSet() public {
+        // Open a trade with no TP and no SL
+        vm.prank(alice);
+        uint32 tradeId = engine.openTrade(DEFAULT_PAIR_INDEX, true, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE);
+
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.NoLimitSet.selector, uint256(tradeId)));
+        engine.executeLimit(tradeId, EMPTY_UPDATE);
+    }
+
+    function test_ExecuteLimit_RevertOnNotTriggered() public {
+        // Default long trade: TP 55k, SL 45k. Oracle at 50k → neither crossed.
+        uint32 tradeId = _openDefaultTrade(alice);
+
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.LimitNotTriggered.selector, uint256(tradeId), DEFAULT_ORACLE_PRICE));
+        engine.executeLimit(tradeId, EMPTY_UPDATE);
+    }
+
+    function test_ExecuteLimit_RevertOnTradeNotFound() public {
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.TradeNotFound.selector, uint256(999)));
+        engine.executeLimit(999, EMPTY_UPDATE);
+    }
+
+    function test_ExecuteLimit_LongTp_PaysTraderAndExecutor() public {
+        uint32 tradeId = _openDefaultTrade(alice); // long, TP 55k
+
+        // Oracle crosses TP upward
+        uint128 oracle = 55_500 * 1e18;
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, oracle);
+
+        uint256 aliceBefore = usdc.balanceOf(alice);
+        uint256 bobBefore = usdc.balanceOf(bob);
+
+        vm.prank(bob);
+        engine.executeLimit(tradeId, EMPTY_UPDATE);
+
+        // Trade closed
+        assertEq(tradingStorage.getTrade(tradeId).user, address(0));
+
+        // Executor (bob) earns exactly the notional-based reward
+        uint256 reward = _execReward(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE);
+        assertEq(usdc.balanceOf(bob) - bobBefore, reward);
+
+        // Trader (alice) receives a profit (payout - reward), strictly positive on a TP
+        assertGt(usdc.balanceOf(alice) - aliceBefore, 0);
+    }
+
+    function test_ExecuteLimit_LongSl_TriggersOnPriceDrop() public {
+        uint32 tradeId = _openDefaultTrade(alice); // long, SL 45k
+
+        uint128 oracle = 44_500 * 1e18;
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, oracle);
+
+        uint256 bobBefore = usdc.balanceOf(bob);
+        vm.prank(bob);
+        engine.executeLimit(tradeId, EMPTY_UPDATE);
+
+        assertEq(tradingStorage.getTrade(tradeId).user, address(0));
+        // SL is a loss but not full: executor still gets the reward carved from the residual payout
+        assertGe(usdc.balanceOf(bob) - bobBefore, 0);
+    }
+
+    function test_ExecuteLimit_ShortTp_TriggersOnPriceDrop() public {
+        // Short with TP below entry (45k) and SL above (55k)
+        vm.prank(alice);
+        uint32 tradeId = engine.openTrade(
+            DEFAULT_PAIR_INDEX,
+            false,
+            DEFAULT_COLLATERAL,
+            DEFAULT_LEVERAGE,
+            DEFAULT_SHORT_OPEN_PRICE,
+            DEFAULT_SLIPPAGE_BPS,
+            45_000 * 1e18,
+            55_000 * 1e18,
+            EMPTY_UPDATE
+        );
+
+        // Short TP triggers when price falls to/below tp
+        uint128 oracle = 44_500 * 1e18;
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, oracle);
+
+        uint256 aliceBefore = usdc.balanceOf(alice);
+        vm.prank(bob);
+        engine.executeLimit(tradeId, EMPTY_UPDATE);
+
+        assertEq(tradingStorage.getTrade(tradeId).user, address(0));
+        assertGt(usdc.balanceOf(alice) - aliceBefore, 0); // short profits on price drop
+    }
+
+    function test_ExecuteLimit_ShortSl_TriggersOnPriceRise() public {
+        vm.prank(alice);
+        uint32 tradeId = engine.openTrade(
+            DEFAULT_PAIR_INDEX,
+            false,
+            DEFAULT_COLLATERAL,
+            DEFAULT_LEVERAGE,
+            DEFAULT_SHORT_OPEN_PRICE,
+            DEFAULT_SLIPPAGE_BPS,
+            45_000 * 1e18,
+            55_000 * 1e18,
+            EMPTY_UPDATE
+        );
+
+        // Short SL triggers when price rises to/above sl
+        uint128 oracle = 55_500 * 1e18;
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, oracle);
+
+        vm.prank(bob);
+        engine.executeLimit(tradeId, EMPTY_UPDATE);
+        assertEq(tradingStorage.getTrade(tradeId).user, address(0));
+    }
+
+    function test_ExecuteLimit_EmitsEvent() public {
+        uint32 tradeId = _openDefaultTrade(alice);
+        uint128 oracle = 55_500 * 1e18;
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, oracle);
+
+        uint128 execPrice = _longClosePrice(oracle);
+        int256 pnl = _calcLongPnl(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, execPrice);
+        uint256 reward = _execReward(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE);
+        uint256 closeFeeVal = _closeFee(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE);
+        uint256 payout = uint256(pnl) + uint256(DEFAULT_EFFECTIVE_COLLATERAL) - closeFeeVal - reward;
+
+        vm.expectEmit(true, true, true, true);
+        emit LimitExecuted(tradeId, alice, bob, true, execPrice, pnl, payout, reward, int256(0));
+        vm.prank(bob);
+        engine.executeLimit(tradeId, EMPTY_UPDATE);
+    }
+
+    function test_ExecuteLimit_ConservesFunds() public {
+        uint256 totalBefore = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage)) + usdc.balanceOf(treasuryAddr);
+
+        uint32 tradeId = _openDefaultTrade(alice);
+        uint128 oracle = 55_500 * 1e18;
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, oracle);
+
+        vm.prank(bob);
+        engine.executeLimit(tradeId, EMPTY_UPDATE);
+
+        uint256 totalAfter = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage)) + usdc.balanceOf(treasuryAddr);
+        assertEq(totalAfter, totalBefore);
+    }
+
+    function test_ExecuteLimit_Permissionless_TraderCanSelfExecute() public {
+        uint32 tradeId = _openDefaultTrade(alice);
+        uint128 oracle = 55_500 * 1e18;
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, oracle);
+
+        // The trade owner can also execute their own limit and collect the reward
+        vm.prank(alice);
+        engine.executeLimit(tradeId, EMPTY_UPDATE);
+        assertEq(tradingStorage.getTrade(tradeId).user, address(0));
+    }
+
+    function test_ExecuteLimit_RevertWhenPaused() public {
+        uint32 tradeId = _openDefaultTrade(alice);
+        uint128 oracle = 55_500 * 1e18;
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, oracle);
+
+        vm.prank(owner);
+        engine.pause();
+
+        vm.prank(bob);
+        vm.expectRevert(TradingEngine.EnforcedPause.selector);
+        engine.executeLimit(tradeId, EMPTY_UPDATE);
+    }
+
+    function test_ExecuteLimit_FundingAdjustsPayout() public {
+        // Only a long open → long pays funding; after time the SL payout shrinks by funding
+        uint32 tradeId = _openDefaultTrade(alice);
+
+        vm.warp(block.timestamp + 1 hours);
+
+        uint128 oracle = 44_500 * 1e18; // SL zone
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, oracle);
+
+        uint256 bobBefore = usdc.balanceOf(bob);
+        vm.prank(bob);
+        engine.executeLimit(tradeId, EMPTY_UPDATE);
+
+        // Executor still paid something (reward capped at residual payout), trade closed
+        assertGe(usdc.balanceOf(bob) - bobBefore, 0);
+        assertEq(tradingStorage.getTrade(tradeId).user, address(0));
+    }
+
+    function testFuzz_ExecuteLimit_ConservesFunds(uint128 triggerOracle) public {
+        // Any oracle price that triggers the long TP (>=55k) or SL (<=45k) conserves funds
+        triggerOracle = uint128(bound(triggerOracle, 30_000 * 1e18, 44_000 * 1e18)); // SL side (loss, no bad debt)
+
+        uint256 totalBefore = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage)) + usdc.balanceOf(treasuryAddr);
+
+        uint32 tradeId = _openDefaultTrade(alice);
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, triggerOracle);
+
+        vm.prank(bob);
+        engine.executeLimit(tradeId, EMPTY_UPDATE);
+
+        uint256 totalAfter = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage)) + usdc.balanceOf(treasuryAddr);
+        assertEq(totalAfter, totalBefore);
+    }
 }

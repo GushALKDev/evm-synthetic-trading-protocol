@@ -32,6 +32,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     uint256 public constant FEE_VAULT_SPLIT_BPS = 8000; // 80% to Vault, 20% to treasury
     uint256 public constant LIQUIDATION_THRESHOLD_BPS = 9000; // liquidatable when loss >= 90% of collateral
     uint256 public constant LIQUIDATOR_REWARD_BPS = 1000; // 10% of remaining collateral to liquidator
+    uint256 public constant EXEC_REWARD_BPS = 10; // 0.1% of position size to the TP/SL executor
 
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
@@ -82,6 +83,17 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         uint256 liquidatorReward,
         uint256 vaultAmount
     );
+    event LimitExecuted(
+        uint256 indexed tradeId,
+        address indexed user,
+        address indexed executor,
+        bool isTp,
+        uint128 closePrice,
+        int256 pnlUsdc,
+        uint256 payoutUsdc,
+        uint256 executorReward,
+        int256 fundingOwedUsdc
+    );
     event TreasuryUpdated(address indexed newTreasury);
     event Paused(address account);
     event Unpaused(address account);
@@ -105,6 +117,8 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     error FeeExceedsCollateral(uint256 fee, uint64 collateral);
     error ZeroFeeRecipient();
     error NotLiquidatable(uint256 tradeId, uint256 loss, uint256 threshold);
+    error LimitNotTriggered(uint256 tradeId, uint128 oraclePrice);
+    error NoLimitSet(uint256 tradeId);
 
     /*//////////////////////////////////////////////////////////////
                               MODIFIERS
@@ -370,6 +384,24 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     }
 
     /**
+     * @dev Determine whether the trade's TP or SL is triggered at the given oracle price.
+     *      Long TP: price >= tp | Long SL: price <= sl
+     *      Short TP: price <= tp | Short SL: price >= sl
+     *      TP is checked before SL; a trade with neither set can never trigger.
+     * @return triggered Whether any limit condition is met
+     * @return isTp True if the triggered limit is the take profit (false = stop loss)
+     */
+    function _isLimitTriggered(TradingStorage.Trade memory _trade, uint128 _oraclePrice) internal pure returns (bool triggered, bool isTp) {
+        if (_trade.tp != 0) {
+            if (_trade.isLong ? _oraclePrice >= _trade.tp : _oraclePrice <= _trade.tp) return (true, true);
+        }
+        if (_trade.sl != 0) {
+            if (_trade.isLong ? _oraclePrice <= _trade.sl : _oraclePrice >= _trade.sl) return (true, false);
+        }
+        return (false, false);
+    }
+
+    /**
      * @dev Validate pair is active and leverage is within bounds.
      */
     function _validatePair(uint16 _pairIndex, uint16 _leverage) internal view {
@@ -598,6 +630,97 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         // Vault first, liquidator reward after: a blacklisted liquidator only blocks their own reward payout.
         TRADING_STORAGE.sendCollateral(address(VAULT), vaultAmount);
         if (_liquidatorReward > 0) TRADING_STORAGE.sendCollateral(msg.sender, _liquidatorReward);
+    }
+
+    /**
+     * @notice Execute a triggered take-profit or stop-loss on behalf of the trade owner
+     * @dev Permissionless: anyone can call once the oracle price crosses the trade's TP or SL.
+     *      Settlement mirrors closeTrade (funding-adjusted PnL, close direction spread, close fee,
+     *      same 3-branch payout), but the payout goes to the trade owner (not the caller). The caller
+     *      earns a fixed reward (EXEC_REWARD_BPS of notional) carved out of the trader's payout, capped
+     *      so the trader is never pushed negative — on a full-loss stop the executor simply earns 0.
+     *      Reverts NoLimitSet if neither TP nor SL is set, LimitNotTriggered if not yet crossed.
+     *      Collateral flow: same as closeTrade, plus payout split (trader gets payout - reward, executor
+     *      gets reward). Gated by whenNotPaused like closeTrade.
+     * @param _tradeId The trade ID to execute
+     * @param priceUpdate Pyth price update data
+     */
+    function executeLimit(uint256 _tradeId, bytes[] calldata priceUpdate) external payable nonReentrant whenNotPaused {
+        TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(_tradeId);
+        if (trade.user == address(0)) revert TradeNotFound(_tradeId);
+        if (trade.tp == 0 && trade.sl == 0) revert NoLimitSet(_tradeId);
+
+        uint128 oraclePrice = _getOraclePrice(trade.pairIndex, priceUpdate);
+        (bool triggered, bool isTp) = _isLimitTriggered(trade, oraclePrice);
+        if (!triggered) revert LimitNotTriggered(_tradeId, oraclePrice);
+
+        uint128 executionPrice = _applySpread(oraclePrice, trade.isLong, false, trade.pairIndex);
+
+        _updateFundingIndex(trade.pairIndex);
+
+        _executeLimit(trade, _tradeId, executionPrice, isTp);
+
+        _refundEth();
+    }
+
+    /**
+     * @dev Settle a triggered limit order: compute payout, carve the executor reward, delete trade,
+     *      decrease OI, emit, and distribute collateral. Extracted to avoid stack-too-deep.
+     *      Payout branches follow closeTrade; the executor reward reduces the trader's net payout only.
+     */
+    function _executeLimit(TradingStorage.Trade memory _trade, uint256 _tradeId, uint128 _executionPrice, bool _isTp) internal {
+        uint256 positionSize = _positionSizeWad(_trade.collateral, _trade.leverage);
+        int256 pnlUsdc = _calculatePnl(_trade.collateral, _trade.leverage, _trade.openPrice, _executionPrice, _trade.isLong);
+        int256 fundingOwedUsdc = _calculateFunding(_tradeId, positionSize, _trade.isLong, _trade.pairIndex);
+        uint256 payoutUsdc = _calculatePayout(_trade.collateral, pnlUsdc - fundingOwedUsdc);
+
+        // Close fee deducted from payout (same as closeTrade)
+        uint256 closeFee = _calculateFee(_trade.collateral, _trade.leverage, CLOSE_FEE_BPS);
+        if (closeFee >= payoutUsdc) {
+            closeFee = payoutUsdc;
+            payoutUsdc = 0;
+        } else {
+            payoutUsdc -= closeFee;
+        }
+
+        // Executor reward carved out of the trader's payout, capped so payout never goes negative
+        uint256 execReward = (uint256(_trade.collateral) * _trade.leverage * EXEC_REWARD_BPS) / BPS_DENOMINATOR;
+        if (execReward > payoutUsdc) execReward = payoutUsdc;
+        uint256 traderPayout = payoutUsdc - execReward;
+
+        // --- EFFECTS ---
+        TRADING_STORAGE.deleteTrade(_tradeId);
+        TRADING_STORAGE.decreaseOpenInterest(_trade.pairIndex, positionSize, _trade.isLong);
+        emit LimitExecuted(_tradeId, _trade.user, msg.sender, _isTp, _executionPrice, pnlUsdc, traderPayout, execReward, fundingOwedUsdc);
+
+        // --- INTERACTIONS ---
+        _distributeFees(closeFee);
+        _settleLimitPayout(_trade, closeFee, traderPayout, execReward);
+    }
+
+    /**
+     * @dev Distribute a limit-order settlement: trader payout (payout - reward) and executor reward.
+     *      Mirrors closeTrade's collateral/Vault split; the executor reward is always funded from
+     *      collateral held in TradingStorage (it is carved out of the payout, so it is <= collateral).
+     */
+    function _settleLimitPayout(TradingStorage.Trade memory _trade, uint256 _closeFee, uint256 _traderPayout, uint256 _execReward) internal {
+        uint256 collateralAfterFee = uint256(_trade.collateral) - _closeFee;
+        uint256 fromStorage = _traderPayout + _execReward; // total owed out of the position
+
+        if (fromStorage <= collateralAfterFee) {
+            // Loss or breakeven: everything paid from collateral, rest to Vault
+            if (_traderPayout > 0) TRADING_STORAGE.sendCollateral(_trade.user, _traderPayout);
+            if (_execReward > 0) TRADING_STORAGE.sendCollateral(msg.sender, _execReward);
+            uint256 toVault = collateralAfterFee - fromStorage;
+            if (toVault > 0) TRADING_STORAGE.sendCollateral(address(VAULT), toVault);
+        } else {
+            // Profit: pay executor reward + remaining collateral from Storage, top up trader profit from Vault
+            if (_execReward > 0) TRADING_STORAGE.sendCollateral(msg.sender, _execReward);
+            uint256 traderFromStorage = collateralAfterFee - _execReward;
+            if (traderFromStorage > 0) TRADING_STORAGE.sendCollateral(_trade.user, traderFromStorage);
+            uint256 profitFromVault = fromStorage - collateralAfterFee;
+            VAULT.sendPayout(_trade.user, profitFromVault);
+        }
     }
 
     /**
