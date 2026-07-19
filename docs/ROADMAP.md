@@ -28,13 +28,13 @@ Each phase should be completed before moving to the next. Within each phase, the
 | 5         | Funding Rates             | 4      | 4         | 100%     |
 | 6         | Dynamic Spread            | 6      | 6         | 100%     |
 | 7         | Liquidations              | 9      | 9         | 100%     |
-| 8         | Limit Orders (TP/SL)      | 5      | 0         | 0%       |
+| 8         | Limit Orders (TP/SL)      | 5      | 5         | 100%     |
 | 9         | Solvency (Assistant Fund) | 5      | 0         | 0%       |
 | 10        | Solvency (Bonding)        | 6      | 0         | 0%       |
 | 11        | Governance Token          | 4      | 0         | 0%       |
 | 12        | Testing & Audit           | 8      | 0         | 0%       |
-| 13        | V2 Improvements           | 7      | 0         | 0%       |
-| **TOTAL** |                           | **95** | **54**    | **57%**  |
+| 13        | V2 Improvements           | 8      | 0         | 0%       |
+| **TOTAL** |                           | **96** | **59**    | **61%**  |
 
 ---
 
@@ -279,16 +279,23 @@ Each phase should be completed before moving to the next. Within each phase, the
 >
 > **Dependencies:** Phase 7
 
-- [ ] **8.1** Function `executeLimit()` in TradingEngine
-- [ ] **8.2** Chainlink Automation integration (Keepers)
-- [ ] **8.3** TP/SL condition verification
-- [ ] **8.4** Access Control for Keepers (`onlyKeeper`)
-- [ ] **8.5** Automatic execution tests
+- [x] **8.1** Function `executeLimit()` in TradingEngine
+- [x] **8.2** Off-chain keeper/bot integration (permissionless — any Pyth-submitting caller; no Chainlink Automation dependency)
+- [x] **8.3** TP/SL condition verification (`_isLimitTriggered` on oracle price: long TP price>=tp / SL price<=sl; short inverse)
+- [x] **8.4** Permissionless execution with executor reward (replaces `onlyKeeper` — consistent with permissionless `liquidate`)
+- [x] **8.5** Automatic execution tests (trigger long/short TP/SL, reward, funding, conservation, revert paths)
+
+**Design decisions:**
+
+- **Permissionless, not `onlyKeeper`.** Anyone can call `executeLimit` once the oracle price crosses the trade's TP/SL — same philosophy as `liquidate`. No whitelisted keeper, no Chainlink Automation lock-in.
+- **Executor reward = `EXEC_REWARD_BPS` (0.1%) of notional**, carved out of the trader's payout (not the Vault), capped so the trader is never pushed negative. On a full-loss stop the executor simply earns 0.
+- **Trigger on oracle price, settle at execution price.** Condition checked at the raw oracle price; settlement uses oracle + close-direction spread with the same funding-adjusted PnL, close fee, and 3-branch payout as `closeTrade`. Payout goes to the trade owner, reward to the caller.
+- **Gated by `whenNotPaused`** like `closeTrade` (unlike `liquidate`, which stays live while paused).
 
 **Deliverables:**
 
-- TP/SL executed automatically
-- Keepers rewarded for execution
+- TP/SL executed permissionlessly by any caller
+- Executors rewarded (0.1% of notional) for execution
 
 **Reference:** [06-improvements.md](./06-improvements.md) - Advanced Orders Section
 
@@ -398,6 +405,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 - [ ] **13.5** Copy Trading Vaults
 - [ ] **13.6** Account Abstraction (ERC-4337)
 - [ ] **13.7** NFT Boost for LPs
+- [ ] **13.8** Open limit orders (open a position at a target price — pending order with collateral custody, cancellation, and expiry). Distinct from Phase 8 which only automates TP/SL on already-open trades.
 
 **Reference:** [06-improvements.md](./06-improvements.md)
 
@@ -407,6 +415,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 
 | Date       | Changes                 |
 | :--------- | :---------------------- |
+| 2026-07-17 | Phase 8: Limit orders — permissionless `executeLimit` for automatic TP/SL, trigger on oracle price, settle like closeTrade, 0.1% executor reward carved from trader payout (replaces onlyKeeper/Chainlink Automation) |
 | 2026-07-17 | Phase 7 (7.9): Post-review hardening — caller-funded payable oracle fee (refunds surplus), `liquidate` unpausable, Pyth outage policy documented, `MIN_COLLATERAL` → 10 USDC, PnL rounding favors the pool (short ceil), Vault paid before liquidator reward |
 | 2026-07-17 | Phase 7 (7.1–7.8): Liquidations — permissionless `liquidate` at 90% threshold on funding-adjusted PnL, 10% liquidator reward, pre-liquidation open guard, confidence-based conservative pricing (`IOracle.getPrice` → `(price18, conf18)`) |
 | 2026-03-18 | Phase 6: Dynamic spread — SpreadManager (OI + volatility formula), TradingEngine delegates spread via SPREAD_MANAGER immutable |

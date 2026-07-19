@@ -292,7 +292,7 @@ The `IOracle` interface abstraction allows adding new oracle backends (e.g., Cha
 | `updateTP(tradeId, newTP)`                | Owner  | Updates Take Profit         |
 | `updateSL(tradeId, newSL)`                | Owner  | Updates Stop Loss           |
 | `liquidate(tradeId)`                      | Public | Liquidates at-risk position |
-| `executeLimit(tradeId)`                   | Keeper | Executes reached TP/SL      |
+| `executeLimit(tradeId)`                   | Public | Executes reached TP/SL (permissionless, executor earns 0.1% of notional) |
 
 **Validations in `openTrade`:**
 
@@ -328,6 +328,13 @@ TradingStorage retains its own structural validations (Long: `tp > openPrice`, `
 - **Reward incentive floor.** The liquidator reward is 10% of the remaining collateral, which shrinks as a position sinks toward 100% loss. `MIN_COLLATERAL = 10 USDC` guarantees that at the 90% threshold the reward stays above realistic L2 gas, so no position is too small to be worth liquidating (avoiding dust that would otherwise decay straight into bad debt).
 - **Payout order.** The Vault is paid before the liquidator reward, so a liquidator blacklisted by the collateral token can only block their own reward, not the Vault's settlement.
 - **Rounding favors the pool.** PnL truncates `exitValue` toward the pool in both directions (longs floor, shorts ceil), upholding the invariant that the Vault never loses value to sub-USDC rounding.
+
+**Automatic TP/SL (`executeLimit`) — design decisions:**
+
+- **Permissionless, not `onlyKeeper`.** Anyone can call `executeLimit(tradeId, priceUpdate)` once the oracle price crosses the trade's TP or SL — the same philosophy as `liquidate`. No whitelisted keeper and no Chainlink Automation dependency; any bot that submits a fresh Pyth price can execute and collect the reward.
+- **Trigger on oracle price, settle at execution price.** The trigger condition is evaluated at the raw oracle price (long TP: `price >= tp`, long SL: `price <= sl`; short inverse). Settlement then uses oracle + close-direction spread with the same funding-adjusted PnL, close fee, and 3-branch payout as `closeTrade`. The trader receives the PnL at the real execution price, not exactly at the stored TP/SL.
+- **Payout to the trade owner, reward to the caller.** The payout goes to the trade owner (not `msg.sender`). The executor earns `EXEC_REWARD_BPS` (0.1%) of notional, **carved out of the trader's payout** (never from the Vault), capped so the trader is never pushed negative — on a full-loss stop the executor simply earns 0. The trader effectively pays a small fee for the automation that benefits them.
+- **Gated by `whenNotPaused`** like `closeTrade` (unlike `liquidate`, which stays live while paused).
 
 ### 4.3 `TradingStorage.sol` (State Layer)
 
