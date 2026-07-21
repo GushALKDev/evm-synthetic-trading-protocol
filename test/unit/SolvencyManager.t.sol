@@ -12,6 +12,27 @@ contract MockVault {
         totalAssets = _totalAssets;
         collateralizationRatio = _cr;
     }
+
+    /**
+     * @dev Mirrors the real Vault: the shortfall to 100% derived from the nominal deposit basis.
+     *      Reconstructed here from (totalAssets, cr) so the mock stays driven by `setState`.
+     *      cr == 0 with assets == 0 is total insolvency, where the deficit is the full basis; the
+     *      mock cannot know it, so callers set it explicitly via `setDeficit`.
+     */
+    uint256 private _deficitOverride;
+    bool private _hasOverride;
+
+    function setDeficit(uint256 _deficit) external {
+        _deficitOverride = _deficit;
+        _hasOverride = true;
+    }
+
+    function collateralizationDeficit() external view returns (uint256) {
+        if (_hasOverride) return _deficitOverride;
+        if (collateralizationRatio == 0 || collateralizationRatio >= 1e18) return 0;
+        // nominal = totalAssets * WAD / cr; deficit = nominal - totalAssets
+        return (totalAssets * 1e18) / collateralizationRatio - totalAssets;
+    }
 }
 
 contract MockAssistantFund {

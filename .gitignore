@@ -25,3 +25,5 @@ docs/book/
 code-style-guide.md
 es/
 *.local.*
+# Aderyn static analysis output
+report.md

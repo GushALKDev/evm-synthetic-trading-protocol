@@ -107,6 +107,7 @@ contract BondDepository is Ownable {
     error DiscountTooHigh(uint256 discountBps);
     error VestingPeriodTooLong(uint256 vestingPeriod);
     error ReferencePriceUnset();
+    error EffectivePriceZero(uint256 referencePrice, uint256 discountBps);
     error NoActiveRound();
     error RoundAlreadyActive();
     error InvalidBondId(uint256 bondId);
@@ -128,6 +129,15 @@ contract BondDepository is Ownable {
     function _requireSolvencyManager() internal view {
         if (solvencyManager == address(0)) revert SolvencyManagerNotSet();
         if (msg.sender != solvencyManager) revert CallerNotSolvencyManager();
+    }
+
+    /**
+     * @dev Discounted price actually charged per SYNTH. Integer division means a very small
+     *      referencePrice can floor this to 0, which would make quoteBond divide by zero and brick
+     *      the whole bonding round, so callers that set price or discount must keep it non-zero.
+     */
+    function _effectivePrice() internal view returns (uint256) {
+        return (referencePrice * (BPS_DENOMINATOR - discountBps)) / BPS_DENOMINATOR;
     }
 
     /**
@@ -199,6 +209,9 @@ contract BondDepository is Ownable {
         uint64 start = uint64(block.timestamp);
         uint64 end = uint64(block.timestamp + vestingPeriod);
         bondId = _bonds[msg.sender].length;
+        // The uint128 cast cannot truncate in practice: with the smallest effective price the setters
+        // allow (1), overflowing would need a round of ~3.4e14 USDC, far above the total USDC supply.
+        // Kept as uint128 to pack the position into 2 slots.
         _bonds[msg.sender].push(BondPosition({totalSynth: uint128(synthOut), claimedSynth: 0, start: start, end: end}));
 
         // Interactions: USDC to Vault, $SYNTH minted into this contract's custody for vesting
@@ -240,7 +253,7 @@ contract BondDepository is Ownable {
      * @return synthOut $SYNTH output (18 decimals)
      */
     function quoteBond(uint256 _usdcAmount) public view returns (uint256 synthOut) {
-        uint256 effectivePrice = (referencePrice * (BPS_DENOMINATOR - discountBps)) / BPS_DENOMINATOR;
+        uint256 effectivePrice = _effectivePrice();
         return (_usdcAmount * WAD) / effectivePrice;
     }
 
@@ -296,6 +309,8 @@ contract BondDepository is Ownable {
     function setReferencePrice(uint256 _referencePrice) external onlyOwner {
         if (_referencePrice == 0) revert ZeroAmount();
         referencePrice = _referencePrice;
+        // Reject prices so small the discount floors the charged price to zero (would brick bonding)
+        if (_effectivePrice() == 0) revert EffectivePriceZero(_referencePrice, discountBps);
         emit ReferencePriceUpdated(_referencePrice);
     }
 
@@ -306,6 +321,8 @@ contract BondDepository is Ownable {
     function setDiscountBps(uint256 _discountBps) external onlyOwner {
         if (_discountBps > MAX_DISCOUNT_BPS) revert DiscountTooHigh(_discountBps);
         discountBps = _discountBps;
+        // Same guard as setReferencePrice: the pair (price, discount) must keep a non-zero charge
+        if (_effectivePrice() == 0) revert EffectivePriceZero(referencePrice, _discountBps);
         emit DiscountUpdated(_discountBps);
     }
 

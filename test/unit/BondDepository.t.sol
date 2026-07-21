@@ -233,9 +233,9 @@ contract BondDepositoryTest is Test {
         bond.activateBonding(10_000 * 10 ** 6);
 
         vm.prank(alice);
-        (uint256 id0, ) = bond.bond(1000 * 10 ** 6);
+        (uint256 id0,) = bond.bond(1000 * 10 ** 6);
         vm.prank(alice);
-        (uint256 id1, ) = bond.bond(2000 * 10 ** 6);
+        (uint256 id1,) = bond.bond(2000 * 10 ** 6);
 
         assertEq(id0, 0);
         assertEq(id1, 1);
@@ -422,6 +422,24 @@ contract BondDepositoryTest is Test {
         vm.prank(owner);
         vm.expectRevert(BondDepository.ZeroAmount.selector);
         bond.setReferencePrice(0);
+    }
+
+    /// @dev Regression: a referencePrice small enough for the discount to floor the charged price to
+    ///      zero used to pass the != 0 check and then panic (0x12) inside quoteBond, bricking bonding.
+    function test_SetReferencePrice_EffectivePriceZeroReverts() public {
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(BondDepository.EffectivePriceZero.selector, 1, DISCOUNT_BPS));
+        bond.setReferencePrice(1);
+    }
+
+    function test_SetReferencePrice_QuoteStillWorksAfterRejectedPrice() public {
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(BondDepository.EffectivePriceZero.selector, 1, DISCOUNT_BPS));
+        bond.setReferencePrice(1);
+
+        // The rejected write is rolled back, so pricing keeps working off the previous value
+        assertEq(bond.referencePrice(), DEFAULT_REF_PRICE);
+        assertGt(bond.quoteBond(100 * 10 ** 6), 0);
     }
 
     function test_SetDiscountBps_Updates() public {

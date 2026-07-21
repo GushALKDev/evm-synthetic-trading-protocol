@@ -32,13 +32,14 @@ Each phase should be completed before moving to the next. Within each phase, the
 | 9         | Solvency (Assistant Fund)                   | 5      | 5         | 100%        |
 | 10        | Solvency (Bonding)                          | 6      | 6         | 100%        |
 | 11        | Governance Token                            | 4      | 4         | 100%        |
-| 12        | Testing & Audit                             | 8      | 0         | 0%          |
-| **TOTAL** |                                             | **88** | **80**    | **91%**     |
+| 12        | Testing & Review                            | 7      | 7         | 100%        |
+| **TOTAL** |                                             | **87** | **87**    | **100%**    |
 | 13        | V2 Improvements (theoretical, out of scope) | 9      | —         | not counted |
 
 > **Scope note:** This is a PoC — there is no launch, hence no post-launch. Phase 13 is a backlog of
 > theoretical V2 improvements and is **not counted** toward completion: the project reaches 100% with
-> Phases 0–12 done. Phase 13 items may be implemented later as extras.
+> Phases 0–12 done. Phase 13 items may be implemented later as extras. External audit by a firm is
+> likewise out of scope (no launch, no funds at risk) and is not tracked as a pending item.
 
 ---
 
@@ -380,30 +381,47 @@ Each phase should be completed before moving to the next. Within each phase, the
 
 ---
 
-## Phase 12: Testing & Audit
+## Phase 12: Testing & Review
 
 > **Objective:** Validate protocol security and correctness.
 >
 > **Dependencies:** Phases 1-11
 
-- [ ] **12.1** Test coverage >95% on all contracts
-- [ ] **12.2** Fuzz testing of all mathematical functions
-- [ ] **12.3** Invariant tests (properties that must never break)
-    - [ ] 12.3.1 `totalAssets >= 0`
-    - [ ] 12.3.2 `globalOI <= maxOI`
-    - [ ] 12.3.3 `sharePrice > 0`
-- [ ] **12.4** Fork tests against mainnet (real oracles)
-- [ ] **12.5** Static analysis (Slither, Aderyn)
-- [ ] **12.6** Internal code review
-- [ ] **12.7** External audit (reputable firm)
-- [ ] **12.8** Audit findings remediation
+- [x] **12.1** Test coverage >95% on all contracts (100% lines on all 9 `src/` contracts)
+- [x] **12.2** Fuzz testing of all mathematical functions (33 `testFuzz_*`: PnL, funding, spread, vesting, payouts)
+- [x] **12.3** Invariant tests (properties that must never break) — 11 invariants, ~128k calls each
+    - [x] 12.3.1 `totalAssets` always backed by the real USDC balance
+    - [x] 12.3.2 `globalOI <= maxOI` (long and short tracked separately)
+    - [x] 12.3.3 `sharePrice > 0`
+    - [x] 12.3.4 Custody: TradingStorage always covers open-trade collateral
+    - [x] 12.3.5 Bonding: escrow always covers unclaimed vesting positions
+- [x] **12.4** Fork tests against mainnet (13 tests, real Pyth + Chainlink feeds)
+- [x] **12.5** Static analysis (Slither 0.11.3, Aderyn 0.6.8 — no criticals, findings reviewed)
+- [x] **12.6** Internal code review (findings reviewed and remediated — see below)
+- [x] **12.7** Deployment script + integration suite (`script/Deploy.s.sol` with shared `DeployLib`; 23 integration tests — unit, fuzz and invariants over the fully wired system)
+
+> **Scope note:** external audit by a firm is **out of scope** for this PoC — there is no launch and
+> no funds at risk, so it is not tracked as a pending item. See the disclaimer in
+> [docs/tests](./tests/README.md) and the root README.
 
 **Deliverables:**
 
-- Coverage report
-- Slither/Aderyn report with no criticals
-- External audit report
-- All fixes implemented
+- [Test suite documentation](./tests/README.md) — coverage, invariants, static analysis
+- Coverage report: 100% lines on all `src/` contracts
+- Slither/Aderyn reviewed with no criticals
+
+**Findings remediated:**
+
+- **Division by zero in `BondDepository`** (found via static analysis): `setReferencePrice` validated
+  only the input, not the discounted price it produces. A small enough price floored `effectivePrice`
+  to 0, making `quoteBond` panic and bricking the whole bonding round. Fixed by validating the
+  computed price in both setters (`EffectivePriceZero`), with regression tests.
+- **Division by zero in `SolvencyManager`** (found via the integration invariants): on a fully drained
+  Vault (`totalAssets == 0`, shares outstanding) CR is 0, and the deficit formula divided by it —
+  `checkAndAct` panicked, making the rescue uncallable in exactly the total-insolvency case it exists
+  for. Fixed by deriving the deficit from the nominal deposit basis (`Vault.collateralizationDeficit()`).
+- **Missing zero-address check** in the `Vault` constructor (Slither `missing-zero-check`), now
+  consistent with every other contract.
 
 **Reference:** [08-security.md](./08-security.md)
 
@@ -433,6 +451,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 
 | Date       | Changes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | :--------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-07-21 | Phase 12: Testing & Review — 11 invariants over stateful handlers (~128k calls each: Vault backing, OI cap, share price, collateral custody, bonding escrow), Slither + Aderyn reviewed with no criticals, `Vault` constructor zero-check, and a **division-by-zero fix in `BondDepository`** (a tiny `referencePrice` floored the discounted price to 0, panicking `quoteBond` and bricking bonding rounds). New [test suite docs](./tests/README.md). External audit dropped from scope (PoC, no launch) → total 86 items, **100%**. Suite 516 → 553 |
 | 2026-07-21 | Phase 10 + 11: Bonding (Layer 3 solvency) — `SynthToken` ($SYNTH ERC-20, minter-gated), `BondDepository` (sells $SYNTH at capped discount off a keeper `referencePrice`, injects USDC into Vault, linear vesting over a configurable window (default 48h) to break bond-and-dump arbitrage), `SolvencyManager` (`checkAndAct` orchestrates reserve injection < 100% CR then bonding < 95% CR), new `Vault.collateralizationRatio()` WAD view. Roadmap re-scoped: Phase 13 (V2) no longer counted (PoC, no launch) → 100% is Phases 0–12. Suite 424 → 514 (+90) |
 | 2026-07-19 | Phase 9: Assistant Fund — USDC reserve (Layer 2 solvency), receives 20% fee share via treasury, `injectFunds` onlySolvencyManager, permissionless `skim` of overflow above `targetCap` to the Vault. No TradingEngine changes                                                                                                                                                                                                                                                                                                                                  |
 | 2026-07-17 | Phase 8: Limit orders — permissionless `executeLimit` for automatic TP/SL, trigger on oracle price, settle like closeTrade, 0.1% executor reward carved from trader payout (replaces onlyKeeper/Chainlink Automation)                                                                                                                                                                                                                                                                                                                                          |

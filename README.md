@@ -150,9 +150,16 @@ forge coverage
 # Start local node
 anvil
 
-# Deploy to local node
+# Deploy to local node (deploys all 9 contracts and wires every permission)
+export PRIVATE_KEY=0x...      # deployer key
+export USDC_ADDRESS=0x...     # collateral token
+export PYTH_ADDRESS=0x...     # Pyth contract for the chain
 forge script script/Deploy.s.sol --rpc-url http://localhost:8545 --broadcast
 ```
+
+`OWNER_ADDRESS` and `KEEPER_ADDRESS` are optional (both default to the deployer). Pair feeds are left
+as explicit owner actions afterwards, since `oracle.setPairFeed` and `tradingStorage.addPair` need
+per-chain Pyth feed IDs and Chainlink aggregators.
 
 ---
 
@@ -166,22 +173,32 @@ forge test
 forge test --fuzz-runs 10000
 
 # Invariant tests
-forge test --match-contract InvariantTest
+forge test --match-path "test/invariant/*"
+
+# Integration tests (full wired system)
+forge test --match-path "test/integration/*"
 
 # Coverage report
 forge coverage --report lcov
 ```
 
+**553 tests** — 474 unit, 36 fuzz, 23 integration, 11 invariant, 13 fork. 100% line coverage on all
+`src/` contracts.
+
+See **[docs/tests/](./docs/tests/README.md)** for what each test covers, the invariants and their
+rationale, and the Slither/Aderyn findings review.
+
 ### Key Invariants
 
-The protocol maintains these invariants at all times:
+Asserted after every step of ~128,000 randomized calls per invariant:
 
-```solidity
-assert(vault.totalAssets() >= 0);           // Vault never has negative balance
-assert(globalOI <= calculateMaxOI());       // OI never exceeds cap
-assert(oracle.getPrice(pair) > 0);          // Oracle always returns valid price
-assert(vault.previewRedeem(1e18) > 0);      // Share price always positive
-```
+| Invariant | Guarantees |
+| :-------- | :--------- |
+| `invariant_TotalAssetsBackedByBalance` | Vault `totalAssets` always matches its real USDC balance |
+| `invariant_OpenInterestWithinMax` | Long and short OI never exceed the pair cap |
+| `invariant_SharePricePositive` | Share price never falls to zero while shares exist |
+| `invariant_StorageCoversOpenCollateral` | Trader collateral is always fully custodied and payable |
+| `invariant_EscrowCoversUnclaimedSynth` | Every unclaimed vesting position can always be honoured |
 
 ---
 

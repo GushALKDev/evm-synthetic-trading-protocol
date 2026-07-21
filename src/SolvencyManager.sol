@@ -86,7 +86,7 @@ contract SolvencyManager is Ownable {
             return;
         }
 
-        uint256 deficit = _deficitToTarget(cr);
+        uint256 deficit = _deficitToTarget();
 
         // Layer 2: inject whatever the reserve can cover, up to the deficit
         uint256 reserve = ASSISTANT_FUND.balance();
@@ -110,22 +110,24 @@ contract SolvencyManager is Ownable {
 
     /**
      * @notice USDC needed to restore the Vault from its current CR back to DEFICIT_CR (100%)
-     * @dev Since totalAssets = nominalLiabilities * cr / WAD, the shortfall to reach 100% is
-     *      totalAssets * (WAD - cr) / cr. Returns 0 when the Vault is already at or above 100%.
+     * @dev Returns 0 when the Vault is already at or above 100%.
      * @return deficit USDC amount (6 decimals) required to reach 100% collateralization
      */
     function deficitToTarget() external view returns (uint256 deficit) {
-        uint256 cr = VAULT.collateralizationRatio();
-        if (cr >= DEFICIT_CR) return 0;
-        return _deficitToTarget(cr);
+        return _deficitToTarget();
     }
 
     /*//////////////////////////////////////////////////////////////
                           INTERNAL HELPERS
     //////////////////////////////////////////////////////////////*/
 
-    function _deficitToTarget(uint256 _cr) internal view returns (uint256) {
-        // _cr is guaranteed < DEFICIT_CR (< WAD) by callers, so cr != 0 as long as totalSupply > 0
-        return (VAULT.totalAssets() * (DEFICIT_CR - _cr)) / _cr;
+    /**
+     * @dev Delegated to the Vault, which derives it from the nominal deposit basis. Computing it as
+     *      `totalAssets * (WAD - cr) / cr` is equivalent while the Vault holds assets, but panics on
+     *      a fully drained Vault (totalAssets == 0 with shares outstanding makes CR == 0) — exactly
+     *      the total-insolvency case the rescue must remain callable in.
+     */
+    function _deficitToTarget() internal view returns (uint256) {
+        return VAULT.collateralizationDeficit();
     }
 }

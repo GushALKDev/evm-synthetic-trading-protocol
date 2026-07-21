@@ -190,13 +190,13 @@ contract VaultTest is Test {
         // First request for 1000 shares
         vault.requestWithdrawal(1000 * 1e18);
 
-        (uint256 reqShares1, ) = vault.withdrawalRequests(alice);
+        (uint256 reqShares1,) = vault.withdrawalRequests(alice);
         assertEq(reqShares1, 1000 * 1e18);
 
         // Second request for 500 shares overwrites
         vault.requestWithdrawal(500 * 1e18);
 
-        (uint256 reqShares2, ) = vault.withdrawalRequests(alice);
+        (uint256 reqShares2,) = vault.withdrawalRequests(alice);
         assertEq(reqShares2, 500 * 1e18);
 
         vm.stopPrank();
@@ -276,7 +276,7 @@ contract VaultTest is Test {
         vm.prank(alice);
         vault.executeWithdrawal();
 
-        (uint256 reqShares, ) = vault.withdrawalRequests(alice);
+        (uint256 reqShares,) = vault.withdrawalRequests(alice);
         assertEq(reqShares, 0);
 
         // Cannot execute again
@@ -299,12 +299,12 @@ contract VaultTest is Test {
         uint256 shares = vault.balanceOf(alice);
         vault.requestWithdrawal(shares);
 
-        (uint256 reqShares, ) = vault.withdrawalRequests(alice);
+        (uint256 reqShares,) = vault.withdrawalRequests(alice);
         assertEq(reqShares, shares);
 
         vault.cancelWithdrawal();
 
-        (reqShares, ) = vault.withdrawalRequests(alice);
+        (reqShares,) = vault.withdrawalRequests(alice);
         assertEq(reqShares, 0);
 
         assertEq(vault.balanceOf(alice), shares);
@@ -870,6 +870,15 @@ contract VaultTest is Test {
         assertEq(vault.totalSupply(), 0);
         assertEq(vault.balanceOf(alice), 0);
         assertEq(vault.balanceOf(bob), 0);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                              CONSTRUCTOR
+    //////////////////////////////////////////////////////////////*/
+
+    function test_Constructor_RevertOnZeroAsset() public {
+        vm.expectRevert(Vault.ZeroAddress.selector);
+        new Vault(address(0), owner);
     }
 
     /*//////////////////////////////////////////////////////////////

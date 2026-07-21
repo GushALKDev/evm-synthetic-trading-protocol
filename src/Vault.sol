@@ -121,6 +121,7 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     constructor(address _asset, address _owner) {
+        if (_asset == address(0)) revert ZeroAddress();
         _initializeOwner(_owner);
         ASSET = _asset;
         DEPLOY_TIMESTAMP = block.timestamp;
@@ -295,6 +296,19 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
         uint256 supply = totalSupply();
         if (supply == 0) return type(uint256).max;
         return (totalAssets() * (10 ** _decimalsOffset()) * WAD) / supply;
+    }
+
+    /**
+     * @notice USDC needed to bring the Vault back to a 100% collateralization ratio
+     * @dev Derived from the nominal deposit basis of outstanding shares rather than from the ratio,
+     *      so it stays well-defined when the Vault is fully drained (totalAssets == 0 with shares
+     *      outstanding), which is precisely when a rescue must remain callable.
+     * @return deficit USDC amount (6 decimals) required to reach 100%, or 0 if already at/above
+     */
+    function collateralizationDeficit() external view returns (uint256 deficit) {
+        uint256 nominalLiabilities = totalSupply() / (10 ** _decimalsOffset());
+        uint256 assets = totalAssets();
+        return nominalLiabilities > assets ? nominalLiabilities - assets : 0;
     }
 
     /*//////////////////////////////////////////////////////////////

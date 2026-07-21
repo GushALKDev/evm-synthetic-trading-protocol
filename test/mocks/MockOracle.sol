@@ -28,6 +28,11 @@ contract MockOracle is IOracle {
         _confs[pairIndex] = conf;
     }
 
+    /// @notice Read the preset price without consuming the payable getPrice path (used by test handlers)
+    function peekPrice(uint256 pairIndex) external view returns (uint128) {
+        return _prices[pairIndex];
+    }
+
     function setFee(uint256 _fee) external {
         fee = _fee;
     }

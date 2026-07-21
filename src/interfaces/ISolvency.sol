@@ -9,6 +9,8 @@ interface ISolvencyVault {
     function totalAssets() external view returns (uint256);
 
     function collateralizationRatio() external view returns (uint256);
+
+    function collateralizationDeficit() external view returns (uint256);
 }
 
 /**

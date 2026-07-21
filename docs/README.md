@@ -3,15 +3,19 @@
 **Version:** 1.0  
 **Status:** Portfolio/Educational Project
 
+> ⚠️ **DISCLAIMER:** This is a **Proof of Concept with an educational purpose**. It has **not been
+> audited by an external firm** and **must not be used in production** or with real funds.
+
 ---
 
 ## 🎯 Quick Start
 
 | Document                    | Description                        | Status      |
 | :-------------------------- | :--------------------------------- | :---------- |
-| **[README](../README.md)**  | Project overview and setup         | ✅ Complete |
-| **[ROADMAP](./ROADMAP.md)** | Implementation phases and progress | ✅ Complete |
-| **[LICENSE](../LICENSE)**   | MIT License                        | ✅ Complete |
+| **[README](../README.md)**      | Project overview and setup         | ✅ Complete |
+| **[ROADMAP](./ROADMAP.md)**     | Implementation phases and progress | ✅ Complete |
+| **[Test Suite](./tests/)**      | Tests, invariants, static analysis | ✅ Complete |
+| **[LICENSE](../LICENSE)**       | MIT License                        | ✅ Complete |
 
 ---
 
@@ -89,6 +93,16 @@
     - Audit checklist
     - Bug bounty scope
 
+### Testing
+
+9. **[Test Suite](./tests/README.md)**
+    - What each test group covers and why
+    - Invariants and the properties they protect
+    - Fuzz tests over the financial math
+    - Fork tests against real Pyth/Chainlink feeds
+    - Coverage report
+    - Static analysis (Slither, Aderyn) and findings review
+
 ---
 
 ## 🗂️ Documentation Structure
@@ -105,7 +119,10 @@ docs/
 ├── 05-implementation.md         # Solidity code
 ├── 06-improvements.md           # Future features
 ├── 07-vault-ssl.md              # Vault deep dive
-└── 08-security.md               # Security analysis
+├── 08-security.md               # Security analysis
+│
+└── tests/
+    └── README.md                # Test suite, invariants, static analysis
 ```
 
 ---
@@ -126,8 +143,9 @@ docs/
 1. [Technical Architecture](./03-architecture.md) - System overview
 2. [Vault SSL Architecture](./07-vault-ssl.md) - Critical component
 3. [Security](./08-security.md) - Threat model and invariants
-4. [Trade-offs](./04-tradeoffs.md) - Known risks
-5. [Solidity Implementation](./05-implementation.md) - Code patterns
+4. [Test Suite](./tests/README.md) - Coverage, invariants, static analysis
+5. [Trade-offs](./04-tradeoffs.md) - Known risks
+6. [Solidity Implementation](./05-implementation.md) - Code patterns
 
 ### For Researchers
 
@@ -140,9 +158,10 @@ docs/
 
 ## 📊 Progress Tracking
 
-See [ROADMAP.md](./ROADMAP.md) for detailed implementation progress across 13 phases and 89 trackable items.
+See [ROADMAP.md](./ROADMAP.md) for detailed implementation progress.
 
-**Current Status:** Phase 0 (Documentation) - Complete ✅
+**Current Status:** Phases 0–12 complete ✅ — 530 tests, 100% line coverage on all `src/` contracts.
+Phase 13 (V2) is a backlog of theoretical improvements and is not counted toward completion.
 
 ---
 
