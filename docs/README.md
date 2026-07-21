@@ -160,7 +160,7 @@ docs/
 
 See [ROADMAP.md](./ROADMAP.md) for detailed implementation progress.
 
-**Current Status:** Phases 0–12 complete ✅ — 530 tests, 100% line coverage on all `src/` contracts.
+**Current Status:** Phases 0–12 complete ✅ — 553 tests, 100% line coverage on all `src/` contracts.
 Phase 13 (V2) is a backlog of theoretical improvements and is not counted toward completion.
 
 ---

@@ -471,7 +471,7 @@ Each phase should be completed before moving to the next. Within each phase, the
 
 ## 📚 References
 
-- [Master Index](./INDEX.md)
+- [Master Index](./README.md)
 - [Fundamental Concepts](./01-fundamentals.md)
 - [Mathematics](./02-mathematics.md)
 - [Technical Architecture](./03-architecture.md)
