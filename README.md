@@ -1,4 +1,4 @@
-# 🔮 Synthetic Trading Protocol (In progress...)
+# 🔮 Synthetic Trading Protocol
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Solidity](https://img.shields.io/badge/Solidity-0.8.24-363636.svg)](https://docs.soliditylang.org/)
