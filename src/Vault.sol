@@ -20,6 +20,12 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
     uint256 public constant EPOCH_LENGTH = 1 days;
     uint256 public constant WITHDRAWAL_DELAY_EPOCHS = 3;
 
+    /**
+     * @notice WAD scalar (1e18) used to express the collateralization ratio
+     * @dev CR == 1e18 means share price is exactly at its nominal deposit value
+     */
+    uint256 public constant WAD = 1e18;
+
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -273,6 +279,22 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
         uint256 unlockTimestamp = DEPLOY_TIMESTAMP + (req.requestEpoch + WITHDRAWAL_DELAY_EPOCHS) * EPOCH_LENGTH;
         if (block.timestamp >= unlockTimestamp) return 0;
         return unlockTimestamp - block.timestamp;
+    }
+
+    /**
+     * @notice Collateralization ratio of the Vault, scaled to WAD (1e18 == 100%)
+     * @dev CR compares current liquidity against the nominal deposit basis of all outstanding shares.
+     *      At the nominal 1:1 mint price, totalSupply shares are worth `totalSupply / 10**offset`
+     *      USDC, so CR = totalAssets * 10**offset * WAD / totalSupply. CR < 1e18 means the Vault has
+     *      paid out more than it took in (LP shares under water). Consumed by the SolvencyManager to
+     *      decide whether to inject reserve or activate bonding. When totalSupply == 0 the Vault has
+     *      no liabilities, so it reports max (trivially solvent) and never triggers a rescue.
+     * @return ratio The collateralization ratio in WAD
+     */
+    function collateralizationRatio() external view returns (uint256 ratio) {
+        uint256 supply = totalSupply();
+        if (supply == 0) return type(uint256).max;
+        return (totalAssets() * (10 ** _decimalsOffset()) * WAD) / supply;
     }
 
     /*//////////////////////////////////////////////////////////////

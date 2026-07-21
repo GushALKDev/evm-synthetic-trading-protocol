@@ -871,4 +871,55 @@ contract VaultTest is Test {
         assertEq(vault.balanceOf(alice), 0);
         assertEq(vault.balanceOf(bob), 0);
     }
+
+    /*//////////////////////////////////////////////////////////////
+                        COLLATERALIZATION RATIO
+    //////////////////////////////////////////////////////////////*/
+
+    function test_CR_EmptyVaultReportsMax() public view {
+        assertEq(vault.collateralizationRatio(), type(uint256).max);
+    }
+
+    function test_CR_AfterDepositIsOne() public {
+        _deposit(alice, 1000 * 10 ** 6);
+        assertEq(vault.collateralizationRatio(), 1e18);
+    }
+
+    function test_CR_IncreasesOnLossOrFee() public {
+        _deposit(alice, 1000 * 10 ** 6);
+        // Trader loss / fees land in the Vault as extra USDC (totalAssets up, supply unchanged)
+        usdc.mint(address(vault), 100 * 10 ** 6);
+        assertEq(vault.collateralizationRatio(), 1.1e18);
+    }
+
+    function test_CR_DecreasesOnPayout() public {
+        _deposit(alice, 1000 * 10 ** 6);
+        // Winning trader paid from the Vault (totalAssets down, supply unchanged)
+        vm.prank(tradingEngine);
+        vault.sendPayout(bob, 100 * 10 ** 6);
+        assertEq(vault.collateralizationRatio(), 0.9e18);
+    }
+
+    function testFuzz_CR_TracksTotalAssets(uint256 deposit, uint256 delta) public {
+        deposit = bound(deposit, 1 * 10 ** 6, 1_000_000 * 10 ** 6);
+        delta = bound(delta, 0, deposit);
+
+        usdc.mint(alice, deposit);
+        _deposit(alice, deposit);
+
+        uint256 supply = vault.totalSupply();
+        // Simulate a payout of `delta`
+        vm.prank(tradingEngine);
+        vault.sendPayout(bob, delta);
+
+        uint256 expected = ((deposit - delta) * (10 ** 12) * 1e18) / supply;
+        assertEq(vault.collateralizationRatio(), expected);
+    }
+
+    function _deposit(address user, uint256 amount) internal {
+        vm.startPrank(user);
+        usdc.approve(address(vault), amount);
+        vault.deposit(amount, user);
+        vm.stopPrank();
+    }
 }
