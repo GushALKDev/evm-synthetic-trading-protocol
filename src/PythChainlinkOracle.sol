@@ -35,12 +35,11 @@ contract PythChainlinkOracle is IOracle, Ownable {
                                 TYPES
     //////////////////////////////////////////////////////////////*/
 
-    // prettier-ignore
     struct PairFeed {
-        bytes32 pythFeedId;         // Slot 0 (32 bytes)
-        address chainlinkFeed;      // 20 bytes ─┐
-        uint32  chainlinkHeartbeat; //  4 bytes  │  Slot 1 (25 bytes)
-        bool    active;             //  1 byte  ─┘
+        bytes32 pythFeedId; //       32 bytes -── Slot 0 (full)
+        address chainlinkFeed; //    20 bytes -┐
+        uint32 chainlinkHeartbeat; // 4 bytes  │  Slot 1 (25/32)
+        bool active; //               1 byte  -┘
     }
 
     /*//////////////////////////////////////////////////////////////

@@ -21,29 +21,27 @@ contract TradingStorage is Ownable {
      * @notice Represents an open trading position
      * @dev Packed into 3 storage slots
      */
-    // prettier-ignore
     struct Trade {
-        address user;       // 20 bytes ─┐
-        bool isLong;        //  1 byte   │
-        uint16 pairIndex;   //  2 bytes  │  Slot 0 (31 bytes)
-        uint16 leverage;    //  2 bytes  │
-        uint48 timestamp;   //  6 bytes ─┘
-        uint32 index;       //  4 bytes ─┐
-        uint64 collateral;  //  8 bytes  │  Slot 1 (28 bytes)
-        uint128 openPrice;  // 16 bytes ─┘
-        uint128 tp;         // 16 bytes ─┐  Slot 2 (32 bytes)
-        uint128 sl;         // 16 bytes ─┘
+        address user; //      20 bytes -┐
+        bool isLong; //        1 byte   │
+        uint16 pairIndex; //   2 bytes  │  Slot 0 (31/32)
+        uint16 leverage; //    2 bytes  │
+        uint48 timestamp; //   6 bytes -┘
+        uint32 index; //       4 bytes -┐
+        uint64 collateral; //  8 bytes  │  Slot 1 (28/32)
+        uint128 openPrice; // 16 bytes -┘
+        uint128 tp; //        16 bytes -┐  Slot 2 (full)
+        uint128 sl; //        16 bytes -┘
     }
 
     /**
      * @notice Configuration for a trading pair
      */
-    // prettier-ignore
     struct Pair {
-        string name;        // Slot 0 (pointer)
-        uint128 maxOI;      // 16 bytes ─┐
-        uint16 maxLeverage; //  2 bytes  │  Slot 1 (19 bytes)
-        bool isActive;      //  1 byte  ─┘
+        string name; //       32 bytes -── Slot 0 (pointer)
+        uint128 maxOI; //     16 bytes -┐
+        uint16 maxLeverage; // 2 bytes  │  Slot 1 (19/32)
+        bool isActive; //      1 byte  -┘
     }
 
     /*//////////////////////////////////////////////////////////////
