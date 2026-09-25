@@ -29,13 +29,7 @@ contract SpreadManagerTest is Test {
 
     function setUp() public {
         sm = new SpreadManager(
-            DEFAULT_BASE_SPREAD_BPS,
-            DEFAULT_IMPACT_FACTOR,
-            DEFAULT_VOL_FACTOR,
-            DEFAULT_MAX_SPREAD_BPS,
-            DEFAULT_MAX_VOL_CHANGE_BPS,
-            keeper,
-            owner
+            DEFAULT_BASE_SPREAD_BPS, DEFAULT_IMPACT_FACTOR, DEFAULT_VOL_FACTOR, DEFAULT_MAX_SPREAD_BPS, DEFAULT_MAX_VOL_CHANGE_BPS, keeper, owner
         );
     }
 
@@ -56,13 +50,7 @@ contract SpreadManagerTest is Test {
     function test_Constructor_RevertOnZeroKeeper() public {
         vm.expectRevert(SpreadManager.ZeroAddress.selector);
         new SpreadManager(
-            DEFAULT_BASE_SPREAD_BPS,
-            DEFAULT_IMPACT_FACTOR,
-            DEFAULT_VOL_FACTOR,
-            DEFAULT_MAX_SPREAD_BPS,
-            DEFAULT_MAX_VOL_CHANGE_BPS,
-            address(0),
-            owner
+            DEFAULT_BASE_SPREAD_BPS, DEFAULT_IMPACT_FACTOR, DEFAULT_VOL_FACTOR, DEFAULT_MAX_SPREAD_BPS, DEFAULT_MAX_VOL_CHANGE_BPS, address(0), owner
         );
     }
 

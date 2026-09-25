@@ -43,12 +43,11 @@ library FundingLib {
      * @param _entryIndex Entry cumulative funding index at trade open
      * @return fundingOwedUsdc Funding owed in USDC (6 decimals), positive = pays, negative = receives
      */
-    function calculateFundingOwed(
-        uint256 _positionSizeWad,
-        bool _isLong,
-        int256 _currentIndex,
-        int256 _entryIndex
-    ) internal pure returns (int256 fundingOwedUsdc) {
+    function calculateFundingOwed(uint256 _positionSizeWad, bool _isLong, int256 _currentIndex, int256 _entryIndex)
+        internal
+        pure
+        returns (int256 fundingOwedUsdc)
+    {
         int256 rawFunding = (int256(_positionSizeWad) * (_currentIndex - _entryIndex)) / 1e18;
         // Long: positive index delta means longs pay → fundingOwed is positive
         // Short: opposite direction

@@ -52,23 +52,10 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     event TradeOpened(
-        uint256 indexed tradeId,
-        address indexed user,
-        uint16 pairIndex,
-        bool isLong,
-        uint64 collateral,
-        uint16 leverage,
-        uint128 openPrice,
-        uint256 fee
+        uint256 indexed tradeId, address indexed user, uint16 pairIndex, bool isLong, uint64 collateral, uint16 leverage, uint128 openPrice, uint256 fee
     );
     event TradeClosed(
-        uint256 indexed tradeId,
-        address indexed user,
-        uint128 closePrice,
-        int256 pnlUsdc,
-        uint256 payoutUsdc,
-        uint256 fee,
-        int256 fundingOwedUsdc
+        uint256 indexed tradeId, address indexed user, uint128 closePrice, int256 pnlUsdc, uint256 payoutUsdc, uint256 fee, int256 fundingOwedUsdc
     );
     event FeesDistributed(uint256 vaultFee, uint256 treasuryFee);
     event TpUpdated(uint256 indexed tradeId, uint128 newTp);
@@ -161,7 +148,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
      *      which is swept back to the trader by _refundEth.
      */
     function _getOraclePrice(uint256 _pairIndex, bytes[] calldata _priceUpdate) internal returns (uint128 price18) {
-        (price18, ) = ORACLE.getPrice{value: msg.value}(_pairIndex, _priceUpdate);
+        (price18,) = ORACLE.getPrice{value: msg.value}(_pairIndex, _priceUpdate);
     }
 
     /**
@@ -416,12 +403,8 @@ contract TradingEngine is Ownable, ReentrancyGuard {
 
     constructor(address _tradingStorage, address _vault, address _oracle, address _asset, address _treasury, address _spreadManager, address _owner) {
         if (
-            _tradingStorage == address(0) ||
-            _vault == address(0) ||
-            _oracle == address(0) ||
-            _asset == address(0) ||
-            _treasury == address(0) ||
-            _spreadManager == address(0)
+            _tradingStorage == address(0) || _vault == address(0) || _oracle == address(0) || _asset == address(0) || _treasury == address(0)
+                || _spreadManager == address(0)
         ) revert ZeroAddress();
         _initializeOwner(_owner);
         TRADING_STORAGE = TradingStorage(_tradingStorage);
@@ -498,12 +481,12 @@ contract TradingEngine is Ownable, ReentrancyGuard {
      * @param _slippageBps Maximum allowed slippage in basis points (e.g. 50 = 0.5%)
      * @param priceUpdate Pyth price update data
      */
-    function closeTrade(
-        uint256 _tradeId,
-        uint128 _expectedPrice,
-        uint16 _slippageBps,
-        bytes[] calldata priceUpdate
-    ) external payable nonReentrant whenNotPaused {
+    function closeTrade(uint256 _tradeId, uint128 _expectedPrice, uint16 _slippageBps, bytes[] calldata priceUpdate)
+        external
+        payable
+        nonReentrant
+        whenNotPaused
+    {
         TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(_tradeId);
         if (trade.user == address(0)) revert TradeNotFound(_tradeId);
         if (trade.user != msg.sender) revert NotTradeOwner(msg.sender, trade.user);

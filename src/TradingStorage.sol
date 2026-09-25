@@ -158,7 +158,7 @@ contract TradingStorage is Ownable {
     function _removeFromUserTrades(address _user, uint256 _tradeId) internal {
         uint256[] storage userTrades = _userTrades[_user];
         uint256 len = userTrades.length;
-        for (uint256 i; i < len; ) {
+        for (uint256 i; i < len;) {
             if (userTrades[i] == _tradeId) {
                 userTrades[i] = userTrades[len - 1];
                 userTrades.pop();
@@ -214,16 +214,11 @@ contract TradingStorage is Ownable {
      * @param _sl Stop loss price (0 = not set)
      * @return tradeId The assigned trade ID
      */
-    function storeTrade(
-        address _user,
-        bool _isLong,
-        uint16 _pairIndex,
-        uint16 _leverage,
-        uint64 _collateral,
-        uint128 _openPrice,
-        uint128 _tp,
-        uint128 _sl
-    ) external onlyTradingEngine returns (uint32 tradeId) {
+    function storeTrade(address _user, bool _isLong, uint16 _pairIndex, uint16 _leverage, uint64 _collateral, uint128 _openPrice, uint128 _tp, uint128 _sl)
+        external
+        onlyTradingEngine
+        returns (uint32 tradeId)
+    {
         if (_pairIndex >= _pairs.length) revert PairNotFound(_pairIndex);
         if (_tp != 0) _validateTp(_tp, _openPrice, _isLong);
         if (_sl != 0) _validateSl(_sl, _openPrice, _isLong);

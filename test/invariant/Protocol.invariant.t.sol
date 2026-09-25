@@ -64,15 +64,7 @@ contract ProtocolInvariantTest is StdInvariant, Test {
         vm.startPrank(owner);
         tradingStorage = new TradingStorage(address(usdc), owner);
         vault = new Vault(address(usdc), owner);
-        engine = new TradingEngine(
-            address(tradingStorage),
-            address(vault),
-            address(oracle),
-            address(usdc),
-            treasury,
-            address(spreadManager),
-            owner
-        );
+        engine = new TradingEngine(address(tradingStorage), address(vault), address(oracle), address(usdc), treasury, address(spreadManager), owner);
         tradingStorage.setTradingEngine(address(engine));
         vault.setTradingEngine(address(engine));
         tradingStorage.addPair("BTC/USD", 100, MAX_OI);
@@ -131,11 +123,7 @@ contract ProtocolInvariantTest is StdInvariant, Test {
      *      would have absorbed funds that were never LP liquidity.
      */
     function invariant_StorageCoversOpenCollateral() public view {
-        assertGe(
-            usdc.balanceOf(address(tradingStorage)),
-            handler.ghostOpenCollateral(),
-            "TradingStorage cannot cover open trade collateral"
-        );
+        assertGe(usdc.balanceOf(address(tradingStorage)), handler.ghostOpenCollateral(), "TradingStorage cannot cover open trade collateral");
     }
 
     /**

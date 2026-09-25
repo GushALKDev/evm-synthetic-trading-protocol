@@ -65,7 +65,7 @@ contract PythChainlinkOracleTest is Test {
     }
 
     function _getPrice(bytes[] memory updateData) internal returns (uint128 price) {
-        (price, ) = oracle.getPrice{value: 1 ether}(PAIR_INDEX, updateData);
+        (price,) = oracle.getPrice{value: 1 ether}(PAIR_INDEX, updateData);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -200,10 +200,7 @@ contract PythChainlinkOracleTest is Test {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                PythChainlinkOracle.ChainlinkStalePrice.selector,
-                address(mockChainlink),
-                block.timestamp - CHAINLINK_HEARTBEAT - 1,
-                block.timestamp
+                PythChainlinkOracle.ChainlinkStalePrice.selector, address(mockChainlink), block.timestamp - CHAINLINK_HEARTBEAT - 1, block.timestamp
             )
         );
         oracle.getPrice{value: 1 ether}(PAIR_INDEX, updateData);
@@ -346,17 +343,10 @@ contract PythChainlinkOracleTest is Test {
 
         bytes[] memory updateData = new bytes[](1);
         updateData[0] = mockPyth.createPriceFeedUpdateData(
-            bytes32(uint256(2)),
-            forexPrice,
-            forexConf,
-            forexExpo,
-            forexPrice,
-            forexConf,
-            uint64(block.timestamp),
-            uint64(block.timestamp - 1)
+            bytes32(uint256(2)), forexPrice, forexConf, forexExpo, forexPrice, forexConf, uint64(block.timestamp), uint64(block.timestamp - 1)
         );
 
-        (uint128 price, ) = oracle.getPrice{value: 1 ether}(1, updateData);
+        (uint128 price,) = oracle.getPrice{value: 1 ether}(1, updateData);
         // 130500 * 10^(18-5) = 130500 * 1e13 = 1.305e18
         assertEq(price, 1_305_000_000_000_000_000);
     }
@@ -417,7 +407,7 @@ contract PythChainlinkOracleTest is Test {
 
         bytes[] memory updateData = _createPriceUpdate(rawPrice, conf, expo);
 
-        (uint128 price, ) = oracle.getPrice{value: 1 ether}(PAIR_INDEX, updateData);
+        (uint128 price,) = oracle.getPrice{value: 1 ether}(PAIR_INDEX, updateData);
         assertEq(uint256(price), pyth18);
     }
 

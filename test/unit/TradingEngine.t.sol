@@ -67,23 +67,10 @@ contract TradingEngineTest is Test {
 
     // Events
     event TradeOpened(
-        uint256 indexed tradeId,
-        address indexed user,
-        uint16 pairIndex,
-        bool isLong,
-        uint64 collateral,
-        uint16 leverage,
-        uint128 openPrice,
-        uint256 fee
+        uint256 indexed tradeId, address indexed user, uint16 pairIndex, bool isLong, uint64 collateral, uint16 leverage, uint128 openPrice, uint256 fee
     );
     event TradeClosed(
-        uint256 indexed tradeId,
-        address indexed user,
-        uint128 closePrice,
-        int256 pnlUsdc,
-        uint256 payoutUsdc,
-        uint256 fee,
-        int256 fundingOwedUsdc
+        uint256 indexed tradeId, address indexed user, uint128 closePrice, int256 pnlUsdc, uint256 payoutUsdc, uint256 fee, int256 fundingOwedUsdc
     );
     event FeesDistributed(uint256 vaultFee, uint256 treasuryFee);
     event TpUpdated(uint256 indexed tradeId, uint128 newTp);
@@ -103,15 +90,7 @@ contract TradingEngineTest is Test {
         vm.startPrank(owner);
         tradingStorage = new TradingStorage(address(usdc), owner);
         vault = new Vault(address(usdc), owner);
-        engine = new TradingEngine(
-            address(tradingStorage),
-            address(vault),
-            address(mockOracle),
-            address(usdc),
-            treasuryAddr,
-            address(mockSpreadManager),
-            owner
-        );
+        engine = new TradingEngine(address(tradingStorage), address(vault), address(mockOracle), address(usdc), treasuryAddr, address(mockSpreadManager), owner);
 
         tradingStorage.setTradingEngine(address(engine));
         vault.setTradingEngine(address(engine));
@@ -143,15 +122,7 @@ contract TradingEngineTest is Test {
     function _openDefaultTrade(address _user) internal returns (uint32 tradeId) {
         vm.prank(_user);
         tradeId = engine.openTrade(
-            DEFAULT_PAIR_INDEX,
-            true,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_LONG_OPEN_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            DEFAULT_TP,
-            DEFAULT_SL,
-            EMPTY_UPDATE
+            DEFAULT_PAIR_INDEX, true, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, DEFAULT_TP, DEFAULT_SL, EMPTY_UPDATE
         );
     }
 
@@ -299,15 +270,7 @@ contract TradingEngineTest is Test {
 
         vm.prank(alice);
         uint32 tradeId = engine.openTrade(
-            DEFAULT_PAIR_INDEX,
-            false,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_SHORT_OPEN_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            shortTp,
-            shortSl,
-            EMPTY_UPDATE
+            DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, shortTp, shortSl, EMPTY_UPDATE
         );
 
         TradingStorage.Trade memory trade = tradingStorage.getTrade(tradeId);
@@ -348,15 +311,7 @@ contract TradingEngineTest is Test {
 
         vm.prank(alice);
         uint32 tradeId = engine.openTrade(
-            DEFAULT_PAIR_INDEX,
-            false,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_SHORT_OPEN_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            shortTp,
-            shortSl,
-            EMPTY_UPDATE
+            DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, shortTp, shortSl, EMPTY_UPDATE
         );
 
         TradingStorage.Trade memory trade = tradingStorage.getTrade(tradeId);
@@ -367,17 +322,8 @@ contract TradingEngineTest is Test {
 
     function test_OpenTrade_NoTpNoSl() public {
         vm.prank(alice);
-        uint32 tradeId = engine.openTrade(
-            DEFAULT_PAIR_INDEX,
-            true,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_LONG_OPEN_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            0,
-            0,
-            EMPTY_UPDATE
-        );
+        uint32 tradeId =
+            engine.openTrade(DEFAULT_PAIR_INDEX, true, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE);
 
         TradingStorage.Trade memory trade = tradingStorage.getTrade(tradeId);
         assertEq(trade.tp, 0);
@@ -449,15 +395,7 @@ contract TradingEngineTest is Test {
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(TradingEngine.TpAlreadyTriggered.selector, DEFAULT_ORACLE_PRICE, DEFAULT_ORACLE_PRICE));
         engine.openTrade(
-            DEFAULT_PAIR_INDEX,
-            true,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_LONG_OPEN_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            DEFAULT_ORACLE_PRICE,
-            0,
-            EMPTY_UPDATE
+            DEFAULT_PAIR_INDEX, true, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, DEFAULT_ORACLE_PRICE, 0, EMPTY_UPDATE
         );
     }
 
@@ -466,15 +404,7 @@ contract TradingEngineTest is Test {
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(TradingEngine.SlAlreadyTriggered.selector, DEFAULT_ORACLE_PRICE, DEFAULT_ORACLE_PRICE));
         engine.openTrade(
-            DEFAULT_PAIR_INDEX,
-            true,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_LONG_OPEN_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            0,
-            DEFAULT_ORACLE_PRICE,
-            EMPTY_UPDATE
+            DEFAULT_PAIR_INDEX, true, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, DEFAULT_ORACLE_PRICE, EMPTY_UPDATE
         );
     }
 
@@ -546,15 +476,7 @@ contract TradingEngineTest is Test {
 
         vm.prank(alice);
         uint32 tradeId = engine.openTrade(
-            DEFAULT_PAIR_INDEX,
-            false,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_SHORT_OPEN_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            shortTp,
-            shortSl,
-            EMPTY_UPDATE
+            DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, shortTp, shortSl, EMPTY_UPDATE
         );
 
         // Price went down 10%: 50k → 45k (profit for short)
@@ -670,15 +592,7 @@ contract TradingEngineTest is Test {
     function test_CloseTrade_ShortLoss() public {
         vm.prank(alice);
         uint32 tradeId = engine.openTrade(
-            DEFAULT_PAIR_INDEX,
-            false,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_SHORT_OPEN_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            0,
-            0,
-            EMPTY_UPDATE
+            DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE
         );
 
         // Price went up 5%: 50k → 52.5k (loss for short)
@@ -1052,15 +966,7 @@ contract TradingEngineTest is Test {
     function test_PnL_ShortExactMath() public {
         vm.prank(alice);
         uint32 tradeId = engine.openTrade(
-            DEFAULT_PAIR_INDEX,
-            false,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_SHORT_OPEN_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            0,
-            0,
-            EMPTY_UPDATE
+            DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE
         );
 
         TradingStorage.Trade memory openedTrade = tradingStorage.getTrade(tradeId);
@@ -1505,11 +1411,8 @@ contract TradingEngineTest is Test {
     }
 
     function test_Invariant_FundsConservation_MultipleTraders() public {
-        uint256 totalBefore = usdc.balanceOf(alice) +
-            usdc.balanceOf(bob) +
-            usdc.balanceOf(address(vault)) +
-            usdc.balanceOf(address(tradingStorage)) +
-            usdc.balanceOf(treasuryAddr);
+        uint256 totalBefore = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage))
+            + usdc.balanceOf(treasuryAddr);
 
         _openDefaultTrade(alice);
         _openDefaultTrade(bob);
@@ -1528,11 +1431,8 @@ contract TradingEngineTest is Test {
         vm.prank(bob);
         engine.closeTrade(1, closeExec2, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
 
-        uint256 totalAfter = usdc.balanceOf(alice) +
-            usdc.balanceOf(bob) +
-            usdc.balanceOf(address(vault)) +
-            usdc.balanceOf(address(tradingStorage)) +
-            usdc.balanceOf(treasuryAddr);
+        uint256 totalAfter = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage))
+            + usdc.balanceOf(treasuryAddr);
 
         // Total USDC in the system must be conserved
         assertEq(totalBefore, totalAfter);
@@ -1608,15 +1508,7 @@ contract TradingEngineTest is Test {
         uint128 shortSl = 55_000 * 1e18;
         vm.prank(bob);
         uint32 shortTradeId = engine.openTrade(
-            DEFAULT_PAIR_INDEX,
-            false,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_SHORT_OPEN_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            shortTp,
-            shortSl,
-            EMPTY_UPDATE
+            DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, shortTp, shortSl, EMPTY_UPDATE
         );
 
         // Warp time — more longs than shorts (but now both sides exist, long OI from alice + short OI from bob)
@@ -1664,27 +1556,11 @@ contract TradingEngineTest is Test {
         uint128 shortSl = 55_000 * 1e18;
         vm.prank(bob);
         engine.openTrade(
-            DEFAULT_PAIR_INDEX,
-            false,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_SHORT_OPEN_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            shortTp,
-            shortSl,
-            EMPTY_UPDATE
+            DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, shortTp, shortSl, EMPTY_UPDATE
         );
         vm.prank(bob);
         uint32 shortTradeId = engine.openTrade(
-            DEFAULT_PAIR_INDEX,
-            false,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_SHORT_OPEN_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            shortTp,
-            shortSl,
-            EMPTY_UPDATE
+            DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, shortTp, shortSl, EMPTY_UPDATE
         );
 
         vm.warp(block.timestamp + 3600);
@@ -1762,27 +1638,11 @@ contract TradingEngineTest is Test {
         uint128 shortSl = 55_000 * 1e18;
         vm.prank(bob);
         engine.openTrade(
-            DEFAULT_PAIR_INDEX,
-            false,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_SHORT_OPEN_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            shortTp,
-            shortSl,
-            EMPTY_UPDATE
+            DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, shortTp, shortSl, EMPTY_UPDATE
         );
         vm.prank(bob);
         engine.openTrade(
-            DEFAULT_PAIR_INDEX,
-            false,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_SHORT_OPEN_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            shortTp,
-            shortSl,
-            EMPTY_UPDATE
+            DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, shortTp, shortSl, EMPTY_UPDATE
         );
 
         // Alice opens long
@@ -1813,15 +1673,7 @@ contract TradingEngineTest is Test {
         uint128 shortSl = 55_000 * 1e18;
         vm.prank(bob);
         uint32 shortTradeId = engine.openTrade(
-            DEFAULT_PAIR_INDEX,
-            false,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_SHORT_OPEN_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            shortTp,
-            shortSl,
-            EMPTY_UPDATE
+            DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, shortTp, shortSl, EMPTY_UPDATE
         );
 
         vm.warp(block.timestamp + 3600);
@@ -1854,11 +1706,8 @@ contract TradingEngineTest is Test {
     }
 
     function test_Funding_FundsConservation() public {
-        uint256 totalBefore = usdc.balanceOf(alice) +
-            usdc.balanceOf(bob) +
-            usdc.balanceOf(address(vault)) +
-            usdc.balanceOf(address(tradingStorage)) +
-            usdc.balanceOf(treasuryAddr);
+        uint256 totalBefore = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage))
+            + usdc.balanceOf(treasuryAddr);
 
         // Alice opens long, Bob opens short → imbalanced slightly when another long is added
         _openDefaultTrade(alice); // long
@@ -1866,15 +1715,7 @@ contract TradingEngineTest is Test {
         uint128 shortSl = 55_000 * 1e18;
         vm.prank(bob);
         engine.openTrade(
-            DEFAULT_PAIR_INDEX,
-            false,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_SHORT_OPEN_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            shortTp,
-            shortSl,
-            EMPTY_UPDATE
+            DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, shortTp, shortSl, EMPTY_UPDATE
         );
 
         vm.warp(block.timestamp + 3600);
@@ -1888,11 +1729,8 @@ contract TradingEngineTest is Test {
         vm.prank(bob);
         engine.closeTrade(1, closeExec2, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
 
-        uint256 totalAfter = usdc.balanceOf(alice) +
-            usdc.balanceOf(bob) +
-            usdc.balanceOf(address(vault)) +
-            usdc.balanceOf(address(tradingStorage)) +
-            usdc.balanceOf(treasuryAddr);
+        uint256 totalAfter = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage))
+            + usdc.balanceOf(treasuryAddr);
 
         assertEq(totalBefore, totalAfter);
     }
@@ -1919,15 +1757,7 @@ contract TradingEngineTest is Test {
         uint128 shortSl = 55_000 * 1e18;
         vm.prank(bob);
         engine.openTrade(
-            DEFAULT_PAIR_INDEX,
-            false,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_SHORT_OPEN_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            shortTp,
-            shortSl,
-            EMPTY_UPDATE
+            DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, shortTp, shortSl, EMPTY_UPDATE
         );
 
         uint256 expectedShortOI = uint256(DEFAULT_EFFECTIVE_COLLATERAL) * uint256(DEFAULT_LEVERAGE) * 1e12;
@@ -1942,27 +1772,11 @@ contract TradingEngineTest is Test {
         uint128 shortSl = 55_000 * 1e18;
         vm.prank(bob);
         engine.openTrade(
-            DEFAULT_PAIR_INDEX,
-            false,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_SHORT_OPEN_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            shortTp,
-            shortSl,
-            EMPTY_UPDATE
+            DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, shortTp, shortSl, EMPTY_UPDATE
         );
         vm.prank(bob);
         engine.openTrade(
-            DEFAULT_PAIR_INDEX,
-            false,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_SHORT_OPEN_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            shortTp,
-            shortSl,
-            EMPTY_UPDATE
+            DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, shortTp, shortSl, EMPTY_UPDATE
         );
 
         uint32 longTradeId = _openDefaultTrade(alice); // long
@@ -1992,26 +1806,15 @@ contract TradingEngineTest is Test {
     function testFuzz_Funding_FundsConservation(uint128 closeOracle) public {
         closeOracle = uint128(bound(closeOracle, 25_000 * 1e18, 100_000 * 1e18));
 
-        uint256 totalBefore = usdc.balanceOf(alice) +
-            usdc.balanceOf(bob) +
-            usdc.balanceOf(address(vault)) +
-            usdc.balanceOf(address(tradingStorage)) +
-            usdc.balanceOf(treasuryAddr);
+        uint256 totalBefore = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage))
+            + usdc.balanceOf(treasuryAddr);
 
         _openDefaultTrade(alice); // long
         uint128 shortTp = 25_000 * 1e18;
         uint128 shortSl = 75_000 * 1e18;
         vm.prank(bob);
         engine.openTrade(
-            DEFAULT_PAIR_INDEX,
-            false,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_SHORT_OPEN_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            shortTp,
-            shortSl,
-            EMPTY_UPDATE
+            DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, shortTp, shortSl, EMPTY_UPDATE
         );
 
         vm.warp(block.timestamp + 3600);
@@ -2026,11 +1829,8 @@ contract TradingEngineTest is Test {
         vm.prank(bob);
         engine.closeTrade(1, closeExec2, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
 
-        uint256 totalAfter = usdc.balanceOf(alice) +
-            usdc.balanceOf(bob) +
-            usdc.balanceOf(address(vault)) +
-            usdc.balanceOf(address(tradingStorage)) +
-            usdc.balanceOf(treasuryAddr);
+        uint256 totalAfter = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage))
+            + usdc.balanceOf(treasuryAddr);
 
         assertEq(totalBefore, totalAfter);
     }
@@ -2087,15 +1887,8 @@ contract TradingEngineTest is Test {
         vm.startPrank(owner);
         TradingStorage ts2 = new TradingStorage(address(usdc), owner);
         Vault v2 = new Vault(address(usdc), owner);
-        TradingEngine engine2 = new TradingEngine(
-            address(ts2),
-            address(v2),
-            address(mockOracle),
-            address(usdc),
-            treasuryAddr,
-            address(zeroSpreadManager),
-            owner
-        );
+        TradingEngine engine2 =
+            new TradingEngine(address(ts2), address(v2), address(mockOracle), address(usdc), treasuryAddr, address(zeroSpreadManager), owner);
         ts2.setTradingEngine(address(engine2));
         v2.setTradingEngine(address(engine2));
         ts2.addPair("BTC/USD", 100, 10_000_000 * 1e18);
@@ -2107,15 +1900,7 @@ contract TradingEngineTest is Test {
 
         vm.prank(alice);
         uint32 tradeId = engine2.openTrade(
-            DEFAULT_PAIR_INDEX,
-            true,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_ORACLE_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            DEFAULT_TP,
-            DEFAULT_SL,
-            EMPTY_UPDATE
+            DEFAULT_PAIR_INDEX, true, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_ORACLE_PRICE, DEFAULT_SLIPPAGE_BPS, DEFAULT_TP, DEFAULT_SL, EMPTY_UPDATE
         );
 
         TradingStorage.Trade memory trade = ts2.getTrade(tradeId);
@@ -2190,15 +1975,7 @@ contract TradingEngineTest is Test {
     function test_Liquidate_Short_Success() public {
         vm.prank(alice);
         uint32 tradeId = engine.openTrade(
-            DEFAULT_PAIR_INDEX,
-            false,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_SHORT_OPEN_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            0,
-            0,
-            EMPTY_UPDATE
+            DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE
         );
 
         // Short loses when price goes UP. closePrice = oracle * 10005/10000.
@@ -2425,15 +2202,7 @@ contract TradingEngineTest is Test {
     function test_Liquidate_Short_ConfProtectsTrader() public {
         vm.prank(alice);
         uint32 tradeId = engine.openTrade(
-            DEFAULT_PAIR_INDEX,
-            false,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_SHORT_OPEN_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            0,
-            0,
-            EMPTY_UPDATE
+            DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE
         );
 
         // Short loses when price rises; at this oracle it is ~92% loss → liquidatable.
@@ -2572,15 +2341,7 @@ contract TradingEngineTest is Test {
 
         vm.prank(alice);
         uint32 tradeId = engine.openTrade(
-            DEFAULT_PAIR_INDEX,
-            false,
-            DEFAULT_COLLATERAL,
-            DEFAULT_LEVERAGE,
-            DEFAULT_SHORT_OPEN_PRICE,
-            DEFAULT_SLIPPAGE_BPS,
-            0,
-            0,
-            EMPTY_UPDATE
+            DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE
         );
 
         // Oracle that puts the short at the target loss (short loses when price rises).
@@ -2666,7 +2427,8 @@ contract TradingEngineTest is Test {
     function test_ExecuteLimit_RevertOnNoLimitSet() public {
         // Open a trade with no TP and no SL
         vm.prank(alice);
-        uint32 tradeId = engine.openTrade(DEFAULT_PAIR_INDEX, true, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE);
+        uint32 tradeId =
+            engine.openTrade(DEFAULT_PAIR_INDEX, true, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE);
 
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(TradingEngine.NoLimitSet.selector, uint256(tradeId)));
@@ -2795,7 +2557,8 @@ contract TradingEngineTest is Test {
     }
 
     function test_ExecuteLimit_ConservesFunds() public {
-        uint256 totalBefore = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage)) + usdc.balanceOf(treasuryAddr);
+        uint256 totalBefore = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage))
+            + usdc.balanceOf(treasuryAddr);
 
         uint32 tradeId = _openDefaultTrade(alice);
         uint128 oracle = 55_500 * 1e18;
@@ -2804,7 +2567,8 @@ contract TradingEngineTest is Test {
         vm.prank(bob);
         engine.executeLimit(tradeId, EMPTY_UPDATE);
 
-        uint256 totalAfter = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage)) + usdc.balanceOf(treasuryAddr);
+        uint256 totalAfter = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage))
+            + usdc.balanceOf(treasuryAddr);
         assertEq(totalAfter, totalBefore);
     }
 
@@ -2854,7 +2618,8 @@ contract TradingEngineTest is Test {
         // Any oracle price that triggers the long TP (>=55k) or SL (<=45k) conserves funds
         triggerOracle = uint128(bound(triggerOracle, 30_000 * 1e18, 44_000 * 1e18)); // SL side (loss, no bad debt)
 
-        uint256 totalBefore = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage)) + usdc.balanceOf(treasuryAddr);
+        uint256 totalBefore = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage))
+            + usdc.balanceOf(treasuryAddr);
 
         uint32 tradeId = _openDefaultTrade(alice);
         mockOracle.setPrice(DEFAULT_PAIR_INDEX, triggerOracle);
@@ -2862,7 +2627,8 @@ contract TradingEngineTest is Test {
         vm.prank(bob);
         engine.executeLimit(tradeId, EMPTY_UPDATE);
 
-        uint256 totalAfter = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage)) + usdc.balanceOf(treasuryAddr);
+        uint256 totalAfter = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage))
+            + usdc.balanceOf(treasuryAddr);
         assertEq(totalAfter, totalBefore);
     }
 }

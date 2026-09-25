@@ -62,35 +62,20 @@ library DeployLib {
         d.tradingStorage = new TradingStorage(_cfg.asset, _cfg.owner);
         d.vault = new Vault(_cfg.asset, _cfg.owner);
         d.oracle = new PythChainlinkOracle(_cfg.pyth, _cfg.owner);
-        d.spreadManager = new SpreadManager(
-            _cfg.baseSpreadBps,
-            _cfg.impactFactor,
-            _cfg.volFactor,
-            _cfg.maxSpreadBps,
-            _cfg.maxVolatilityChangeBps,
-            _cfg.keeper,
-            _cfg.owner
-        );
+        d.spreadManager =
+            new SpreadManager(_cfg.baseSpreadBps, _cfg.impactFactor, _cfg.volFactor, _cfg.maxSpreadBps, _cfg.maxVolatilityChangeBps, _cfg.keeper, _cfg.owner);
 
         // --- Solvency layers ---
         d.assistantFund = new AssistantFund(_cfg.asset, address(d.vault), _cfg.assistantFundTargetCap, _cfg.owner);
         d.synth = new SynthToken(_cfg.owner);
-        d.bondDepository =
-            new BondDepository(_cfg.asset, address(d.vault), address(d.synth), _cfg.bondDiscountBps, _cfg.owner);
+        d.bondDepository = new BondDepository(_cfg.asset, address(d.vault), address(d.synth), _cfg.bondDiscountBps, _cfg.owner);
 
         // Treasury is the AssistantFund: the 20% fee share accumulates as the Layer 2 reserve
         d.engine = new TradingEngine(
-            address(d.tradingStorage),
-            address(d.vault),
-            address(d.oracle),
-            _cfg.asset,
-            address(d.assistantFund),
-            address(d.spreadManager),
-            _cfg.owner
+            address(d.tradingStorage), address(d.vault), address(d.oracle), _cfg.asset, address(d.assistantFund), address(d.spreadManager), _cfg.owner
         );
 
-        d.solvencyManager =
-            new SolvencyManager(address(d.vault), address(d.assistantFund), address(d.bondDepository), _cfg.owner);
+        d.solvencyManager = new SolvencyManager(address(d.vault), address(d.assistantFund), address(d.bondDepository), _cfg.owner);
 
         return d;
     }

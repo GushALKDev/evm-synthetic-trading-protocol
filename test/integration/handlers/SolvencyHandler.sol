@@ -82,11 +82,7 @@ contract SolvencyHandler is CommonBase, StdCheats, StdUtils {
     /// @notice Protocol fees accrue to the Vault (LP side) and the AssistantFund (reserve side)
     function accrueFees(uint256 _vaultFee, uint256 _reserveFee) external countCall("accrueFees") {
         deal(address(USDC), address(d.vault), USDC.balanceOf(address(d.vault)) + bound(_vaultFee, 0, 10_000 * 10 ** 6));
-        deal(
-            address(USDC),
-            address(d.assistantFund),
-            USDC.balanceOf(address(d.assistantFund)) + bound(_reserveFee, 0, 10_000 * 10 ** 6)
-        );
+        deal(address(USDC), address(d.assistantFund), USDC.balanceOf(address(d.assistantFund)) + bound(_reserveFee, 0, 10_000 * 10 ** 6));
     }
 
     /// @notice Anyone triggers the permissionless solvency check

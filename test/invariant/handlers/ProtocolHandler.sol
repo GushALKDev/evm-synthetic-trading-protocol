@@ -89,11 +89,7 @@ contract ProtocolHandler is CommonBase, StdCheats, StdUtils {
     }
 
     /// @notice Trader opens a leveraged position
-    function openTrade(uint256 _actorSeed, uint256 _collateral, uint256 _leverage, bool _isLong)
-        external
-        useActor(_actorSeed)
-        countCall("openTrade")
-    {
+    function openTrade(uint256 _actorSeed, uint256 _collateral, uint256 _leverage, bool _isLong) external useActor(_actorSeed) countCall("openTrade") {
         // Keep notional well inside maxOI so opens are not rejected en masse
         uint64 collateral = uint64(bound(_collateral, MIN_COLLATERAL, 5_000 * 10 ** 6));
         uint16 leverage = uint16(bound(_leverage, 1, 50));
@@ -105,9 +101,7 @@ contract ProtocolHandler is CommonBase, StdCheats, StdUtils {
         // would make every deviation infinite and revert every open. No TP/SL — this handler
         // exercises the manual close and liquidation paths.
         uint128 expectedPrice = ORACLE.peekPrice(PAIR_INDEX);
-        uint32 tradeId = ENGINE.openTrade(
-            PAIR_INDEX, _isLong, collateral, leverage, expectedPrice, MAX_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE
-        );
+        uint32 tradeId = ENGINE.openTrade(PAIR_INDEX, _isLong, collateral, leverage, expectedPrice, MAX_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE);
         openTradeIds.push(tradeId);
         ghostOpenCollateral += TRADING_STORAGE.getTrade(tradeId).collateral;
     }

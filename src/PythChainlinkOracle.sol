@@ -148,7 +148,7 @@ contract PythChainlinkOracle is IOracle, Ownable {
      * @dev Fetch Chainlink price, check heartbeat staleness, normalize to 18 decimals
      */
     function _getChainlinkPrice18(address _feed, uint32 _heartbeat) internal view returns (uint256) {
-        (, int256 answer, , uint256 updatedAt, ) = AggregatorV3Interface(_feed).latestRoundData();
+        (, int256 answer,, uint256 updatedAt,) = AggregatorV3Interface(_feed).latestRoundData();
 
         if (block.timestamp - updatedAt > uint256(_heartbeat)) {
             revert ChainlinkStalePrice(_feed, updatedAt, block.timestamp);

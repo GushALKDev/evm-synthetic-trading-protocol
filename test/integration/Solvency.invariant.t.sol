@@ -100,9 +100,7 @@ contract SolvencyIntegrationInvariantTest is StdInvariant, Test {
      *      skims are interleaved — the escrow must survive the whole system moving around it.
      */
     function invariant_EscrowSolventUnderFullSystem() public view {
-        assertGe(
-            d.synth.balanceOf(address(d.bondDepository)), handler.outstandingSynth(), "escrow cannot cover unclaimed"
-        );
+        assertGe(d.synth.balanceOf(address(d.bondDepository)), handler.outstandingSynth(), "escrow cannot cover unclaimed");
     }
 
     /**

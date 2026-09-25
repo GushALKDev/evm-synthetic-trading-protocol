@@ -100,7 +100,7 @@ contract PythChainlinkOracleForkTest is Test {
     function test_Fork_GetPrice_BTC() public skipIfNoFork {
         bytes[] memory priceUpdate = _fetchHermesPriceUpdate(PYTH_BTC_USD);
 
-        (uint128 price, ) = oracle.getPrice{value: 0.01 ether}(PAIR_BTC, priceUpdate);
+        (uint128 price,) = oracle.getPrice{value: 0.01 ether}(PAIR_BTC, priceUpdate);
 
         // BTC should be between $10k and $500k (18 decimals)
         assertGt(price, 10_000 * 1e18, "BTC price too low");
@@ -113,7 +113,7 @@ contract PythChainlinkOracleForkTest is Test {
     function test_Fork_GetPrice_ETH() public skipIfNoFork {
         bytes[] memory priceUpdate = _fetchHermesPriceUpdate(PYTH_ETH_USD);
 
-        (uint128 price, ) = oracle.getPrice{value: 0.01 ether}(PAIR_ETH, priceUpdate);
+        (uint128 price,) = oracle.getPrice{value: 0.01 ether}(PAIR_ETH, priceUpdate);
 
         // ETH should be between $500 and $50k (18 decimals)
         assertGt(price, 500 * 1e18, "ETH price too low");
@@ -131,10 +131,10 @@ contract PythChainlinkOracleForkTest is Test {
         bytes[] memory priceUpdate = _fetchHermesPriceUpdate(PYTH_BTC_USD);
 
         // If deviation exceeds 3%, this call reverts with PriceDeviationTooHigh
-        (uint128 price, ) = oracle.getPrice{value: 0.01 ether}(PAIR_BTC, priceUpdate);
+        (uint128 price,) = oracle.getPrice{value: 0.01 ether}(PAIR_BTC, priceUpdate);
 
         // Also read Chainlink directly for logging
-        (, int256 clAnswer, , , ) = AggregatorV3Interface(CHAINLINK_UBTC_USD).latestRoundData();
+        (, int256 clAnswer,,,) = AggregatorV3Interface(CHAINLINK_UBTC_USD).latestRoundData();
         uint256 chainlink18 = uint256(clAnswer) * 1e10; // 8 dec → 18 dec
 
         uint256 diff = price > uint128(chainlink18) ? price - uint128(chainlink18) : uint128(chainlink18) - price;
@@ -150,9 +150,9 @@ contract PythChainlinkOracleForkTest is Test {
     function test_Fork_PythChainlinkDeviation_ETH() public skipIfNoFork {
         bytes[] memory priceUpdate = _fetchHermesPriceUpdate(PYTH_ETH_USD);
 
-        (uint128 price, ) = oracle.getPrice{value: 0.01 ether}(PAIR_ETH, priceUpdate);
+        (uint128 price,) = oracle.getPrice{value: 0.01 ether}(PAIR_ETH, priceUpdate);
 
-        (, int256 clAnswer, , , ) = AggregatorV3Interface(CHAINLINK_UETH_USD).latestRoundData();
+        (, int256 clAnswer,,,) = AggregatorV3Interface(CHAINLINK_UETH_USD).latestRoundData();
         uint256 chainlink18 = uint256(clAnswer) * 1e10;
 
         uint256 diff = price > uint128(chainlink18) ? price - uint128(chainlink18) : uint128(chainlink18) - price;
@@ -172,7 +172,7 @@ contract PythChainlinkOracleForkTest is Test {
     function test_Fork_PriceNormalization_18Decimals() public skipIfNoFork {
         bytes[] memory priceUpdate = _fetchHermesPriceUpdate(PYTH_BTC_USD);
 
-        (uint128 price, ) = oracle.getPrice{value: 0.01 ether}(PAIR_BTC, priceUpdate);
+        (uint128 price,) = oracle.getPrice{value: 0.01 ether}(PAIR_BTC, priceUpdate);
 
         // BTC at ~$90k = 90000e18 = 9e22 — much larger than 1e18
         assertGt(price, 1e18, "Price not normalized to 18 decimals");
@@ -246,10 +246,10 @@ contract PythChainlinkOracleForkTest is Test {
 
     function test_Fork_ConsecutivePriceFetches() public skipIfNoFork {
         bytes[] memory btcUpdate = _fetchHermesPriceUpdate(PYTH_BTC_USD);
-        (uint128 btcPrice, ) = oracle.getPrice{value: 0.01 ether}(PAIR_BTC, btcUpdate);
+        (uint128 btcPrice,) = oracle.getPrice{value: 0.01 ether}(PAIR_BTC, btcUpdate);
 
         bytes[] memory ethUpdate = _fetchHermesPriceUpdate(PYTH_ETH_USD);
-        (uint128 ethPrice, ) = oracle.getPrice{value: 0.01 ether}(PAIR_ETH, ethUpdate);
+        (uint128 ethPrice,) = oracle.getPrice{value: 0.01 ether}(PAIR_ETH, ethUpdate);
 
         // BTC should always be more expensive than ETH
         assertGt(btcPrice, ethPrice, "BTC should be more expensive than ETH");
