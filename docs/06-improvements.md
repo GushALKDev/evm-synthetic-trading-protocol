@@ -1,12 +1,13 @@
-# 🚀 Guide 6: Suggested Improvements and Roadmap
+# Guide 6: Future Improvements
 
-**Version:** 1.0
-**Prerequisites:** [Guide 5: Solidity Implementation](./05-implementation.md)
-**Next:** [Guide 7: Vault SSL Architecture](./07-vault-ssl.md)
+**Prerequisites:** [Guide 5: Implementation](./05-implementation.md)
+**Next:** [Guide 7: Vault and Solvency](./07-vault-ssl.md)
+
+**Status:** Proof of concept. Not audited and not deployed. Nothing in this guide is implemented.
 
 ---
 
-## 📋 Table of Contents
+## Table of Contents
 
 1. [Advanced Orders](#1-advanced-orders)
 2. [Multi-Collateral Vault](#2-multi-collateral-vault)
@@ -15,76 +16,49 @@
 5. [NFT Boost for LPs](#5-nft-boost-for-lps)
 6. [On-Chain Copy Trading](#6-on-chain-copy-trading)
 7. [Account Abstraction (ERC-4337)](#7-account-abstraction-erc-4337)
-8. [Implementation Roadmap](#8-implementation-roadmap)
+8. [Relation to the Roadmap](#8-relation-to-the-roadmap)
 
 ---
 
-Once the core is implemented, these improvements will bring the Synthetic Trading Protocol to the level of competitors like GMX v2 or Gains Network.
+These are ideas for a possible second version. The sketches below are illustrative and have not been
+compiled or tested.
 
 ---
 
 ## 1. Advanced Orders
 
-### Current State
-The basic design only supports "Market Orders" (immediate execution at oracle price).
+### Current state
 
-### Improvement: Limit Orders + Automatic TP/SL
+Market orders open and close at the oracle price plus spread. Take profit and stop loss on open
+positions are automated: `TradingEngine.executeLimit` can be called by anyone once the oracle price crosses
+the TP or SL, and pays the caller 0.1% of notional out of the trader's payout. There is no keeper
+whitelist and no Chainlink Automation dependency.
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant Trading
-    participant Keeper as Chainlink Automation
-    participant Oracle
+### Not implemented: limit orders that open a position
 
-    User->>Trading: openTrade(..., tp=55000, sl=48000)
-    Trading->>Trading: Store trade with TP/SL
-    
-    loop Every block
-        Keeper->>Oracle: Check price
-        Oracle-->>Keeper: price = 55,100
-        Keeper->>Keeper: price >= TP?
-        Keeper->>Trading: executeLimit(tradeId, TP)
-        Trading->>Trading: Close at TP
-    end
-```
-
-### Implementation
+A pending order that opens a position when the price reaches a target would need collateral custody for
+the pending order, cancellation and expiry.
 
 ```solidity
-struct LimitOrder {
-    uint256 tradeId;
-    uint256 targetPrice;
-    OrderType orderType; // TP, SL, LIMIT_OPEN
-    bool executed;
+struct OpenOrder {
+    address user;
+    uint16 pairIndex;
+    bool isLong;
+    uint64 collateral;
+    uint16 leverage;
+    uint128 targetPrice;
+    uint48 expiry;
 }
 
-function executeLimit(uint256 orderId) external onlyKeeper {
-    LimitOrder storage order = limitOrders[orderId];
-    Trade storage trade = trades[order.tradeId];
-    
-    (uint256 price,) = oracle.getPrice(trade.pairIndex);
-    
-    bool shouldExecute;
-    if (order.orderType == OrderType.TP) {
-        shouldExecute = trade.isLong 
-            ? price >= order.targetPrice 
-            : price <= order.targetPrice;
-    } else if (order.orderType == OrderType.SL) {
-        shouldExecute = trade.isLong 
-            ? price <= order.targetPrice 
-            : price >= order.targetPrice;
-    }
-    
-    if (!shouldExecute) revert ConditionNotMet();
-    
-    _closeTrade(order.tradeId, CloseReason.TakeProfit);
+function executeOpenOrder(uint256 orderId, bytes[] calldata priceUpdate) external payable {
+    // Load the order, fetch the oracle price, check the target was reached and the order has not expired,
+    // then open the position with the escrowed collateral and pay the caller a reward.
 }
 ```
 
 ### Costs
-- **Keeper Gas:** Include small extra in `openingFee` to cover automatic execution.
-- **Alternative:** Keeper takes 0.01% of payout as reward.
+
+- The executor reward could be taken from the collateral, as `executeLimit` does today.
 
 ---
 
@@ -215,9 +189,9 @@ Give early LPs (bootstrap) an NFT that increases their APY in the Vault.
 
 | NFT Tier | Requirement | APY Boost | Supply |
 |:---|:---|:---|:---|
-| 🥉 Pioneer | Deposit in first 2 weeks | +10% | Unlimited |
-| 🥈 Founder | Deposit > $10K in month 1 | +25% | 500 |
-| 🥇 Genesis | Deposit > $100K in week 1 | +50% | 50 |
+| Pioneer | Deposit in first 2 weeks | +10% | Unlimited |
+| Founder | Deposit > $10K in month 1 | +25% | 500 |
+| Genesis | Deposit > $100K in week 1 | +50% | 50 |
 
 ### Implementation
 
@@ -299,35 +273,13 @@ function openTrade(...) external {
 
 ---
 
-## 8. Implementation Roadmap
+## 8. Relation to the Roadmap
 
-### Phase 1: Core (MVP)
-- [x] ERC-4626 Vault
-- [x] Basic TradingEngine
-- [x] Oracle integration
-- [x] Liquidations
-- [ ] Basic Frontend
-
-### Phase 2: Essential Features (Q2)
-- [ ] Automatic TP/SL with Keepers
-- [ ] Referral System
-- [ ] Tiered Fees
-- [ ] Mobile-responsive UI
-
-### Phase 3: Growth (Q3)
-- [ ] Multi-collateral (ETH, wBTC)
-- [ ] NFT Boost for LPs
-- [ ] Analytics Dashboard
-- [ ] Leaderboard
-
-### Phase 4: Advanced (Q4)
-- [ ] Copy Trading Vaults
-- [ ] Account Abstraction
-- [ ] Cross-chain (via LayerZero?)
-- [ ] DAO Governance
+These ideas correspond to the Phase 13 backlog in [ROADMAP.md](./ROADMAP.md#phase-13-v2-improvements-not-implemented).
+None of them is scheduled.
 
 ---
 
 **See also:**
-- [Guide 7: Vault SSL Architecture](./07-vault-ssl.md) - Vault details
-- [Guide 8: Security](./08-security.md) - Security considerations for improvements
+- [Guide 7: Vault and Solvency](./07-vault-ssl.md)
+- [Guide 8: Security](./08-security.md)
