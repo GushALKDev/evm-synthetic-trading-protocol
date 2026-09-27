@@ -1,337 +1,308 @@
-# 🧮 Guide 2: Protocol Mathematics
+# Guide 2: Protocol Mathematics
 
-**Version:** 1.0  
-**Prerequisites:** [Guide 1: Fundamentals](./01-fundamentals.md)  
+**Prerequisites:** [Guide 1: Fundamentals](./01-fundamentals.md)
 **Next:** [Guide 3: Technical Architecture](./03-architecture.md)
 
+**Status:** Proof of concept. Not audited and not deployed.
+
+Every formula here is written as the code computes it, with the rounding direction. `floor` is Solidity
+integer division on non-negative values; `trunc` is integer division on signed values (rounds toward
+zero). Units: USDC amounts have 6 decimals, prices 18 decimals, OI 18 decimals, BPS denominator 10,000.
+
 ---
 
-## 📋 Table of Contents
+## Table of Contents
 
 1. [Vault Share Price](#1-vault-share-price)
-2. [PnL (Profit & Loss) Calculation](#2-pnl-profit--loss-calculation)
-3. [Execution Price with Dynamic Spread](#3-execution-price-with-dynamic-spread)
-4. [Liquidations](#4-liquidations)
-5. [Funding Rates](#5-funding-rates)
-6. [Adaptive OI (Dynamic Open Interest)](#6-adaptive-oi-dynamic-open-interest)
-7. [Solvency (Collateralization Ratio)](#7-solvency-collateralization-ratio)
-8. [Configurable Parameters Table](#8-configurable-parameters-table)
-
----
-
-> ⚠️ **Precision Note:** In all Solidity formulas, multiply before dividing to avoid decimal loss. Example: `(priceExit * size) / priceEntry`.
+2. [PnL and Payout](#2-pnl-and-payout)
+3. [Fees](#3-fees)
+4. [Execution Price with Dynamic Spread](#4-execution-price-with-dynamic-spread)
+5. [Liquidations](#5-liquidations)
+6. [Funding](#6-funding)
+7. [Open Interest Cap](#7-open-interest-cap)
+8. [Collateralization Ratio and Solvency Actions](#8-collateralization-ratio-and-solvency-actions)
+9. [Bonding](#9-bonding)
+10. [Parameters](#10-parameters)
 
 ---
 
 ## 1. Vault Share Price
 
-The Vault follows the **ERC-4626** standard. The exchange rate between assets (USDC) and shares (sToken) fluctuates based on trader PnL.
+The vault is a Solady `ERC4626` with `_decimalsOffset() = 12` (USDC 6 decimals, sUSDC 18 decimals).
 
-### Formula
+$$SharePrice = \frac{totalAssets}{totalSupply} \times 10^{12}$$
 
-$$SharePrice = \\frac{TotalAssets}{TotalSupply}$$
+- `totalAssets()` is the vault's USDC balance. It does not include open trader PnL, open collateral
+  (held by `TradingStorage`) or pending fees.
+- Deposit and mint follow Solady's ERC-4626 rounding (shares rounded down on `deposit`, assets rounded up
+  on `mint`, assets rounded down on `previewRedeem`), with virtual shares from the decimals offset.
 
-Where:
-- **TotalAssets:** Total USDC in the Vault.
-- **TotalSupply:** Total sToken held by LPs.
+| Event | totalAssets | totalSupply | Share price |
+|:---|:---|:---|:---|
+| Trader closes with a loss of 100 USDC | +100 | = | rises |
+| Trader closes with a profit of 100 USDC | -100 | = | falls |
+| Fees: 80% of each open and close fee | + | = | rises |
+| LP deposits | + | + | unchanged, up to rounding |
+| LP executes a withdrawal | - | - | unchanged, up to rounding |
 
-### Profit/Loss Dynamics
-
-| Event | TotalAssets | TotalSupply | SharePrice | LP Effect |
-|:---|:---|:---|:---|:---|\n| Trader loses 100 USDC | +100 | = | **↑ Rises** | ✅ Profit |
-| Trader wins 100 USDC | -100 | = | **↓ Falls** | ❌ Loss |
-| LP deposits 100 USDC | +100 | +shares | = | Neutral |
-| LP withdraws 100 USDC | -100 | -shares | = | Neutral |
+Because only realised PnL changes `totalAssets`, the share price does not move while trades are open.
 
 ---
 
-## 2. PnL (Profit & Loss) Calculation
+## 2. PnL and Payout
 
-PnL calculation considers direction (Long/Short), position size, and entry/exit prices.
+`collateral` is the stored collateral (deposit minus open fee). `size = collateral x leverage`, in USDC
+units. `openPrice` already includes the open spread; `exitPrice` includes the close spread
+(`TradingEngine._calculatePnl`).
 
-### Definitions
+**Long**
 
-| Variable | Definition | Unit |
-|:---|:---|:---|
-| $Collateral$ | Initial margin deposited | USDC |
-| $Leverage$ | Multiplier (e.g., 10x) | Number |
-| $Size$ | Position size = $Collateral \\times Leverage$ | USDC |
-| $P_{entry}$ | Entry price (oracle) | USD |
-| $P_{exit}$ | Exit price (oracle) | USD |
+$$exitValue = \left\lfloor \frac{exitPrice \times size}{openPrice} \right\rfloor, \qquad PnL = exitValue - size$$
 
-### General Formula
+**Short**
 
-$$PnL = \\frac{(P_{exit} - P_{entry}) \\times Size}{P_{entry}} \\times Direction$$
+$$exitValue = \left\lceil \frac{exitPrice \times size}{openPrice} \right\rceil, \qquad PnL = size - exitValue$$
 
-Where $Direction = +1$ for Long, $-1$ for Short.
+Both roundings make the trader's result smaller by at most 1 USDC unit, in favour of the vault.
 
-### Simplified Formulas (used in contracts)
-
-**For Long (profits if price rises):**
-$$PnL = \\frac{P_{exit} \\times Size}{P_{entry}} - Size$$
-
-**For Short (profits if price falls):**
-$$PnL = Size - \\frac{P_{exit} \\times Size}{P_{entry}}$$
-
-### Example: Long 10x on ETH
+### Example: long 10x
 
 | Step | Value |
 |:---|:---|
-| Collateral | 100 USDC |
-| Leverage | 10x |
+| Stored collateral | 100 USDC |
 | Size | 1,000 USDC |
-| $P_{entry}$ | 2,000 USD |
-| $P_{exit}$ | 2,100 USD (+5%) |
-| **PnL** | $(2100 × 1000 / 2000) - 1000 = 1050 - 1000 = $ **+50 USDC** |
+| openPrice | 2,000 |
+| exitPrice | 2,100 |
+| PnL | 2,100 x 1,000 / 2,000 - 1,000 = **+50 USDC** |
 
-### Profit Cap
+### Payout (`_calculatePayout`)
 
-Profits are capped to protect the Vault:
+With `adjPnl = PnL - fundingOwed` (section 6):
 
-$$Payout = min(Collateral + PnL, Collateral \\times MAX\\_MULTIPLIER)$$
+$$payout = \begin{cases} \min(collateral + adjPnl,\ 9 \times collateral) & adjPnl \ge 0 \\ \max(collateral - |adjPnl|,\ 0) & adjPnl < 0 \end{cases}$$
 
-Where $MAX\\_MULTIPLIER$ = 7x to 9x (configurable).
-
----
-
-## 3. Execution Price with Dynamic Spread
-
-To protect against latency arbitrage, simulate market depth, and manage risk during volatile periods, execution price incorporates a **dynamic spread** based on OI and volatility.
-
-### Spread Formula
-
-$$Spread = BaseSpread + (OI_{pair} \\times ImpactFactor) + (Volatility \\times VolatilityFactor)$$
-
-Where:
-- **BaseSpread:** Fixed minimum spread (e.g., 0.05%)
-- **$OI_{pair}$:** Current Open Interest for the pair
-- **ImpactFactor:** OI impact multiplier
-- **Volatility:** Realized asset volatility (e.g., 24h return std dev)
-- **VolatilityFactor:** Volatility impact multiplier
-
-### Volatility Calculation
-
-Volatility is calculated off-chain and updated periodically on-contract:
-
-$$Volatility = \\sigma_{24h} = \\sqrt{\\frac{1}{N}\\sum_{i=1}^{N}(r_i - \\bar{r})^2}$$
-
-Where $r_i$ are hourly logarithmic returns over the last 24h.
-
-**Typical ranges:**
-| Asset | Low Volatility | Medium Volatility | High Volatility |
-|:---|:---|:---|:---|
-| BTC | < 2% | 2-5% | > 5% |
-| ETH | < 3% | 3-7% | > 7% |
-| Altcoins | < 5% | 5-10% | > 10% |
-
-### Execution Price
-
-$$P_{execution} = P_{oracle} \\times (1 \\pm Spread)$$
-
-| Direction | Formula | Effect |
-|:---|:---|:---|
-| **Long (Open)** | $P_{oracle} \\times (1 + Spread)$ | Buy more expensive |
-| **Long (Close)** | $P_{oracle} \\times (1 - Spread)$ | Sell cheaper |
-| **Short (Open)** | $P_{oracle} \\times (1 - Spread)$ | Sell cheaper |
-| **Short (Close)** | $P_{oracle} \\times (1 + Spread)$ | Rebuy more expensive |
-
-### Example: Normal Conditions
-
-- Oracle Price: 50,000 USD
-- BaseSpread: 0.05%
-- OI Impact: 0.03%
-- Volatility Impact: 0.02% (low volatility)
-- **Total Spread:** 0.10%
-
-**Long Open:** $50,000 × 1.0010 = 50,050 USD$
-
-### Example: High Volatility
-
-- Oracle Price: 50,000 USD
-- BaseSpread: 0.05%
-- OI Impact: 0.03%
-- Volatility Impact: 0.15% (high volatility, σ = 6%)
-- **Total Spread:** 0.23%
-
-**Long Open:** $50,000 × 1.0023 = 50,115 USD$
-
-> ⚠️ **Note:** During extreme volatility events (flash crashes, news), spread can increase significantly to protect the Vault.
+`MAX_PROFIT_MULTIPLIER = 9` caps the payout, not the profit: the largest profit a trade can realise is
+8x its collateral. The close fee (section 3) is then subtracted from the payout, down to zero.
 
 ---
 
-## 4. Liquidations
+## 3. Fees
 
-The system liquidates positions before loss exceeds collateral (avoiding bad debt).
+`OPEN_FEE_BPS = CLOSE_FEE_BPS = 8` (0.08% of notional), `FEE_VAULT_SPLIT_BPS = 8000`.
 
-### Liquidation Threshold
+$$openFee = \left\lfloor \frac{depositedCollateral \times leverage \times 8}{10000} \right\rfloor$$
 
-**Default:** 90% of collateral.
+$$closeFee = \min\left(\left\lfloor \frac{storedCollateral \times leverage \times 8}{10000} \right\rfloor,\ payout\right)$$
 
-$$isLiquidatable = Loss \\geq Collateral \\times LIQUIDATION\\_THRESHOLD$$
+$$vaultShare = \left\lfloor \frac{fee \times 8000}{10000} \right\rfloor, \qquad treasuryShare = fee - vaultShare$$
 
-### Liquidation Price
+- The open fee is charged on the deposited collateral, the close fee on the stored (post-fee) collateral.
+- An open reverts with `FeeExceedsCollateral` if `openFee >= depositedCollateral`, which happens from
+  1,250x leverage.
+- At 100x the open fee is 8% of the deposit and the close fee about 7.4% of it.
+- Liquidations charge no close fee. `executeLimit` charges the close fee and also takes
+  `floor(storedCollateral x leverage x 10 / 10000)` (0.1% of notional) from the payout for the caller,
+  capped at the payout.
 
-**For Long:**
-$$P_{liq} = P_{entry} \\times \\left(1 - \\frac{LIQUIDATION\\_THRESHOLD}{Leverage}\\right)$$
+---
 
-**For Short:**
-$$P_{liq} = P_{entry} \\times \\left(1 + \\frac{LIQUIDATION\\_THRESHOLD}{Leverage}\\right)$$
+## 4. Execution Price with Dynamic Spread
 
-### Example: Long 10x
+### Spread (`SpreadManager.getSpreadBps`)
 
-| Variable | Value |
+$$spreadBps = \min\left(baseSpreadBps + \left\lfloor \frac{OI_{pair} \times impactFactor}{10^{30}} \right\rfloor + \left\lfloor \frac{volatility_{pair} \times volFactor}{10^{18}} \right\rfloor,\ maxSpreadBps\right)$$
+
+- `OI_pair` is the pair's long + short OI (18 decimals) read before the trade changes it.
+- `volatility_pair` (18 decimals, 3% = 3e16) is written by the keeper with `updateVolatility`. The first
+  value for a pair is accepted as is; later values may change by at most `maxVolatilityChangeBps` of the
+  current value (a relative bound: 5000 means the new value must be within 50% of the old one).
+- `maxSpreadBps` must be below 10,000 and at least `baseSpreadBps`.
+
+How the volatility value is computed is left to the keeper; the contract only stores it.
+
+### Execution price (`TradingEngine._applySpread`)
+
+| Direction | Formula |
 |:---|:---|
-| Collateral | 100 USDC |
-| Leverage | 10x |
-| $P_{entry}$ | 50,000 USD |
-| Threshold | 90% |
-| **$P_{liq}$** | $50,000 × (1 - 0.9/10) = 50,000 × 0.91 = $ **45,500 USD** |
+| Long open, short close | `floor(oraclePrice x (10000 + spreadBps) / 10000)` |
+| Long close, short open | `floor(oraclePrice x (10000 - spreadBps) / 10000)` |
 
-### Remaining Collateral Distribution
+Flooring the upward case rounds the price down by less than one unit of its 18 decimals, which is
+negligible.
 
-When liquidated (10% remaining = 10 USDC in example):
+### Examples with the `script/Deploy.s.sol` parameters
 
-| Recipient | Percentage | Example |
-|:---|:---|:---|
-| Liquidator Bot | 10% of remaining | 1 USDC |
-| Vault (LPs) | 90% of remaining | 9 USDC |
+`baseSpreadBps = 5`, `impactFactor = 3e5`, `volFactor = 100`, `maxSpreadBps = 100`.
 
-### Liquidation Behavior (Phases)
-
-**Phase 1 (Current):**
-1. Bot detects at-risk position.
-2. Bot calls `liquidate(tradeId)`.
-3. Oracle returns current price.
-4. If current price is in liquidation zone → Liquidated.
-5. If current price is NOT in zone → Transaction fails, trade stays open.
-
-**Phase 2 (Lookbacks):**
-1. Bot detects price *entered* liquidation zone.
-2. Bot calls `liquidate(tradeId)` with historical price proof.
-3. Even if current price is in safe zone, position is liquidated because price *touched* threshold.
-
-> This behavior also applies to **limit orders** (TP/SL).
+- OI of 10M USD (`1e25`): OI term `1e25 x 3e5 / 1e30 = 3` BPS.
+- Volatility 3% (`3e16`): volatility term `3e16 x 100 / 1e18 = 3` BPS.
+- Total: 5 + 3 + 3 = 11 BPS. Long open at an oracle price of 50,000: `50,000 x 1.0011 = 50,055`.
 
 ---
 
-## 5. Funding Rates
+## 5. Liquidations
 
-Funding rates balance directional risk between Longs and Shorts.
+`LIQUIDATION_THRESHOLD_BPS = 9000`, `LIQUIDATOR_REWARD_BPS = 1000` (`TradingEngine.liquidate`).
 
-### Funding Rate Calculation
+1. Conservative price from the oracle's confidence band: long `price + conf`, short `max(price - conf, 0)`.
+2. Close-direction spread applied to that price.
+3. `adjPnl = PnL - fundingOwed` with the formulas of sections 2 and 6.
+4. Liquidatable when
 
-$$FundingRate = (OI_{long} - OI_{short}) \\times FundingFactor$$
+$$loss = \max(-adjPnl, 0) \ge \left\lfloor \frac{collateral \times 9000}{10000} \right\rfloor$$
 
-| Condition | Who Pays | Who Receives |
-|:---|:---|:---|
-| $OI_{long} > OI_{short}$ | Longs | Shorts (+ Vault for imbalance) |
-| $OI_{short} > OI_{long}$ | Shorts | Longs (+ Vault for imbalance) |
+5. Distribution:
 
-### Cumulative Funding Index
+$$remaining = \max(collateral - loss, 0), \qquad reward = \left\lfloor \frac{remaining \times 1000}{10000} \right\rfloor$$
 
-To avoid iterating over all positions each block, a global index is used:
+The caller receives `reward`; the vault receives `collateral - reward`. The reward is at most 1% of the
+collateral and is 0 once the loss reaches the full collateral.
 
-$$cumulativeFundingIndex_{new} = cumulativeFundingIndex_{old} + FundingRate \\times \\Delta time$$
+### Approximate liquidation price
 
-**Funding owed per position:**
-$$FundingOwed = Size \\times (currentIndex - positionEntryIndex)$$
+Ignoring spread, fees, funding and confidence:
 
----
+$$P_{liq,long} \approx P_{open} \times \left(1 - \frac{0.9}{L}\right), \qquad P_{liq,short} \approx P_{open} \times \left(1 + \frac{0.9}{L}\right)$$
 
-## 6. Dynamic Spread via SpreadManager
+Example: long 10x from 50,000 gives about 45,500. In the code the close spread counts toward the loss, so
+the position becomes liquidatable before this price. The contract does not compute or store a
+liquidation price.
 
-The protocol uses a standalone `SpreadManager` contract to compute execution spreads based on **OI** and **per-pair volatility**. This is the primary risk mechanism for protecting the Vault — higher risk conditions automatically widen spreads, making new positions more expensive.
+### Opening guard (`_validateNotPreLiquidatable`)
 
-### Implementation
+An open reverts if the loss between the spread-adjusted open price and the raw oracle price already
+reaches 90% of the deposited collateral. The guard uses the deposited collateral (before the open fee)
+and does not include the close spread that `liquidate` applies, so with a large spread and high leverage a
+position can pass the guard and be liquidatable in the same block.
 
-The spread formula from §3 is implemented in `SpreadManager.getSpreadBps(pairIndex, currentOI)`:
+### Example distribution
 
-```solidity
-spreadBps = baseSpreadBps + (currentOI * impactFactor / OI_PRECISION) + (pairVolatility * volFactor / VOL_PRECISION);
-if (spreadBps > maxSpreadBps) spreadBps = maxSpreadBps;
-```
-
-Where `OI_PRECISION = 1e30` and `VOL_PRECISION = 1e18`.
-
-### BPS Calibration
-
-| Parameter | Default | Example Effect |
-|:---|:---|:---|
-| `baseSpreadBps` | 5 (0.05%) | Fixed floor |
-| `impactFactor` | 3e5 | 3 BPS at 10M OI (`1e25 * 3e5 / 1e30 = 3`) |
-| `volFactor` | 100 | 3 BPS at 3% vol (`3e16 * 100 / 1e18 = 3`) |
-| `maxSpreadBps` | 100 (1%) | Hard ceiling |
-
-### Volatility Update
-
-- **Frequency:** Every hour (or every X blocks)
-- **Source:** Calculated off-chain (24h realized σ), published by authorized keeper
-- **Validation:** Maximum change per update bounded by ±`maxVolatilityChangeBps` (default: 200 = 2%) to prevent manipulation. First update for a pair skips bounds check.
-
-### Behavior During High Volatility
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    HIGH VOLATILITY (σ > 5%)                          │
-├─────────────────────────────────────────────────────────────────────┤
-│  • Spread: 0.05% + 0.03%(OI) + 0.15%(Vol) = 0.23%                   │
-│  • New positions: More expensive due to wider spread                │
-│  • Existing positions: Unaffected (entered at their spread)        │
-│  • When volatility returns to normal: spread decreases gradually   │
-└─────────────────────────────────────────────────────────────────────┘
-```
+Stored collateral 100 USDC, loss 90 USDC: remaining 10 USDC, reward 1 USDC to the caller, 99 USDC to the
+vault.
 
 ---
 
-## 7. Solvency (Collateralization Ratio)
+## 6. Funding
 
-### Definition
+`FundingLib.FUNDING_FACTOR = 1e10`. The index is updated before any OI change on the pair
+(`TradingEngine._updateFundingIndex`), using the OI that was in place since the last update.
 
-$$CR = \\frac{TotalUSDC_{Vault}}{TotalLPDeposits}$$
+$$\Delta index = trunc\left(\frac{(OI_{long} - OI_{short}) \times 10^{10} \times \Delta t}{10^{18}}\right)$$
 
-### Thresholds
+$$raw = trunc\left(\frac{size_{wad} \times (index_{now} - index_{entry})}{10^{18}}\right), \qquad fundingOwed = \begin{cases} trunc(raw / 10^{12}) & long \\ trunc(-raw / 10^{12}) & short \end{cases}$$
+
+A positive `fundingOwed` is paid by the trader (subtracted from PnL); a negative one is received.
+
+### Magnitude
+
+The index moves by `1e10` per second per USD of imbalance, so a position pays or receives `1e-8` of its
+size per second, or `3.6e-5` per hour, for each USD of imbalance. The rate is not normalised by open
+interest or vault size:
+
+| Imbalance (long OI - short OI) | Funding per hour, as a share of position size |
+|:---|:---|
+| 1,000 USD | 3.6% |
+| 10,000 USD | 36% |
+| 100,000 USD | 360% |
+
+With realistic imbalances, positions on the heavier side reach the liquidation threshold within minutes,
+and positions on the lighter side receive funding up to the 9x payout cap. This is current behaviour and
+is flagged for review.
+
+### Who pays
+
+Funding is settled with the vault, not between traders. Longs and shorts owe opposite amounts per unit of
+size, so when OI is balanced the index does not move. When OI is unbalanced, the heavier side pays on a
+larger size than the lighter side receives on, and the vault keeps the difference, except when a
+paying position's loss is capped at its collateral.
+
+### Rounding
+
+`trunc` rounds toward zero in both directions, so a paying trader pays up to 1 USDC unit less and a
+receiving trader receives up to 1 unit less.
+
+---
+
+## 7. Open Interest Cap
+
+`TradingStorage.increaseOpenInterest` reverts when `OI_long + OI_short > maxOI` for the pair.
+`positionSize = storedCollateral x leverage x 1e12` (18 decimals). `maxOI` is a static value set by the
+owner in `addPair` / `updatePair`. There is no global cap across pairs and no link to volatility.
+
+---
+
+## 8. Collateralization Ratio and Solvency Actions
+
+`Vault.collateralizationRatio()`:
+
+$$CR = \left\lfloor \frac{totalAssets \times 10^{12} \times 10^{18}}{totalSupply} \right\rfloor \quad (\text{type(uint256).max if } totalSupply = 0)$$
+
+This is the share price relative to 1.0 USDC per share (1e18 = 100%), the price at which the first shares
+are minted. It does not include open trader PnL, and it does not depend on when each LP deposited.
+
+`Vault.collateralizationDeficit()`:
+
+$$deficit = \max\left(\left\lfloor \frac{totalSupply}{10^{12}} \right\rfloor - totalAssets,\ 0\right)$$
+
+`SolvencyManager.checkAndAct()`:
 
 | State | Condition | Action |
 |:---|:---|:---|
-| **Healthy** | CR ≥ 110% | Normal operation |
-| **Warning** | 100% ≤ CR < 110% | No action, monitoring |
-| **Deficit** | CR < 100% | Activate solvency layers |
-| **Surplus** | CR > 110% | Use surplus for $SYNTH buyback |
+| Healthy | CR >= 110% | Emit `Healthy` |
+| Warning | 100% <= CR < 110% | Emit `Warning` |
+| Deficit | CR < 100% | Inject `min(reserve, deficit)` from the AssistantFund |
+| Critical | CR < 95% and deficit not covered and no active round | Also open a bonding round for the shortfall |
 
-### Solvency Actions
-
-**Deficit (CR < 100%):**
-1. Inject from Assistant Fund (if available).
-2. If insufficient → Activate $SYNTH bonding.
-
-**Surplus (CR > 110%):**
-1. Take surplus USDC (above 110%).
-2. Buy $SYNTH on open market.
-3. Burn $SYNTH (deflation).
+No action is taken above 110% (no buyback).
 
 ---
 
-## 8. Configurable Parameters Table
+## 9. Bonding
 
-| Parameter | Suggested Value | Contract | Description |
-|:---|:---|:---|:---|
-| `MAX_LEVERAGE` | 100x | TradingEngine | Maximum allowed leverage |
-| `LIQUIDATION_THRESHOLD` | 90% | TradingEngine | % loss for liquidation |
-| `MAX_MULTIPLIER` | 7x-9x | Market | Profit cap (max payout) |
-| `BASE_SPREAD` | 0.05% (5 BPS) | SpreadManager | Fixed minimum spread |
-| `OI_IMPACT_FACTOR` | 3e5 | SpreadManager | OI impact multiplier (3 BPS at 10M OI) |
-| `VOLATILITY_FACTOR` | 100 | SpreadManager | Volatility impact multiplier (3 BPS at 3% vol) |
-| `MAX_SPREAD` | 1% (100 BPS) | SpreadManager | Maximum spread cap |
-| `FUNDING_FACTOR` | 0.0001% | FundingLib | Funding rate multiplier |
-| `SAFE_CR_THRESHOLD` | 110% | SolvencyManager | Ratio to activate buyback |
-| `DEFICIT_CR_THRESHOLD` | 100% | SolvencyManager | Ratio to activate solvency |
-| `FEE_SPLIT_ASSISTANT` | 20% | FeeManager | % fees → Assistant Fund |
-| `LIQUIDATOR_REWARD` | 10% | TradingEngine | % of remaining for liquidator |
-| `VOLATILITY_UPDATE_FREQ` | 1 hour | Keeper | σ update frequency |
-| `MAX_VOLATILITY_CHANGE` | ±2% (200 BPS) | SpreadManager | Maximum volatility change per keeper update |
+`BondDepository`:
+
+$$effectivePrice = \left\lfloor \frac{referencePrice \times (10000 - discountBps)}{10000} \right\rfloor, \qquad synthOut = \left\lfloor \frac{usdcIn \times 10^{18}}{effectivePrice} \right\rfloor$$
+
+- `referencePrice` is USDC (6 decimals) per 1 SYNTH, set by the owner (default 2 USDC).
+- `discountBps <= 1000`; `usdcIn` is clamped to the round's remaining cap.
+- Vesting is linear: `vested = floor(totalSynth x elapsed / duration)` until the end, then `totalSynth`.
+
+Example: `referencePrice = 1e6` (1 USDC), discount 10%: `effectivePrice = 900,000`, and 1,000 USDC buys
+`1,000e6 x 1e18 / 900,000 = 1,111.11` SYNTH.
+
+---
+
+## 10. Parameters
+
+| Parameter | Value | Where it is set |
+|:---|:---|:---|
+| `MAX_PROFIT_MULTIPLIER` | 9 (payout cap) | `TradingEngine` constant |
+| `MIN_COLLATERAL` | 10 USDC | `TradingEngine` constant |
+| `OPEN_FEE_BPS`, `CLOSE_FEE_BPS` | 8 (0.08% of notional) | `TradingEngine` constants |
+| `FEE_VAULT_SPLIT_BPS` | 8000 (80% vault, 20% treasury) | `TradingEngine` constant |
+| `LIQUIDATION_THRESHOLD_BPS` | 9000 | `TradingEngine` constant |
+| `LIQUIDATOR_REWARD_BPS` | 1000 (of remaining collateral) | `TradingEngine` constant |
+| `EXEC_REWARD_BPS` | 10 (0.1% of notional) | `TradingEngine` constant |
+| `maxLeverage` | per pair, `uint16` | `TradingStorage.addPair` (owner); tests use 100 |
+| `maxOI` | per pair | `TradingStorage.addPair` (owner) |
+| `FUNDING_FACTOR` | 1e10 | `FundingLib` constant |
+| `baseSpreadBps` | 5 | `script/Deploy.s.sol` |
+| `impactFactor` | 3e5 | `script/Deploy.s.sol` |
+| `volFactor` | 100 | `script/Deploy.s.sol` |
+| `maxSpreadBps` | 100 | `script/Deploy.s.sol` |
+| `maxVolatilityChangeBps` | 5000 (relative) | `script/Deploy.s.sol` |
+| `MAX_STALENESS` | 30 s | `PythChainlinkOracle` constant |
+| `MAX_CONFIDENCE_BPS` | 200 | `PythChainlinkOracle` constant |
+| `MAX_DEVIATION_BPS` | 300 | `PythChainlinkOracle` constant |
+| `SAFE_CR`, `DEFICIT_CR`, `CRITICAL_CR` | 110%, 100%, 95% | `SolvencyManager` constants |
+| `EPOCH_LENGTH`, `WITHDRAWAL_DELAY_EPOCHS` | 1 day, 3 | `Vault` constants |
+| `targetCap` | 1,000,000 USDC | `script/Deploy.s.sol` |
+| `discountBps` | 500 | `script/Deploy.s.sol` (max 1000) |
+| `vestingPeriod` | 48 h | `BondDepository` constructor (max 7 days) |
+| `referencePrice` | 2 USDC | `BondDepository` constructor |
 
 ---
 
 **See also:**
-- [Guide 3: Technical Architecture](./03-architecture.md) - How these formulas are implemented
-- [Guide 5: Solidity Implementation](./05-implementation.md) - Concrete code
+- [Guide 3: Technical Architecture](./03-architecture.md)
+- [Guide 5: Implementation](./05-implementation.md)

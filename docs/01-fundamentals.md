@@ -1,81 +1,83 @@
-# 📘 Guide 1: Fundamentals of the Synthetic Trading Protocol
+# Guide 1: Fundamentals of the Synthetic Trading Protocol
 
-**Version:** 1.0
 **Next:** [Guide 2: Protocol Mathematics](./02-mathematics.md)
+
+**Status:** Proof of concept. Not audited and not deployed.
 
 ---
 
-## 📋 Table of Contents
+## Table of Contents
 
 1. [Introduction](#1-introduction)
-2. [System Philosophy: Player vs House](#2-system-philosophy-player-vs-house)
+2. [Counterparty Model: Traders vs the Vault](#2-counterparty-model-traders-vs-the-vault)
 3. [Key Concepts](#3-key-concepts)
-4. [Hybrid Solvency Mechanism](#4-hybrid-solvency-mechanism)
+4. [Solvency Layers](#4-solvency-layers)
 5. [Trade Lifecycle](#5-trade-lifecycle)
 
 ---
 
 ## 1. Introduction
 
-The **Synthetic Trading Protocol** is a decentralized platform for trading synthetic futures. Unlike traditional exchanges (CEX) or AMM-based DEXs (like Uniswap), this protocol uses a **Single-Sided Liquidity** model where traders operate directly against a unified **Vault**.
+The protocol lets traders take leveraged long or short positions on assets priced by an oracle,
+without holding the asset. All trades are made against one USDC vault funded by liquidity providers
+(LPs), instead of against other traders or an AMM pool.
 
-### What are we building?
+### What can be traded
 
-A platform where users can speculate on price movements of:
-- **Crypto:** BTC, ETH, SOL, etc.
-- **Forex:** EUR/USD, GBP/USD, etc.
-- **Commodities:** Gold, Oil, etc.
+Any pair the owner configures with a Pyth feed ID and a Chainlink feed (`PythChainlinkOracle.setPairFeed`
+and `TradingStorage.addPair`). The code has no per-asset-class logic: there are no market hours, weekend
+closures or asset-class parameters, so forex or commodity pairs would be treated the same way as
+crypto pairs. The tests use BTC/USD and ETH/USD.
 
-**With high leverage and without needing to own the underlying asset.**
+### How it differs from other venues
 
-### Why is it different?
-
-| Feature | CEX (Binance) | AMM (Uniswap) | Synthetic Trading Protocol |
+| Feature | Order book exchange | AMM | This protocol |
 |:---|:---|:---|:---|
-| Counterparty | Other traders | Dual pool (50/50) | Single USDC Vault |
-| Fragmentation | Per pair | Per pair | **Zero** (one pool for all) |
-| Price Impact | Order book depth | AMM curve | **Zero** (oracle price) |
-| Real Asset | Yes | Yes | **No** (synthetic) |
+| Counterparty | Other traders | Liquidity pool per pair | One USDC vault for all pairs |
+| Liquidity | Per pair | Per pair | Shared by all pairs |
+| Execution price | Order book | AMM curve | Oracle price plus a spread that grows with open interest and volatility |
+| Asset delivered | Yes | Yes | No (synthetic exposure) |
 
 ---
 
-## 2. System Philosophy: Player vs House
+## 2. Counterparty Model: Traders vs the Vault
 
-### 2.1 The Counterparty Model
-
-In this protocol, there's no "trader A buying from trader B". It's a **PvP (Player vs Pool)** model:
+### 2.1 Who pays whom
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                                                             │
-│   TRADER wins ──────► Extracts USDC from Vault             │
+│   Trader closes with profit ──► profit is paid from Vault   │
 │                                                             │
-│   TRADER loses ────► Collateral stays in Vault             │
+│   Trader closes with loss ────► lost collateral moves from  │
+│                                  TradingStorage to Vault    │
 │                                                             │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
-│   LPs (Liquidity Providers) = "THE HOUSE"                  │
-│   • Deposit USDC into the Vault                            │
-│   • Assume risk of trader profits                          │
-│   • Receive trader losses + fees                           │
+│   LPs                                                       │
+│   • Deposit USDC into the Vault, receive sUSDC shares       │
+│   • Carry the PnL of all open trades                        │
+│   • Receive trader losses and 80% of trading fees           │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 2.2 Extreme Capital Efficiency
+LPs are the counterparty to trader PnL. When traders are net profitable, the vault share price falls
+and LPs lose part of their deposit. The vault holds only USDC, so there is no impermanent loss in the
+AMM sense, but LP returns are the mirror image of trader returns plus fees.
 
-- **Unified Pool:** Instead of having an ETH/USDC pool, a BTC/USDC pool, etc., there's **a single USDC pool**.
-- This pool backs **all** trading pairs simultaneously.
-- **Result:** Maximum liquidity depth and zero fragmentation.
+### 2.2 One pool for all pairs
 
-### 2.3 "Zero Price Impact" Execution
+A single USDC vault backs every pair. This avoids splitting liquidity per pair, and it also means a
+large loss on one pair reduces the liquidity available to pay winners on every other pair.
 
-Since assets are synthetic, a $1M buy order on BTC **doesn't move the real BTC price** in the spot market.
+### 2.3 Oracle execution
 
-- Execution price is determined by the **Oracle System (Pyth Network)**, with sub-second price updates from 128+ publishers.
-- To simulate real conditions and protect the protocol, a **Dynamic Spread** is applied based on Open Interest and volatility.
+A large order does not move the reference price, because the asset is not traded. The execution price is
+the Pyth price submitted with the transaction, adjusted by a spread computed by `SpreadManager` from
+the pair's open interest and a keeper-supplied volatility value.
 
-> **See:** [Guide 2: Mathematics](./02-mathematics.md) for Spread formulas.
+> **See:** [Guide 2: Mathematics](./02-mathematics.md) for the spread formula.
 
 ---
 
@@ -83,53 +85,49 @@ Since assets are synthetic, a $1M buy order on BTC **doesn't move the real BTC p
 
 | Concept | Definition |
 |:---|:---|
-| **Synthetic** | Financial instrument that replicates an asset's price without requiring physical ownership. |
-| **Open Interest (OI)** | Total value (in USD) of all open positions. The protocol's "live risk". |
-| **Collateral** | Initial margin deposited by the user (e.g., 100 USDC). |
-| **Leverage** | Multiplier on collateral. `Size = Collateral × Leverage`. |
-| **ERC-4626** | "Tokenized Vault" standard. LPs deposit USDC and receive `sToken` (shares) representing their pool portion. |
-| **Long** | Position that profits if price **rises**. |
-| **Short** | Position that profits if price **falls**. |
-| **Profit Cap** | Maximum profit per trade (7x-9x of collateral). Protects the Vault. |
-| **Pyth Network** | Pull-based oracle with 128+ first-party publishers. Provides sub-second price updates verified via Wormhole signatures. |
+| **Synthetic position** | Exposure to an asset's price without owning the asset. |
+| **Open interest (OI)** | Sum of position sizes (collateral x leverage) on a pair, tracked separately for longs and shorts. |
+| **Collateral** | USDC deposited by the trader (minimum 10 USDC, `TradingEngine.MIN_COLLATERAL`). The stored collateral is the deposit minus the open fee. |
+| **Leverage** | `Size = Collateral x Leverage`. The maximum is set per pair by the owner. |
+| **ERC-4626** | Tokenized vault standard. LPs deposit USDC and receive sUSDC shares. |
+| **Long / Short** | A long profits when the price rises, a short when it falls. |
+| **Payout cap** | A closing trader receives at most 9x the stored collateral (`MAX_PROFIT_MULTIPLIER = 9`), so the maximum profit is 8x collateral. |
+| **Pyth** | Pull oracle: the caller submits a signed price update, which the Pyth contract verifies on-chain. |
 
 ---
 
-## 4. Hybrid Solvency Mechanism
+## 4. Solvency Layers
 
-One of the biggest risks in "PvP" models is traders winning more money than exists in the Vault (**Black Swan Event**).
-
-The Synthetic Trading Protocol mitigates this with a **three-layer defense system**:
+The main risk of a single-counterparty vault is that traders win more than the vault holds. The design
+describes three layers:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │ LAYER 1: PREVENTIVE                                                 │
-│ ├── Profit Caps: Profits limited to 7x-9x of collateral            │
-│ ├── Dynamic Spread: Higher spread with high OI/volatility          │
-│ └── OI Caps: Maximum exposure limits per pair and globally         │
+│ ├── Payout cap: at most 9x collateral per trade                     │
+│ ├── Dynamic spread: grows with OI and keeper-set volatility         │
+│ └── OI cap: static per-pair cap on long + short OI, set by owner    │
 ├─────────────────────────────────────────────────────────────────────┤
-│ LAYER 2: REACTIVE (Assistant Fund)                                  │
-│ ├── USDC capital reserve                                            │
-│ ├── Funded by 20% of trading fees                                  │
-│ └── Injects capital into Vault if deficit (no $SYNTH dilution)     │
+│ LAYER 2: RESERVE (AssistantFund)                                    │
+│ ├── USDC reserve                                                    │
+│ ├── Receives the 20% fee share when it is set as the treasury       │
+│ └── Injected into the Vault when CR < 100%                          │
 ├─────────────────────────────────────────────────────────────────────┤
-│ LAYER 3: LAST RESORT (Bonding)                                      │
-│ ├── Issue $SYNTH bonds at discount                                 │
-│ ├── Arbitrageurs buy $SYNTH → Protocol receives USDC               │
-│ └── USDC recapitalizes the Vault                                    │
+│ LAYER 3: BONDING (BondDepository)                                   │
+│ ├── Opened when CR < 95% and the reserve did not cover the deficit  │
+│ ├── Anyone buys $SYNTH at a discount, vested linearly               │
+│ └── The USDC goes to the Vault                                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-> **Full technical detail:** [GUIDE 7: Vault SSL Architecture](./07-vault-ssl.md)
+CR here is `Vault.collateralizationRatio()`: the vault share price relative to 1.0 USDC per share. It does
+not include the unrealised PnL of open trades.
 
-### Bankruptcy Prevention
+Not implemented: open interest caps that adapt to volatility, a global OI cap across pairs, and a
+surplus buyback of $SYNTH. Layer 3 depends on buyers valuing $SYNTH, whose reference price is set by the
+owner.
 
-The scenario where both Assistant Fund and Bonding fail simultaneously is **bankruptcy**. To prevent it:
-
-1. **Aggressive OI control:** Especially in early phases, Open Interest limits are very conservative.
-2. **Strong dynamic spreads:** Higher OI and volatility = higher spread, discouraging new positions.
-3. **Strict profit caps:** Profits limited to 7x-9x, reducing maximum possible payout.
-4. **Volatility-based Adaptive OI:** Higher asset volatility = lower maximum OI allowed and higher spread. This protects the Vault during periods of high uncertainty.
+> **More detail:** [Guide 7: Vault and Solvency](./07-vault-ssl.md)
 
 ---
 
@@ -137,39 +135,45 @@ The scenario where both Assistant Fund and Bonding fail simultaneously is **bank
 
 ### 5.1 Opening
 
-1. User deposits **collateral** (e.g., 100 USDC).
-2. Chooses **pair**, **leverage** (e.g., 10x), and **direction** (Long/Short).
-3. The **oracle** provides entry price (Pyth validated price, verified on-chain).
-4. Collateral enters **TradingStorage** (custodies trader collateral separately from Vault).
-5. Position is registered in **TradingStorage**.
+1. The trader approves USDC and calls `openTrade` with pair, direction, collateral, leverage, expected
+   price, slippage tolerance, optional TP/SL and Pyth update data (paying the Pyth fee in `msg.value`).
+2. The oracle returns the validated Pyth price. The engine applies the open-direction spread, checks
+   slippage, and rejects the trade if the open spread alone would already reach the liquidation
+   threshold.
+3. The collateral moves to `TradingStorage`. The open fee (0.08% of notional) is taken from it and split
+   80% to the vault and 20% to the treasury.
+4. The trade is stored with the collateral net of the fee, and pair OI increases by the position size.
+   The call reverts if long + short OI would exceed the pair cap.
 
-### 5.2 Maintenance
+### 5.2 While open
 
-- User pays **Funding Fees** if position remains open (proportional to Long/Short imbalance).
-- Position can be closed manually or automatically by:
-  - **Take Profit (TP):** Target price reached.
-  - **Stop Loss (SL):** Maximum loss reached.
-  - **Liquidation:** Loss >= 90% of collateral.
+- Funding accrues according to the long/short OI imbalance of the pair and is settled on close.
+- The position can end by a manual close, by `executeLimit` when the TP or SL price is crossed (anyone can
+  call it), or by `liquidate` when the funding-adjusted loss reaches 90% of collateral (anyone can call it).
 
-### 5.3 Closing with Profit
+### 5.3 Closing with profit
 
-1. User calls `closeTrade()` or a Keeper executes TP.
-2. The **oracle** determines exit price (Pyth validated price).
-3. Vault returns: `Collateral + Profit` (max 7x-9x collateral).
+1. The trader calls `closeTrade`, or anyone calls `executeLimit` once the TP is crossed.
+2. The exit price is the Pyth price with the close-direction spread.
+3. The payout is collateral plus PnL minus funding, capped at 9x collateral, minus the close fee (0.08% of
+   notional). `TradingStorage` returns the collateral part and the vault pays the rest through
+   `sendPayout`. With `executeLimit`, 0.1% of notional is taken from the payout for the caller.
+4. If the vault holds less USDC than the profit owed, the call reverts.
 
 ### 5.4 Liquidation
 
-1. Price moves against user until loss >= 90% of collateral.
-2. A **liquidator bot** detects the at-risk position.
-3. Bot calls `liquidate(tradeId)`.
-4. Oracle validates price:
-   - **If confirms liquidation:** Position closes, Vault retains remaining collateral, bot receives reward.
-   - **If doesn't confirm:** Transaction fails, trade continues open in "non-liquidatable" zone.
+1. The loss, including funding, reaches 90% of the stored collateral.
+2. A bot calls `liquidate(tradeId, priceUpdate)`.
+3. The loss is computed at the trader-favourable edge of the Pyth confidence band (price + conf for longs,
+   price - conf for shorts), then with the close-direction spread.
+4. If the position qualifies, 10% of the collateral left after the loss goes to the caller and the rest
+   of the collateral goes to the vault. No close fee is charged. Otherwise the call reverts.
 
-> **Phase 2 (Lookbacks):** Historical checks will be added. If price *entered* liquidation zone at any point, position will be liquidated even if current price has returned to safe zone.
+The liquidation check uses only the submitted price. Checking whether the price touched the liquidation
+level earlier ("lookbacks") is not implemented.
 
 ---
 
 **See also:**
-- [Guide 2: Mathematics](./02-mathematics.md) - PnL, Spread, Funding formulas
-- [Guide 7: Vault SSL](./07-vault-ssl.md) - Detailed solvency architecture
+- [Guide 2: Mathematics](./02-mathematics.md) for PnL, spread and funding formulas
+- [Guide 7: Vault and Solvency](./07-vault-ssl.md) for the solvency layers
