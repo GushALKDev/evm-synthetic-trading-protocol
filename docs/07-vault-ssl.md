@@ -1,435 +1,314 @@
-# 📘 Guide 7: Single-Sided Liquidity (SSL) Technical Architecture
+# Guide 7: Vault and Solvency Architecture
 
-**Version:** 1.0
-**Prerequisites:** [Guide 1: Fundamental Concepts](./01-fundamentals.md)
+**Prerequisites:** [Guide 1: Fundamentals](./01-fundamentals.md)
 **Next:** [Guide 8: Security](./08-security.md)
+
+**Status:** Proof of concept. Not audited and not deployed.
 
 ---
 
-## 📋 Table of Contents
+## Table of Contents
 
-1. [Core Component: The ERC-4626 Vault](#1-core-component-the-erc-4626-vault)
-2. [PnL and Accounting Mechanics](#2-pnl-and-accounting-mechanics)
-3. [Risk Management and Solvency System](#3-risk-management-and-solvency-system)
-4. [Dynamic Defense Logic](#4-dynamic-defense-logic)
-5. [Initial Risk Mitigation](#5-initial-risk-mitigation)
+1. [The ERC-4626 Vault](#1-the-erc-4626-vault)
+2. [PnL and Accounting](#2-pnl-and-accounting)
+3. [Solvency Layers](#3-solvency-layers)
+4. [SolvencyManager Logic](#4-solvencymanager-logic)
+5. [Dynamic Spread](#5-dynamic-spread)
 6. [Component Summary](#6-component-summary)
 
 ---
 
-## 1. Core Component: The ERC-4626 Vault
+## 1. The ERC-4626 Vault
 
-The architecture is based on a standardized Vault that acts as the **single counterparty** for all trades.
+`Vault.sol` is the single counterparty for all trades.
 
-### Configuration
+| Parameter | Value |
+|:---|:---|
+| Standard | ERC-4626 (Solady) |
+| Asset | USDC (6 decimals) |
+| Share token | sUSDC, "Synthetic Liquidity Token", 18 decimals |
+| Decimals offset | 12 (virtual shares, so the first deposit mints 1e12 share units per USDC unit) |
 
-| Parameter | Value | Description |
-|:---|:---|:---|
-| **Standard** | ERC-4626 | Tokenized Vault Standard |
-| **Asset** | USDC | Base stablecoin |
-| **Share Token** | sToken | Synthetic Vault Token |
-| **Decimals** | 18 | For sToken |
+### Deposit
 
-### Deposit Mechanics
+`deposit(assets, receiver)` and `mint(shares, receiver)` follow ERC-4626 and are blocked while the vault is
+paused. There is no lock on deposits.
 
 ```mermaid
 sequenceDiagram
-    participant LP as Liquidity Provider
+    participant LP
     participant Vault as Vault.sol
-    participant sToken as sToken
-
     LP->>Vault: deposit(1000 USDC, receiver)
-    Vault->>Vault: shares = (assets × totalSupply) / totalAssets
-    Note over Vault: If totalAssets=10000, totalSupply=10000<br/>shares = 1000 × 10000 / 10000 = 1000
-    Vault->>sToken: mint(1000 sToken, receiver)
-    sToken-->>LP: Receives 1000 sToken
+    Note over Vault: shares = previewDeposit(1000 USDC), rounded down
+    Vault-->>LP: sUSDC minted to receiver
 ```
 
-### Withdrawal Mechanics
+### Withdrawal
+
+`withdraw` and `redeem` always revert with `UseRequestWithdrawalFlow`. LPs use a two-step flow:
+
+```solidity
+function requestWithdrawal(uint256 shares) external nonReentrant whenNotPaused {
+    uint256 balance = balanceOf(msg.sender);
+    if (balance < shares) revert InsufficientShares(shares, balance);
+    uint256 epoch = currentEpoch();
+    uint256 unlockEpoch = epoch + WITHDRAWAL_DELAY_EPOCHS;
+    // Overwrites any existing request (no need to cancel first)
+    withdrawalRequests[msg.sender] = WithdrawalRequest({shares: shares, requestEpoch: epoch});
+    emit WithdrawalRequested(msg.sender, shares, epoch, unlockEpoch);
+}
+
+function executeWithdrawal() external nonReentrant {
+    WithdrawalRequest storage req = withdrawalRequests[msg.sender];
+    if (req.shares == 0) revert NoWithdrawalRequest();
+    uint256 unlockEpoch = req.requestEpoch + WITHDRAWAL_DELAY_EPOCHS;
+    if (currentEpoch() < unlockEpoch) revert WithdrawalLocked(unlockEpoch);
+    uint256 sharesToBurn = req.shares;
+    // Assets calculated at execution time (price per share may have changed since request)
+    uint256 assets = previewRedeem(sharesToBurn);
+    delete withdrawalRequests[msg.sender];
+    _burn(msg.sender, sharesToBurn);
+    emit WithdrawalExecuted(msg.sender, sharesToBurn, assets);
+    ASSET.safeTransfer(msg.sender, assets);
+}
+```
+
+- `EPOCH_LENGTH = 1 days`, `WITHDRAWAL_DELAY_EPOCHS = 3`. Epoch 0 starts at deployment.
+- The payout uses the share price at execution, not at request.
+- `executeWithdrawal` and `cancelWithdrawal` are not blocked by the pause.
+
+### What the lock does and does not do
+
+The lock is meant to stop LPs from exiting just before a known trader payout. As implemented:
+
+- The requested shares are not escrowed; they remain transferable.
+- A request does not expire. After the first 3 epochs an LP can keep a request open and execute it at any
+  later moment, so the delay applies once rather than to each exit.
+- Deposits are not delayed, so a new LP can enter just before a known trader loss is realised.
+- `maxWithdraw`, `maxRedeem`, `maxDeposit` and `maxMint` return Solady's defaults: they do not reflect
+  that `withdraw`/`redeem` always revert or that deposits are paused.
+
+These are current behaviour and are flagged for review.
+
+---
+
+## 2. PnL and Accounting
+
+LP results are the opposite of trader results, plus fees.
+
+$$SharePrice = \frac{totalAssets()}{totalSupply()} \times 10^{12}$$
+
+`totalAssets()` is the vault's USDC balance. It moves only when PnL is realised:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ TRADER CLOSES WITH PROFIT                                           │
+│   TradingStorage returns the collateral (minus close fee)           │
+│   TradingEngine calls Vault.sendPayout(trader, profit)              │
+│   totalAssets decreases, share price falls: LPs lose                │
+│   Reverts if the vault holds less USDC than the profit              │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ TRADER CLOSES WITH LOSS, OR IS LIQUIDATED                           │
+│   TradingStorage sends the lost collateral to the vault             │
+│   80% of the close fee to the vault, 20% to the treasury            │
+│   totalAssets increases, share price rises: LPs gain                │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+Unrealised PnL of open trades is not reflected in the share price, the vault ratio or any preview
+function.
+
+### Example
+
+| State | totalAssets | totalSupply (sUSDC) | Share price | Event |
+|:---|:---|:---|:---|:---|
+| Initial | 1,000,000 USDC | 1,000,000 | 1.0000 | |
+| Trade 1 | 1,000,500 USDC | 1,000,000 | 1.0005 | A trader loses 500 |
+| Trade 2 | 999,500 USDC | 1,000,000 | 0.9995 | A trader wins 1,000 |
+| Trade 3 | 1,010,000 USDC | 1,000,000 | 1.0100 | A trader loses 10,500 |
+
+---
+
+## 3. Solvency Layers
+
+### Layer 1: preventive controls
+
+What exists in code:
+
+- **Payout cap.** `TradingEngine._calculatePayout` caps the payout at 9x collateral:
+
+  ```solidity
+  uint256 public constant MAX_PROFIT_MULTIPLIER = 9;
+
+  function _calculatePayout(uint64 _collateral, int256 _pnlUsdc) internal pure returns (uint256 payoutUsdc) {
+      if (_pnlUsdc >= 0) {
+          payoutUsdc = uint256(_pnlUsdc) + uint256(_collateral);
+          uint256 maxPayout = uint256(_collateral) * MAX_PROFIT_MULTIPLIER;
+          if (payoutUsdc > maxPayout) payoutUsdc = maxPayout;
+      } else {
+          uint256 loss = uint256(-_pnlUsdc);
+          if (loss >= uint256(_collateral)) {
+              payoutUsdc = 0;
+          } else {
+              payoutUsdc = uint256(_collateral) - loss;
+          }
+      }
+  }
+  ```
+
+  The cap applies to collateral plus profit, so the largest profit is 8x collateral (800%).
+- **Static open interest cap.** `TradingStorage.increaseOpenInterest` reverts when long + short OI on a
+  pair exceeds `maxOI`, a value the owner sets per pair.
+- **Dynamic spread.** Section 5.
+
+Designed but not implemented: open interest caps that shrink when volatility rises (for example
+`MaxOI = BaseOI x (TargetVol / CurrentVol)`), a global OI cap, and a separate `OIManager` contract.
+
+### Layer 2: AssistantFund
+
+```mermaid
+graph LR
+    subgraph Fees
+        Fee[Open and close fees in TradingStorage] -->|80%| Vault[Vault]
+        Fee -->|20% to treasury| AF[AssistantFund]
+    end
+    subgraph Injection
+        SM[SolvencyManager] -->|injectFunds| AF
+        AF -->|USDC| Vault
+    end
+    Anyone([Anyone]) -->|skim above targetCap| AF
+```
+
+- The fee split is in `TradingEngine._distributeFees`; the 20% share goes to `treasury`, which
+  `script/Deploy.s.sol` sets to the `AssistantFund`.
+- `injectFunds(amount)` is restricted to the `SolvencyManager` and sends reserve USDC to the vault.
+- `skim()` is permissionless and sends the balance above `targetCap` to the vault.
+
+```solidity
+function injectFunds(uint256 _amount) external onlySolvencyManager {
+    uint256 available = balance();
+    if (_amount > available) revert InsufficientFunds(_amount, available);
+    ASSET.safeTransfer(VAULT, _amount);
+    emit FundsInjected(_amount);
+}
+```
+
+An injection raises the share price for everyone holding shares at that moment, including LPs who
+deposited just before it.
+
+### Layer 3: BondDepository and $SYNTH
 
 ```mermaid
 sequenceDiagram
-    participant LP as Liquidity Provider
-    participant Vault as Vault.sol
-    participant sToken as sToken
+    participant SM as SolvencyManager
+    participant BD as BondDepository
+    participant User as Bonder
+    participant Vault
+    participant Synth as SynthToken
 
-    LP->>Vault: redeem(1000 sToken, receiver, owner)
-    Vault->>Vault: Check withdrawal lock (3 epochs)
-    Vault->>Vault: assets = (shares × totalAssets) / totalSupply
-    Note over Vault: If totalAssets=11000, totalSupply=10000<br/>assets = 1000 × 11000 / 10000 = 1100 USDC
-    Vault->>sToken: burn(1000 sToken)
-    Vault->>LP: transfer(1100 USDC)
+    SM->>BD: activateBonding(shortfall)
+    User->>BD: bond(1000 USDC)
+    Note over BD: effectivePrice = referencePrice x (1 - discount)<br/>referencePrice 1 USDC, discount 10%: 1,111.11 SYNTH
+    BD->>Vault: USDC transferred from the bonder
+    BD->>Synth: mint(BondDepository, synthOut)
+    Note over BD: linear vesting over vestingPeriod
+    User->>BD: claim(bondId)
+    BD-->>User: vested SYNTH
 ```
 
-### Withdrawal Lock (Anti Front-Running)
+| Parameter | Value |
+|:---|:---|
+| `discountBps` | owner-set, at most 1000 (10%); 500 in `script/Deploy.s.sol` |
+| `vestingPeriod` | owner-set, at most 7 days; 48 h by default |
+| Round cap | the shortfall passed by `SolvencyManager` |
+| `referencePrice` | owner-set USDC per SYNTH, 2 USDC by default; no market price feed |
 
-To prevent LPs from withdrawing liquidity just before a large payout to traders:
-
-```solidity
-struct WithdrawalRequest {
-    uint256 shares;
-    uint256 requestEpoch;
-    address receiver;
-}
-
-uint256 constant WITHDRAWAL_DELAY_EPOCHS = 3;
-
-function requestWithdrawal(uint256 shares) external {
-    withdrawalRequests[msg.sender] = WithdrawalRequest({
-        shares: shares,
-        requestEpoch: currentEpoch(),
-        receiver: msg.sender
-    });
-    emit WithdrawalRequested(msg.sender, shares, currentEpoch());
-}
-
-function executeWithdrawal() external {
-    WithdrawalRequest storage req = withdrawalRequests[msg.sender];
-    if (currentEpoch() < req.requestEpoch + WITHDRAWAL_DELAY_EPOCHS) {
-        revert WithdrawalLocked(req.requestEpoch + WITHDRAWAL_DELAY_EPOCHS);
-    }
-    
-    uint256 assets = previewRedeem(req.shares);
-    _burn(msg.sender, req.shares);
-    IERC20(usdc).safeTransfer(req.receiver, assets);
-    
-    delete withdrawalRequests[msg.sender];
-}
-```
+A round stays open until its cap is used, even if the vault recovers. `SynthToken` supply comes only from
+the minter, which the owner sets and can change.
 
 ---
 
-## 2. PnL and Accounting Mechanics
+## 4. SolvencyManager Logic
 
-The Vault acts as "The House". LP performance depends **inversely** on Trader performance.
+Implemented order: reserve first, then bonding.
 
-### Share Price Formula
-
-$$SharePrice = \\frac{totalAssets()}{totalSupply()}$$
-
-### PnL Flow
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│ WINNING TRADE (User wins)                                           │
-│                                                                      │
-│   User wins 100 USDC                                                │
-│        │                                                             │
-│        ▼                                                             │
-│   Vault.sendPayout(user, 100 USDC)                                  │
-│        │                                                             │
-│        ▼                                                             │
-│   totalAssets() -= 100                                              │
-│   totalSupply() = (unchanged)                                       │
-│        │                                                             │
-│        ▼                                                             │
-│   SharePrice ↓ DECREASES                                            │
-│   LPs suffer impermanent loss                                       │
-└─────────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────────┐
-│ LOSING TRADE (User loses)                                           │
-│                                                                      │
-│   User loses 100 USDC (+ 8 USDC fees)                               │
-│        │                                                             │
-│        ▼                                                             │
-│   Collateral stays in Vault                                         │
-│   Fees distributed (80% vault, 20% treasury)                        │
-│        │                                                             │
-│        ▼                                                             │
-│   totalAssets() += 100 + 6.4 (80% of fees)                          │
-│   totalSupply() = (unchanged)                                       │
-│        │                                                             │
-│        ▼                                                             │
-│   SharePrice ↑ INCREASES                                            │
-│   LPs earn yield                                                    │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    A[checkAndAct] --> B{CR >= 110%?}
+    B -->|Yes| H[Emit Healthy]
+    B -->|No| C{CR >= 100%?}
+    C -->|Yes| W[Emit Warning]
+    C -->|No| D[Inject min reserve, deficit]
+    D --> E{CR < 95% and shortfall and no active round?}
+    E -->|Yes| F[activateBonding shortfall]
+    E -->|No| G[Done]
 ```
 
-### Numerical Example
+```solidity
+uint256 public constant SAFE_CR = 110e16; // 110%
+uint256 public constant DEFICIT_CR = 100e16; // 100% (recapitalization target)
+uint256 public constant CRITICAL_CR = 95e16; // 95%
+```
 
-| State | totalAssets | totalSupply | SharePrice | Event |
-|:---|:---|:---|:---|:---|
-| Initial | 1,000,000 USDC | 1,000,000 sToken | 1.00 | - |
-| Trade 1 | 1,000,500 USDC | 1,000,000 sToken | 1.0005 | Trader loses 500 |
-| Trade 2 | 999,500 USDC | 1,000,000 sToken | 0.9995 | Trader wins 1,000 |
-| Trade 3 | 1,010,000 USDC | 1,000,000 sToken | 1.01 | Trader loses 10,500 |
+- CR is `Vault.collateralizationRatio()`, the share price relative to 1.0. After a period of LP gains
+  (share price above 1.1) large losses can occur without triggering any action; the ratio does not
+  include open trader PnL.
+- The deficit is `Vault.collateralizationDeficit()`, the USDC needed to bring the share price back to 1.0.
+- There is no buyback above 110% and no "growth phase" ordering that prefers bonding over the reserve;
+  both were described in earlier designs.
 
 ---
 
-## 3. Risk Management and Solvency System
+## 5. Dynamic Spread
 
-To protect the Vault's `totalAssets` from catastrophic drops, **three security layers** are implemented.
-
-### Layer 1: Preventive (Profit Caps and Spreads)
-
-#### Profit Caps (Hard Limit)
+`SpreadManager.getSpreadBps`:
 
 ```solidity
-uint256 constant MAX_PROFIT_MULTIPLIER = 9e18; // 9x = 900%
-
-function _calculatePayout(
-    uint256 collateral,
-    int256 pnl
-) internal pure returns (uint256 payout) {
-    if (pnl <= 0) {
-        // Loss: return remaining collateral (if any)
-        payout = pnl < -int256(collateral) ? 0 : collateral - uint256(-pnl);
-    } else {
-        // Profit: cap at MAX_PROFIT_MULTIPLIER
-        uint256 maxPayout = collateral.mulWad(MAX_PROFIT_MULTIPLIER);
-        uint256 theoreticalPayout = collateral + uint256(pnl);
-        payout = theoreticalPayout > maxPayout ? maxPayout : theoreticalPayout;
-    }
-}
-```
-
-#### Dynamic Spreads
-
-The standalone `SpreadManager` contract computes dynamic spread based on **OI** and **per-pair volatility**:
-
-```solidity
-/// @notice Calculate total spread in BPS for a pair given its current OI
 function getSpreadBps(uint256 _pairIndex, uint256 _currentOI) external view returns (uint256 spreadBps) {
-    uint256 oiImpact = (_currentOI * impactFactor) / OI_PRECISION;    // OI_PRECISION = 1e30
+    uint256 oiImpact = (_currentOI * impactFactor) / OI_PRECISION; // OI_PRECISION = 1e30
     uint256 volImpact = (_pairVolatility[_pairIndex] * volFactor) / VOL_PRECISION; // VOL_PRECISION = 1e18
     spreadBps = baseSpreadBps + oiImpact + volImpact;
     if (spreadBps > maxSpreadBps) spreadBps = maxSpreadBps;
 }
 ```
 
-TradingEngine reads OI from TradingStorage and delegates to `SPREAD_MANAGER.getSpreadBps()` in `_applySpread`.
-
-### Layer 2: Reactive (Assistant Fund)
-
-A separate contract (`AssistantFund.sol`) that accumulates reserve capital.
-
-```mermaid
-graph LR
-    subgraph Fee Distribution
-        Fee[Trading Fees] -->|80%| Vault[Vault LPs]
-        Fee -->|20%| AF[Assistant Fund]
-    end
-    
-    subgraph Emergency Injection
-        SM[Solvency Manager] -->|Check CR| AF
-        AF -->|Inject USDC| Vault
-    end
-```
-
-#### Funding (Filling)
-
-```solidity
-function distributeFees(uint256 totalFees) internal {
-    uint256 assistantShare = totalFees.mulWad(ASSISTANT_FEE_SPLIT); // 20%
-    uint256 vaultShare = totalFees - assistantShare;
-    
-    IERC20(usdc).safeTransfer(address(assistantFund), assistantShare);
-    // vaultShare stays in Vault (increases totalAssets)
-}
-```
-
-#### Usage (Injection)
-
-```solidity
-// Only callable by SolvencyManager
-function injectFunds(uint256 amount) external onlySolvencyManager {
-    if (amount > balance()) revert InsufficientFunds();
-    
-    IERC20(usdc).safeTransfer(address(vault), amount);
-    emit FundsInjected(amount);
-}
-```
-
-### Layer 3: Last Resort (Token Minting & Bonding)
-
-If the Assistant Fund is insufficient, the **BondDepository** is activated.
-
-#### Bonding Mechanism
-
-```mermaid
-sequenceDiagram
-    participant SM as SolvencyManager
-    participant BD as BondDepository
-    participant User as Arbitrageur
-    participant Vault
-
-    SM->>BD: activateBonding(neededUSDC)
-    BD->>BD: Calculate discount (5-10% off TWAP)
-    
-    User->>BD: deposit(1000 USDC)
-    BD->>BD: Calculate SYNTH amount with discount
-    Note over BD: If TWAP = $1.00, discount = 10%<br/>User gets 1111 SYNTH for 1000 USDC
-    BD->>User: vest SYNTH (linear or instant)
-    BD->>Vault: inject(1000 USDC)
-```
-
-#### Bonding Parameters
-
-| Parameter | Value | Description |
+| Parameter | `script/Deploy.s.sol` value | Effect |
 |:---|:---|:---|
-| `DISCOUNT_BPS` | 500-1000 | 5-10% discount vs TWAP |
-| `VESTING_PERIOD` | 0-7 days | Vesting period (based on urgency) |
-| `MAX_BOND_CAP` | Variable | Maximum USDC to raise in one round |
+| `baseSpreadBps` | 5 | floor |
+| `impactFactor` | 3e5 | 3 BPS at 10M USD OI (`1e25 x 3e5 / 1e30`) |
+| `volFactor` | 100 | 3 BPS at 3% volatility (`3e16 x 100 / 1e18`) |
+| `maxSpreadBps` | 100 | ceiling |
+| `maxVolatilityChangeBps` | 5000 | each keeper update may move volatility by at most 50% of its current value |
 
----
-
-## 4. Dynamic Defense Logic
-
-The system prioritizes which capital source to use based on **protocol maturity**.
-
-### Scenario A: Growth Phase
-
-**Objective:** Preserve USDC in Assistant Fund to build reserve.
-
-```mermaid
-flowchart TD
-    A[Deficit Detected] --> B{Assistant Fund >= Target?}
-    B -->|No| C[Issue SYNTH Bonds]
-    C --> D{Bonds covered deficit?}
-    D -->|No| E[Use Assistant Fund]
-    D -->|Yes| F[Vault Recapitalized]
-    E --> F
-    B -->|Yes| G[Scenario B]
-```
-
-### Scenario B: Mature Phase
-
-**Objective:** Protect $SYNTH holders from unnecessary dilution.
-
-```mermaid
-flowchart TD
-    A[Deficit Detected] --> B{Assistant Fund sufficient?}
-    B -->|Yes| C[Use Assistant Fund]
-    C --> D[Vault Recapitalized]
-    B -->|No| E[Use partial Assistant Fund]
-    E --> F[Activate Bonding for rest]
-    F --> D
-```
-
-### Activation Thresholds
-
-```solidity
-uint256 constant SAFE_CR = 110e16;      // 110%
-uint256 constant DEFICIT_CR = 100e16;   // 100%
-uint256 constant CRITICAL_CR = 95e16;   // 95%
-
-function checkAndAct() external {
-    uint256 cr = vault.collateralizationRatio();
-    
-    if (cr >= SAFE_CR) {
-        // Healthy - consider buyback
-        _executeBuyback();
-    } else if (cr >= DEFICIT_CR) {
-        // Warning - no action, just monitor
-        emit Warning(cr);
-    } else if (cr >= CRITICAL_CR) {
-        // Deficit - inject from Assistant Fund
-        _injectFromAssistant();
-    } else {
-        // Critical - activate bonding
-        _activateBonding();
-    }
-}
-```
-
----
-
-## 5. Initial Risk Mitigation: Dynamic Spread via SpreadManager
-
-The protocol uses a standalone `SpreadManager` contract to dynamically adjust execution spreads based on **OI** and **per-pair volatility**. Higher risk conditions automatically widen spreads, making new positions more expensive and protecting the Vault.
-
-### Why dynamic spreads?
-
-- **High OI = Greater protocol exposure** → wider spread discourages additional positions
-- **High volatility = Greater risk of extreme movements** → wider spread compensates for risk
-- **Automatic protection:** Spread adjusts algorithmically via keeper-updated volatility
-- **No position blocking:** Unlike dynamic OI caps, spread-based protection allows all trades but at a worse price
-
-### SpreadManager Architecture
-
-```solidity
-/// @notice Computes dynamic spread BPS based on OI impact and per-pair volatility
-contract SpreadManager is Ownable {
-    uint256 public constant OI_PRECISION = 1e30;
-    uint256 public constant VOL_PRECISION = 1e18;
-
-    uint256 public baseSpreadBps;        // Fixed floor (default: 5 = 0.05%)
-    uint256 public impactFactor;         // OI impact multiplier (default: 3e5)
-    uint256 public volFactor;            // Volatility multiplier (default: 100)
-    uint256 public maxSpreadBps;         // Ceiling (default: 100 = 1%)
-    uint256 public maxVolatilityChangeBps; // Max per-update vol change (default: 200 = 2%)
-    address public keeper;
-    mapping(uint256 => uint256) private _pairVolatility; // 18 decimals
-
-    function getSpreadBps(uint256 _pairIndex, uint256 _currentOI) external view returns (uint256 spreadBps) {
-        uint256 oiImpact = (_currentOI * impactFactor) / OI_PRECISION;
-        uint256 volImpact = (_pairVolatility[_pairIndex] * volFactor) / VOL_PRECISION;
-        spreadBps = baseSpreadBps + oiImpact + volImpact;
-        if (spreadBps > maxSpreadBps) spreadBps = maxSpreadBps;
-    }
-}
-```
-
-### BPS Calibration
-
-| Parameter | Default | Example Effect |
-|:---|:---|:---|
-| `baseSpreadBps` | 5 (0.05%) | Fixed floor for all conditions |
-| `impactFactor` | 3e5 | 3 BPS at 10M OI (`1e25 * 3e5 / 1e30 = 3`) |
-| `volFactor` | 100 | 3 BPS at 3% vol (`3e16 * 100 / 1e18 = 3`) |
-| `maxSpreadBps` | 100 (1%) | Hard ceiling |
-
-### Volatility Update
-
-The keeper updates per-pair volatility on-chain. Changes are bounded by `±maxVolatilityChangeBps` (default: 200 = 2%) to prevent manipulation. First update for a pair skips bounds check.
-
-### Behavior During High Volatility Events
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│ EVENT: BTC Flash Crash (-15% in 1 hour)                             │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│  1. Keeper detects σ 24h = 12% (normally 3%)                        │
-│  2. Keeper calls updateVolatility(BTC_INDEX, 12%)                   │
-│     (bounded by ±2% per update, so multiple updates needed)         │
-│  3. System recalculates spread:                                     │
-│     • Spread: 0.05% + 0.03%(OI) + 0.36%(Vol) = 0.44%               │
-│                                                                      │
-│  4. New positions: Allowed but at wider spread (more expensive)     │
-│     • Existing positions: Unaffected (entered at their spread)      │
-│     • Closes: Allowed (spread on close also wider)                  │
-│                                                                      │
-│  5. When volatility returns to normal:                              │
-│     • Spread decreases gradually                                    │
-│     • New positions: Back to normal pricing                         │
-│                                                                      │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-**Guarantee:** The protocol automatically protects itself during periods of high uncertainty without requiring manual intervention.
+- The OI term uses total OI (long + short), not the imbalance.
+- The volatility value is supplied by the keeper; how it is computed is off-chain and not specified in the
+  code.
+- The spread applies on open and on close, so a wider spread also makes closing more expensive.
+- Example: a keeper that needs to move volatility from 3% to 12% with a 50% bound needs several updates
+  (3% to 4.5% to 6.75% to 10.1% to 12%). At 12%, with 10M USD OI: 5 + 3 + 12 = 20 BPS.
 
 ---
 
 ## 6. Component Summary
 
-| Contract | Function | Standard/Logic |
-|:---|:---|:---|
-| **LiquidityVault.sol** | Custodies LP funds, central counterparty | ERC-4626 |
-| **TradingEngine.sol** | Executes trades, calculates PnL | Business Logic |
-| **TradingStorage.sol** | Stores trades and OI | State Layer |
-| **PythChainlinkOracle.sol** | Validates Pyth prices with Chainlink anchor (implements IOracle) | Pyth + Chainlink |
-| **OIManager.sol** | Calculates max OI based on volatility | Adaptive OI |
-| **AssistantFund.sol** | Emergency reserve in USDC | Treasury |
-| **BondDepository.sol** | Sells $SYNTH at discount | Bonding Mechanism |
-| **SolvencyManager.sol** | Orchestrates rescues (Fund vs Bond) | State Machine |
-| **PricingLib.sol** | Calculates dynamic spreads (OI + Vol) | Library |
-| **FundingLib.sol** | Calculates funding rates | Library |
+| Contract | Role |
+|:---|:---|
+| `Vault.sol` | LP funds, sUSDC shares, trader profit payouts, CR views |
+| `TradingEngine.sol` | Trading logic, spread, fees, funding, liquidation, TP/SL |
+| `TradingStorage.sol` | Trades, pairs, OI, funding state, trader collateral |
+| `PythChainlinkOracle.sol` | Pyth price with Chainlink deviation check (`IOracle`) |
+| `SpreadManager.sol` | Spread from OI and keeper-set volatility |
+| `FundingLib.sol` | Funding index math |
+| `AssistantFund.sol` | Layer 2 USDC reserve |
+| `SolvencyManager.sol` | Reserve and bonding orchestration |
+| `BondDepository.sol` | Layer 3 discounted $SYNTH sale with vesting |
+| `SynthToken.sol` | $SYNTH ERC-20 with a single minter |
 
 ---
 
 **See also:**
-- [Guide 2: Mathematics](./02-mathematics.md) - Adaptive OI and Spread formulas
-- [Guide 8: Security](./08-security.md) - Threat model and access control
-- [Guide 3: Technical Architecture](./03-architecture.md) - Detailed flows
+- [Guide 2: Mathematics](./02-mathematics.md)
+- [Guide 8: Security](./08-security.md)
+- [Guide 3: Technical Architecture](./03-architecture.md)
