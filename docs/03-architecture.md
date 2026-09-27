@@ -1,551 +1,345 @@
-# 🏗️ Guide 3: Technical Architecture and Data Flow
+# Guide 3: Technical Architecture and Data Flow
 
-**Version:** 2.0
 **Prerequisites:** [Guide 2: Protocol Mathematics](./02-mathematics.md)
-**Next:** [Guide 4: Trade-offs and Problems](./04-tradeoffs.md)
+**Next:** [Guide 4: Trade-offs and Risks](./04-tradeoffs.md)
+
+**Status:** Proof of concept. Not audited and not deployed.
 
 ---
 
-## 📋 Table of Contents
+## Table of Contents
 
 1. [Component Diagram](#1-component-diagram)
-2. [Oracle System (Pyth + Chainlink)](#2-oracle-system-pyth--chainlink)
-3. [Oracle Architecture Decision Record](#3-oracle-architecture-decision-record)
+2. [Oracle](#2-oracle)
+3. [Oracle Design Note](#3-oracle-design-note)
 4. [Contract Descriptions](#4-contract-descriptions)
-5. [Detailed Execution Flows](#5-detailed-execution-flows)
+5. [Execution Flows](#5-execution-flows)
 6. [Design Patterns](#6-design-patterns)
 
 ---
 
 ## 1. Component Diagram
 
-### High-Level View
-
 ```mermaid
-graph TD
-    User([User]) -->|1. Trading + Price Update| Engine[TradingEngine.sol]
-    User -->|2. Liquidity| Vault[Vault.sol ERC4626]
-
-    subgraph Core System
-        Engine -->|Read/Write| Storage[TradingStorage.sol]
-        Engine -->|Validate Price| Oracle[PythChainlinkOracle.sol]
-        Engine -->|Request Funds| Vault
-        Vault -->|Check Health| Solvency[SolvencyManager.sol]
-    end
-
-    subgraph Oracle Layer
-        Oracle -->|Primary Price| Pyth[Pyth Network]
-        Oracle -->|Deviation Anchor| Chainlink[Chainlink Feed]
-        Hermes[Pyth Hermes API] -.->|Off-chain price data| User
-    end
-
-    subgraph Solvency Layer
-        Solvency -->|Injects| Assistant[AssistantFund.sol]
-        Solvency -->|Bonding| Bond[BondDepository.sol]
-        Bond -->|Sells| Token[$SYNTH]
-    end
+flowchart TD
+    Trader([Trader]) -->|openTrade, closeTrade, updateTp, updateSl + Pyth update data| Engine
+    Bot([Liquidator / executor bot]) -->|liquidate, executeLimit + Pyth update data| Engine
+    Engine[TradingEngine] -->|storeTrade, deleteTrade, OI, funding state, sendCollateral| Storage[TradingStorage]
+    Engine -->|getPrice, fee in msg.value| Oracle[PythChainlinkOracle]
+    Oracle -->|updatePriceFeeds, getPriceUnsafe| Pyth[(Pyth contract)]
+    Oracle -->|latestRoundData, decimals| Chainlink[(Chainlink aggregator)]
+    Engine -->|getSpreadBps| Spread[SpreadManager]
+    Keeper([Keeper]) -->|updateVolatility| Spread
+    Storage -->|collateral returned, rewards| Trader
+    Storage -->|trader losses, 80% of fees| Vault[Vault ERC-4626]
+    Storage -->|20% of fees to treasury| AF[AssistantFund]
+    Engine -->|sendPayout: trader profit| Vault
+    LP([LP]) -->|deposit, mint, requestWithdrawal, executeWithdrawal, cancelWithdrawal| Vault
+    Anyone([Anyone]) -->|checkAndAct| SM[SolvencyManager]
+    Anyone -->|skim| AF
+    SM -->|reads collateralizationRatio, collateralizationDeficit| Vault
+    SM -->|injectFunds| AF
+    AF -->|USDC| Vault
+    SM -->|activateBonding| BD[BondDepository]
+    Bonder([Bonder]) -->|bond, claim| BD
+    BD -->|bonder USDC sent to the Vault| Vault
+    BD -->|mint| Synth[SynthToken]
 ```
 
-### Detailed View (ASCII)
+Notes:
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                           USER LAYER                                │
-│            (Frontend, Arbitrage Bots, LPs, Keepers)                 │
-│                                                                     │
-│  Frontend fetches price data from Pyth Hermes API and includes      │
-│  it as calldata in the user's transaction (pull oracle model).      │
-└────────────┬────────────────────────────────────────┬───────────────┘
-             │                                        │
-             │ Execute Trades (+ priceUpdate bytes)   │ Deposit Liquidity
-             ▼                                        ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                        EVM CONTRACT LAYER                           │
-│                                                                     │
-│  ┌───────────────────────┐           ┌───────────────────────┐      │
-│  │  TRADING ENGINE       │──────────►│  VAULT (ERC-4626)     │      │
-│  │  (Business Logic)     │           │  (The Treasury)       │      │
-│  │                       │           │                       │      │
-│  │  • openTrade          │◄──────────│  • Custodies USDC     │      │
-│  │  • closeTrade         │           │  • Issues sToken      │      │
-│  │  • liquidate          │           │  • Pays Winners       │      │
-│  │  • updateTP/SL        │           │  • Tracks Assets      │      │
-│  └──────────┬────────────┘           └───────────────────────┘      │
-│             │                                     ▲                 │
-│             ▼                                     │                 │
-│  ┌───────────────────────┐           ┌────────────┴──────────┐      │
-│  │  TRADING STORAGE      │           │  SOLVENCY MANAGER     │      │
-│  │  (State Layer)        │           │ (Defense Orchestrator)│      │
-│  │                       │           │                       │      │
-│  │  • trades[id]         │           │  • Check CR           │      │
-│  │  • openInterest[pair] │           │  • Trigger Injection  │      │
-│  │  • userTrades[addr]   │           │  • Trigger Bonding    │      │
-│  └───────────────────────┘           └───────────────────────┘      │
-│             ▲                                 │       │             │
-│             │                                 ▼       ▼             │
-│             │                        ┌────────────┐ ┌────────────┐  │
-│             │                        │ ASSISTANT  │ │ BOND       │  │
-│             │                        │ FUND       │ │ DEPOSITORY │  │
-│             │                        └────────────┘ └────────────┘  │
-│             │                                                       │
-│  ┌──────────┴────────────┐                                          │
-│  │  PYTH+CHAINLINK ORACLE│◄──── Pyth Network (Primary, Pull Model)  │
-│  │  (Price Validation)   │                                          │
-│  │                       │      ┌────────────────────────────────┐  │
-│  │  • Pyth price + conf  │◄─────│  CHAINLINK FEED (Deviation     │  │
-│  │  • Staleness check    │      │  Anchor — revert if too far)   │  │
-│  │  • Confidence check   │      └────────────────────────────────┘  │
-│  │  • Chainlink anchor   │                                          │
-│  └───────────────────────┘                                          │
-└─────────────────────────────────────────────────────────────────────┘
-```
+- The Pyth update data is fetched off-chain by the caller (for example from the Pyth Hermes API) and passed
+  as `bytes[]` calldata. The engine forwards `msg.value` to the oracle, which pays the Pyth fee and refunds
+  the surplus to the engine; the engine sends any ETH it holds back to the caller at the end of the call.
+- The treasury is a `TradingEngine` constructor argument, changeable by the owner. `script/Deploy.s.sol`
+  sets it to the `AssistantFund`.
+- All trader collateral sits in `TradingStorage`. Liquidator and TP/SL executor rewards are paid from it.
 
 ---
 
-## 2. Oracle System (Pyth + Chainlink)
+## 2. Oracle
 
-The oracle is the most critical component. Manipulation or failure can drain the Vault.
+`PythChainlinkOracle` implements `IOracle`:
 
-### Architecture: Pull Oracle (Pyth) + Deviation Anchor (Chainlink)
-
-The protocol uses **Pyth Network** as the primary price source with a **pull-based model**, and **Chainlink Price Feeds** exclusively as a deviation anchor to protect against extraordinary Pyth price anomalies.
-
-**Key design principle:** Chainlink is NOT a fallback. If Pyth price is stale, the transaction reverts. Chainlink only validates that Pyth's price is within acceptable deviation — this is critical for high-leverage protocols where a Chainlink fallback (with its higher latency) could expose traders and LPs to unfair execution.
-
-### Pull Oracle Flow
-
-```mermaid
-sequenceDiagram
-    participant Frontend
-    participant Hermes as Pyth Hermes (Off-chain)
-    participant User
-    participant Engine as TradingEngine
-    participant Oracle as PythChainlinkOracle
-    participant Pyth as Pyth Contract
-    participant CL as Chainlink Feed
-
-    Frontend->>Hermes: GET /v2/updates/price/latest?ids[]=feedId
-    Hermes-->>Frontend: priceUpdate (signed bytes)
-    Frontend->>User: Include priceUpdate in tx calldata
-
-    User->>Engine: openTrade{value: fee}(pair, collateral, ..., priceUpdate)
-    Engine->>Oracle: getPrice{value: msg.value}(pairIndex, priceUpdate)
-
-    Oracle->>Pyth: updatePriceFeeds{value: fee}(priceUpdate)
-    Pyth-->>Oracle: Price verified (Wormhole signature valid)
-
-    Oracle->>Pyth: getPriceNoOlderThan(feedId, MAX_STALENESS)
-    Pyth-->>Oracle: PythPrice(price, conf, expo, publishTime)
-
-    Note over Oracle: Check 1: Staleness ≤ MAX_STALENESS<br/>Check 2: Confidence ≤ MAX_CONFIDENCE_BPS<br/>Check 3: Price > 0
-
-    Oracle->>CL: latestRoundData()
-    CL-->>Oracle: chainlinkPrice
-
-    Note over Oracle: Check 4: |pythPrice - chainlinkPrice| ≤ MAX_DEVIATION<br/>If deviation too high → revert (circuit breaker)
-
-    Oracle-->>Engine: validatedPrice (uint128, 18 decimals) + refund surplus ETH
-    Engine->>Engine: Execute trade with validated price
-    Engine-->>User: refund leftover ETH
+```solidity
+function getPrice(uint256 pairIndex, bytes[] calldata priceData) external payable returns (uint128 price18, uint128 conf18);
 ```
 
-### Validation Pipeline
+Pyth is the price source. Chainlink is only a deviation check: if Pyth fails a check the call reverts; it
+never falls back to the Chainlink answer.
 
-Every price goes through 4 checks before being accepted. Failure at any stage reverts the transaction:
+### Validation pipeline (`PythChainlinkOracle.getPrice`)
 
-| Check                | Condition                                                         | Error                   | Rationale                                        |
-| :------------------- | :---------------------------------------------------------------- | :---------------------- | :----------------------------------------------- |
-| **Staleness**        | `publishTime ≥ block.timestamp - MAX_STALENESS`                   | `StalePrice`            | Stale prices at high leverage = unfair execution |
-| **Confidence**       | `conf * BPS_DENOMINATOR / abs(price) ≤ MAX_CONFIDENCE_BPS`        | `ConfidenceTooWide`     | Wide confidence = market stress or illiquidity   |
-| **Non-zero**         | `price > 0`                                                       | `ZeroPrice`             | Sanity check                                     |
-| **Deviation anchor** | `\|pythPrice - chainlinkPrice\| / chainlinkPrice ≤ MAX_DEVIATION` | `PriceDeviationTooHigh` | Protects against Pyth anomalies or manipulation  |
+| Step | Check | Error |
+| :--- | :---- | :---- |
+| 1 | Pair feed configured (`active`) | `PairFeedNotSet` |
+| 2 | `msg.value >= PYTH.getUpdateFee(priceData)`, then `PYTH.updatePriceFeeds{value: fee}(priceData)` | `InsufficientFee` |
+| 3 | `PYTH.getPriceUnsafe(feedId)` and `block.timestamp - publishTime <= 30` | `StalePrice` |
+| 4 | `price > 0` | `ZeroPrice` |
+| 5 | `conf * 10000 <= price * 200` (confidence at most 2% of price) | `ConfidenceTooWide` |
+| 6 | Normalise price and conf to 18 decimals (`PythUtils.convertToUint`) | |
+| 7 | Chainlink `latestRoundData`: `block.timestamp - updatedAt <= heartbeat`, `answer > 0`, normalise by `decimals()` | `ChainlinkStalePrice`, `ZeroPrice` |
+| 8 | `abs(pyth - chainlink) * 10000 <= chainlink * 300` (at most 3% apart) | `PriceDeviationTooHigh` |
+| 9 | Refund `msg.value - fee` to the caller | |
 
-### Suggested Parameter Values
+Behaviour to be aware of:
 
-| Parameter            | Value                | Rationale                                                                            |
-| :------------------- | :------------------- | :----------------------------------------------------------------------------------- |
-| `MAX_STALENESS`      | 10-30 seconds        | For 100x leverage, fresher = safer. Tight bound prevents adversarial price selection |
-| `MAX_CONFIDENCE_BPS` | 100-200 bps (1-2%)   | Rejects trades during extreme uncertainty                                            |
-| `MAX_DEVIATION`      | 150-300 bps (1.5-3%) | Allows normal Pyth/Chainlink drift, catches anomalies                                |
+- `updatePriceFeeds` only stores an update newer than the one already on-chain, and `getPriceUnsafe`
+  returns the newest stored price. A caller can therefore pick any signed update in the last 30 seconds
+  that is newer than the stored one, or pass no update and use the stored price if it is fresh enough.
+- If `publishTime` is ahead of `block.timestamp`, step 3 underflows and reverts.
+- Any failed check reverts the whole call. `closeTrade`, `executeLimit`, `liquidate`, `openTrade`, and
+  `updateTp`/`updateSl` with a non-zero value all revert while Pyth is stale, its confidence is wide,
+  Chainlink is stale, or the two disagree by more than 3%.
+- There is no L2 sequencer uptime check.
 
-### Confidence Interval Usage
+### How the confidence band is used
 
-Pyth provides a confidence interval (`conf`) with every price, representing publisher disagreement. This is a unique advantage over other oracles:
-
-- **Normal conditions:** `conf/price < 0.1%` — proceed normally
-- **Moderate uncertainty:** `conf/price ~ 0.5%` — protocol could widen spreads (Phase 6 — SpreadManager)
-- **High uncertainty:** `conf/price > 1%` — revert, do not execute trades
-- **Liquidations:** Use the most trader-favorable end of the confidence band (`price + conf` for longs, `price - conf` for shorts) to prevent unfair liquidations during volatility. A long liquidates when price falls, so the higher band edge shrinks its loss; a short liquidates when price rises, so the lower band edge shrinks its loss. Since positions liquidate at 90% (a ~10% buffer remains), giving the trader the benefit of the doubt on a noisy tick does not create bad debt for the Vault.
+- `openTrade`, `closeTrade`, `executeLimit`, `updateTp`, `updateSl` use `price18` and ignore `conf18`.
+- `liquidate` uses the trader-favourable edge of the band: `price + conf` for longs and
+  `max(price - conf, 0)` for shorts, then applies the close spread. A wide band makes liquidation harder;
+  since the oracle rejects `conf` above 2% of the price, the effect is bounded.
 
 ---
 
-## 3. Oracle Architecture Decision Record
+## 3. Oracle Design Note
 
-> **Date:** 2026-02-25
-> **Status:** Accepted
-> **Decision:** Pyth Network (primary) + Chainlink (deviation anchor only) — replacing the originally planned custom DON.
+A custom oracle network (a set of nodes publishing a median price) was considered early on and dropped,
+because keeping it live requires running and monitoring backend services. Pyth pull updates anchored to
+Chainlink are used instead. No code from the earlier design remains; `IOracle` keeps the engine
+independent of the oracle implementation, so another backend would be a new `IOracle` contract and a
+redeploy of `TradingEngine` (the oracle address is immutable there).
 
-### Context
+Consequences of the chosen design:
 
-The original architecture (v1.0) specified a custom Decentralized Oracle Network (DON) with 6-8 nodes pulling prices from CEX APIs, validated against a Chainlink reference feed. This was inspired by Gains Network (gTrade) v6 architecture.
-
-### Options Evaluated
-
-#### Option A: Custom DON (6-8 nodes) — Original Design
-
-**How it works:** 6-8 independent nodes connect to CEX WebSocket APIs (Binance, Coinbase, Kraken, etc.), compute median prices, sign and submit them on-chain. An oracle aggregator contract receives these prices, validates each against Chainlink (reject if >1.5% deviation), waits for minimum 3 valid answers, and returns the median.
-
-**Pros:**
-
-- Full control over aggregation logic and update frequency
-- No external dependencies beyond CEX APIs and Chainlink reference
-- Can add any trading pair by connecting a new CEX API
-
-**Cons:**
-
-- **~6-12 months engineering effort** (node software, key management, monitoring, aggregator contract)
-- **$7k-$23k/month operational cost** (servers, gas, maintenance)
-- **0.5-1 FTE permanent dedication** to oracle operations
-- With only 6-8 nodes, compromise of 4 is sufficient for price manipulation
-- CEX APIs change frequently, requiring constant maintenance
-- **gTrade itself is migrating away from this pattern** to Chainlink Data Streams
-
-#### Option B: Pyth Network (pull model) + Chainlink (anchor) — Chosen
-
-**How it works:** Pyth's 128+ data publishers (exchanges, market makers like Jump, Jane Street, Wintermute) submit prices every 400ms to Pythnet. Users fetch the latest signed price from Pyth's off-chain Hermes API and include it as calldata. The on-chain Pyth contract verifies the Wormhole signature and stores the price. Chainlink serves as a deviation anchor.
-
-**Pros:**
-
-- **~2-3 weeks integration effort** (install SDK, implement IOracle, add checks)
-- **Near-zero operational cost** (users pay ~$0.01 per price update on L2)
-- 128+ first-party publishers with Oracle Integrity Staking (slashing)
-- Confidence intervals enable dynamic risk management
-- 400ms update frequency (free tier), 1ms with Pyth Pro
-- 500+ price feeds (crypto, forex, commodities)
-- Battle-tested: Synthetix v3, Jupiter Perps ($50B+ volume)
-
-**Cons:**
-
-- Wormhole dependency for cross-chain price attestation
-- Pull model requires frontend to fetch and include price data
-- Users could attempt adversarial price selection within staleness window
-- Less popular feeds may have fewer publishers
-
-### Industry Precedent
-
-| Protocol           | Oracle Approach                                                | Trend                         |
-| :----------------- | :------------------------------------------------------------- | :---------------------------- |
-| **gTrade (Gains)** | Custom DON (8 nodes) → **migrating to Chainlink Data Streams** | Moving AWAY from custom DON   |
-| **GMX v2**         | Chainlink Data Streams (pull)                                  | Never built custom infra      |
-| **Synthetix v3**   | Pyth Network (pull)                                            | Standard for modern perps     |
-| **Jupiter Perps**  | Pyth Network (pull)                                            | Standard for modern perps     |
-| **dYdX v4**        | Validator consensus (own L1)                                   | Only viable with own appchain |
-
-**Key observation:** No perpetual DEX launched after 2023 has chosen to build a custom DON. gTrade, the pioneer of the pattern, is actively migrating away from it.
-
-### Decision
-
-**Adopt Option B: Pyth (primary) + Chainlink (deviation anchor only).**
-
-Chainlink is specifically NOT a fallback for stale Pyth prices. In a protocol supporting up to 100x leverage, executing a trade with a high-latency fallback price (Chainlink heartbeat can be 1-60 seconds) would expose traders and LPs to unfair execution. If Pyth is stale, the trade simply reverts — the user retries with a fresh price.
-
-The `IOracle` interface abstraction allows adding new oracle backends (e.g., Chainlink Data Streams, a custom DON) in the future — just deploy a new `IOracle` implementation and update the address. TradingEngine never changes.
-
-### Consequences
-
-- Phase 3 reduced from ~3 months to ~3 weeks
-- Engineering effort focused on core protocol features (Phases 4-8)
-- TradingEngine functions that need prices are `payable` and forward `msg.value` to the oracle to fund the Pyth fee; the oracle refunds the surplus, which the engine sweeps back to the caller (the engine never holds ETH)
-- Frontend must integrate with Pyth Hermes API and attach the Pyth fee as `msg.value` (the ETH is already needed for gas, so this is negligible friction)
-- Keeper bots (liquidations, TP/SL execution) must also fetch and submit Pyth price updates, funding the fee via `msg.value`
+- Price-consuming `TradingEngine` functions are `payable` and forward `msg.value` to fund the Pyth fee.
+- Frontends and bots must fetch Pyth update data off-chain and attach it to each call.
+- The caller chooses the update within the staleness window (see section 2), which matters for latency
+  arbitrage ([Guide 4](./04-tradeoffs.md#1-latency-arbitrage)).
 
 ---
 
 ## 4. Contract Descriptions
 
+Every contract uses Solady `Ownable` with a single owner. There is no role system and no timelock.
+
 ### 4.1 `Vault.sol` (ERC-4626)
 
-**Role:** Financial heart. Custodies USDC, issues shares, pays traders.
+Holds LP USDC, issues sUSDC, pays trader profits.
 
-| Function                            | Access      | Description                             |
-| :---------------------------------- | :---------- | :-------------------------------------- |
-| `deposit(assets, receiver)`         | Public      | LP deposits USDC, receives sToken       |
-| `withdraw(assets, receiver, owner)` | Public      | LP withdraws USDC (subject to timelock) |
-| `redeem(shares, receiver, owner)`   | Public      | LP burns sToken for USDC                |
-| `sendPayout(user, amount)`          | onlyTrading | Pays profits to traders                 |
-| `receiveLoss(amount)`               | onlyTrading | Records trader losses                   |
-| `totalAssets()`                     | View        | Total USDC in Vault                     |
+| Function | Access | Description |
+| :------- | :----- | :---------- |
+| `deposit(assets, receiver)` / `mint(shares, receiver)` | Anyone, when not paused | Standard ERC-4626 entry |
+| `withdraw(...)` / `redeem(...)` | Anyone | Always revert with `UseRequestWithdrawalFlow` |
+| `requestWithdrawal(shares)` | Share holder, when not paused | Records `shares` and the current epoch; overwrites an earlier request |
+| `executeWithdrawal()` | Requester | After 3 epochs, burns the requested shares at the current price and sends USDC |
+| `cancelWithdrawal()` | Requester | Deletes the request |
+| `sendPayout(receiver, amount)` | `tradingEngine` only | Sends USDC; reverts if `amount > totalAssets()` |
+| `collateralizationRatio()` / `collateralizationDeficit()` | View | Used by `SolvencyManager` |
+| `setTradingEngine`, `pause`, `unpause` | Owner | |
 
-**Security:**
+The requested shares are not locked: they stay transferable, and a request does not expire. `maxWithdraw`
+and `maxRedeem` still return the Solady defaults although `withdraw` and `redeem` always revert, and
+`maxDeposit`/`maxMint` do not reflect the pause.
 
-- `onlyTrading`: Only TradingEngine can request payouts.
-- **Withdrawal Request System:** 3-epoch timelock for withdrawals (anti front-running).
+### 4.2 `TradingEngine.sol`
 
-### 4.2 `TradingEngine.sol` (Business Logic)
+| Function | Access | Description |
+| :------- | :----- | :---------- |
+| `openTrade(pairIndex, isLong, collateral, leverage, expectedPrice, slippageBps, tp, sl, priceUpdate)` | Anyone, when not paused | Opens a position |
+| `closeTrade(tradeId, expectedPrice, slippageBps, priceUpdate)` | Trade owner, when not paused | Closes and settles |
+| `updateTp(tradeId, newTp, priceUpdate)` / `updateSl(...)` | Trade owner, when not paused | Changes TP or SL; 0 clears it |
+| `liquidate(tradeId, priceUpdate)` | Anyone, also while paused | Liquidates when the loss reaches 90% |
+| `executeLimit(tradeId, priceUpdate)` | Anyone, when not paused | Closes when TP or SL is crossed |
+| `setTreasury`, `pause`, `unpause` | Owner | |
 
-**Role:** Main controller for trading logic.
+Checks in `openTrade`: collateral at least 10 USDC, leverage non-zero and at most the pair's
+`maxLeverage`, pair active, TP/SL not already crossed at the oracle price, execution price within the
+caller's slippage tolerance, open spread not already at the liquidation threshold, open fee below the
+collateral, and pair OI cap (in `TradingStorage`).
 
-| Function                                  | Access | Description                 |
-| :---------------------------------------- | :----- | :-------------------------- |
-| `openTrade(pair, size, leverage, isLong)` | Public | Opens new position          |
-| `closeTrade(tradeId)`                     | Owner  | Closes position (manual)    |
-| `updateTP(tradeId, newTP)`                | Owner  | Updates Take Profit         |
-| `updateSL(tradeId, newSL)`                | Owner  | Updates Stop Loss           |
-| `liquidate(tradeId)`                      | Public | Liquidates at-risk position |
-| `executeLimit(tradeId)`                   | Public | Executes reached TP/SL (permissionless, executor earns 0.1% of notional) |
+TP/SL rules, checked against the oracle price in the engine and against the open price in storage:
 
-**Validations in `openTrade`:**
+| Direction | TP | SL |
+| :-------- | :- | :- |
+| Long | `tp > price` | `sl < price` |
+| Short | `tp < price` | `sl > price` |
 
-- ✅ User has sufficient collateral
-- ✅ Pair is not paused
-- ✅ Global/pair `MaxOpenInterest` not exceeded
-- ✅ Oracle price is valid and recent
-- ✅ Leverage is within limits
-- ✅ TP/SL not already triggered at oracle price (see below)
+**`liquidate` design:**
 
-**TP/SL price-dependent validations (Phase 3):**
+- Not gated by `whenNotPaused`, so liquidations continue while trading is paused. Closing and TP/SL
+  execution are paused, so traders cannot exit while liquidations run.
+- The loss includes funding, like `closeTrade`.
+- The caller funds the Pyth fee through `msg.value`.
+- If the oracle reverts (stale, wide confidence, deviation), `liquidate` reverts too.
+- The reward is 10% of the collateral left after the loss: at most 1% of collateral, and zero once the loss
+  reaches the full collateral. `MIN_COLLATERAL = 10 USDC` bounds the smallest position, so the largest
+  reward on the smallest position is about 0.1 USDC.
+- The vault is paid before the liquidator, so a liquidator blocked by the token can only block its own
+  reward.
+- PnL rounding favours the vault (longs floor, shorts ceil `exitValue`).
 
-Both `openTrade` (when setting initial TP/SL) and `updateTP`/`updateSL` must validate that the TP/SL is not already triggered at the current oracle price. This is done in TradingEngine (not TradingStorage) because it requires access to the oracle.
+**`executeLimit` design:**
 
-| Direction | TP rule              | SL rule              |
-| :-------- | :------------------- | :------------------- |
-| LONG      | `tp > oraclePrice`   | `sl < oraclePrice`   |
-| SHORT     | `tp < oraclePrice`   | `sl > oraclePrice`   |
+- Anyone can call it once the oracle price crosses TP (long `price >= tp`, short `price <= tp`) or SL (long
+  `price <= sl`, short `price >= sl`). TP is checked first.
+- Settlement uses the close-direction spread, funding, the close fee and the same payout branches as
+  `closeTrade`. The payout goes to the trade owner.
+- The caller receives 0.1% of notional, taken from the trader's payout and capped at it.
+- Gated by `whenNotPaused`.
 
-If violated, the transaction reverts. Rationale:
+### 4.3 `TradingStorage.sol`
 
-- **SL already triggered:** The keeper would execute immediately at current market price, which is worse than the SL the user intended. The user loses more than expected while thinking they are protected.
-- **TP already triggered:** The keeper would execute immediately at current market price, which is better than the TP — but the user likely doesn't know the price already surpassed their target. Reverting lets them set a higher TP or close at market price explicitly.
-
-TradingStorage retains its own structural validations (Long: `tp > openPrice`, `sl < openPrice`; Short: inverse) as a defense-in-depth layer that doesn't depend on the oracle.
-
-**Liquidations (`liquidate`) — design decisions:**
-
-- **Permissionless and not pausable.** `liquidate` is the protocol's solvency valve, so it is deliberately **not** gated by `whenNotPaused`. Pausing halts opening/closing but must never freeze the mechanism that clears underwater positions.
-- **Funding-consistent condition.** Liquidatability is evaluated on `adjustedPnl = pricePnl − fundingOwed`, exactly like `closeTrade`. A position solvent by price alone can still be liquidated once accrued funding pushes the loss past the 90% threshold.
-- **Caller funds the oracle fee.** Like all price-consuming functions, `liquidate` is `payable` and forwards `msg.value` to the oracle. This removes any dependency on a pre-funded oracle ETH balance — the liquidator, who is already incentivized, always pays for a fresh price.
-- **Pyth outage policy (accepted risk).** During a Pyth outage (stale price, wide confidence, or Chainlink deviation) the oracle **reverts**, so `liquidate` reverts too. This is intentional: the protocol never liquidates at a stale or unverified price. Bad debt that may accrue while the oracle is unavailable is absorbed by the Vault's solvency layers (see `docs/07-vault-ssl.md`) rather than by forcing liquidations at a dubious price. Because the liquidator now funds the fee directly, the previous "oracle ran out of ETH" pseudo-outage no longer exists.
-- **Reward incentive floor.** The liquidator reward is 10% of the remaining collateral, which shrinks as a position sinks toward 100% loss. `MIN_COLLATERAL = 10 USDC` guarantees that at the 90% threshold the reward stays above realistic L2 gas, so no position is too small to be worth liquidating (avoiding dust that would otherwise decay straight into bad debt).
-- **Payout order.** The Vault is paid before the liquidator reward, so a liquidator blacklisted by the collateral token can only block their own reward, not the Vault's settlement.
-- **Rounding favors the pool.** PnL truncates `exitValue` toward the pool in both directions (longs floor, shorts ceil), upholding the invariant that the Vault never loses value to sub-USDC rounding.
-
-**Automatic TP/SL (`executeLimit`) — design decisions:**
-
-- **Permissionless, not `onlyKeeper`.** Anyone can call `executeLimit(tradeId, priceUpdate)` once the oracle price crosses the trade's TP or SL — the same philosophy as `liquidate`. No whitelisted keeper and no Chainlink Automation dependency; any bot that submits a fresh Pyth price can execute and collect the reward.
-- **Trigger on oracle price, settle at execution price.** The trigger condition is evaluated at the raw oracle price (long TP: `price >= tp`, long SL: `price <= sl`; short inverse). Settlement then uses oracle + close-direction spread with the same funding-adjusted PnL, close fee, and 3-branch payout as `closeTrade`. The trader receives the PnL at the real execution price, not exactly at the stored TP/SL.
-- **Payout to the trade owner, reward to the caller.** The payout goes to the trade owner (not `msg.sender`). The executor earns `EXEC_REWARD_BPS` (0.1%) of notional, **carved out of the trader's payout** (never from the Vault), capped so the trader is never pushed negative — on a full-loss stop the executor simply earns 0. The trader effectively pays a small fee for the automation that benefits them.
-- **Gated by `whenNotPaused`** like `closeTrade` (unlike `liquidate`, which stays live while paused).
-
-### 4.3 `TradingStorage.sol` (State Layer)
-
-**Role:** Stores all persistent data. Allows logic upgrades without data migration.
+Stores trades, pairs, OI and funding state, and holds trader collateral. Only `tradingEngine` can change
+state or move funds.
 
 ```solidity
-// Main mappings
-mapping(uint256 => Trade) public trades;
-mapping(uint256 => uint256) public openInterest; // pairIndex => OI
-mapping(address => uint256[]) public userTrades;
-
-// Global indices
-uint256 public cumulativeFundingIndex;
-uint256 public lastFundingTime;
+mapping(uint256 => Trade) private _trades;
+mapping(address => uint256[]) private _userTrades;
+mapping(uint256 => uint256) private _openInterestLong;   // pairIndex => OI (18 decimals)
+mapping(uint256 => uint256) private _openInterestShort;
+mapping(uint256 => int256) private _cumulativeFundingIndex; // per pair
+mapping(uint256 => uint256) private _fundingLastUpdated;    // per pair
+mapping(uint256 => int256) private _tradeFundingIndex;      // per trade, entry index
+Pair[] private _pairs;
 ```
 
-### 4.4 `PythChainlinkOracle.sol` (implements `IOracle`)
+`increaseOpenInterest` enforces `long + short <= maxOI` per pair. `deleteTrade` removes the ID from the
+user's array with a linear search, so the gas cost of closing or liquidating grows with the number of open
+trades of that user.
 
-**Role:** Validates Pyth prices with staleness, confidence, and Chainlink deviation checks. The caller funds the Pyth fee via `msg.value`; the oracle refunds the surplus.
+### 4.4 `PythChainlinkOracle.sol`
 
-| Function                                | Description                                                                    |
-| :-------------------------------------- | :----------------------------------------------------------------------------- |
-| `getPrice(pairIndex, priceData)`        | `payable` — updates Pyth price on-chain, validates, returns normalized price (18 decimals) + confidence, refunds surplus ETH |
-| `getPairFeed(pairIndex)`                | Returns PairFeed config for a pair                                             |
+See section 2. Owner functions: `setPairFeed(pairIndex, pythFeedId, chainlinkFeed, heartbeat)`. `setPairFeed`
+always marks the feed active; there is no function to deactivate a feed.
 
-**Interface:** `IOracle { getPrice(uint256 pairIndex, bytes[] calldata priceData) payable → (uint128 price18, uint128 conf18) }` — technology-agnostic. TradingEngine only depends on this interface, not the implementation.
+### 4.5 `SpreadManager.sol`
 
-**Validation pipeline (all checks must pass or transaction reverts):**
+`getSpreadBps(pairIndex, currentOI)` (formula in [Guide 2](./02-mathematics.md#4-execution-price-with-dynamic-spread)).
+The keeper calls `updateVolatility`; the owner sets base spread, factors, cap, volatility change bound and
+keeper.
 
-```solidity
-// 0. Caller funds the fee via msg.value; require enough, refund the surplus at the end
-uint256 fee = PYTH.getUpdateFee(priceData);
-if (msg.value < fee) revert InsufficientFee(msg.value, fee);
+### 4.6 `SolvencyManager.sol`
 
-// 1. Update Pyth price on-chain (user-submitted signed data)
-PYTH.updatePriceFeeds{value: fee}(priceData);
+| Function | Access | Action |
+| :------- | :----- | :----- |
+| `checkAndAct()` | Anyone | Below 100% CR, injects `min(reserve, deficit)` from the AssistantFund; below 95%, also opens a bonding round for the remaining shortfall if none is active |
+| `deficitToTarget()` | View | `Vault.collateralizationDeficit()` |
 
-// 2. Read price with staleness check (reverts if stale)
-PythStructs.Price memory price = PYTH.getPriceUnsafe(feed.pythFeedId);
-if (block.timestamp - price.publishTime > MAX_STALENESS) revert StalePrice();
+It holds no funds. There is no buyback function.
 
-// 3. Reject if confidence interval too wide
-if (price.conf * BPS_DENOMINATOR / uint64(abs(price.price)) > MAX_CONFIDENCE_BPS)
-    revert ConfidenceTooWide();
+### 4.7 `AssistantFund.sol`
 
-// 4. Chainlink deviation anchor (NOT a fallback — circuit breaker only)
-uint256 chainlinkPrice = _getChainlinkPrice18(feed.chainlinkFeed, feed.chainlinkHeartbeat);
-uint256 deviation = _calculateDeviation(pythPrice, chainlinkPrice);
-if (deviation > MAX_DEVIATION) revert PriceDeviationTooHigh();
-```
+| Function | Access | Description |
+| :------- | :----- | :---------- |
+| `injectFunds(amount)` | SolvencyManager | Sends reserve USDC to the vault |
+| `skim()` | Anyone | Sends `balance - targetCap` to the vault |
+| `balance()` / `isFunded()` | View | |
+| `setSolvencyManager`, `setTargetCap` | Owner | |
 
-### 4.5 `SolvencyManager.sol`
+It receives fees as plain USDC transfers when it is set as the engine treasury.
 
-**Role:** Orchestrates Vault defense layers.
+### 4.8 `BondDepository.sol` and `SynthToken.sol`
 
-| Function            | Trigger                    | Action                    |
-| :------------------ | :------------------------- | :------------------------ |
-| `checkAndInject()`  | CR < 100%                  | Inject from AssistantFund |
-| `activateBonding()` | AssistantFund insufficient | Start bond sales          |
-| `executeBuyback()`  | CR > 110%                  | Buy and burn $SYNTH       |
+| Function | Access | Description |
+| :------- | :----- | :---------- |
+| `activateBonding(neededUsdc)` | SolvencyManager | Opens a round with a USDC cap |
+| `bond(usdcAmount)` | Anyone, during a round | Sends USDC from the caller to the vault, mints $SYNTH into the depository and records a linear vesting position |
+| `claim(bondId)` | Bonder | Transfers vested $SYNTH |
+| `setReferencePrice`, `setDiscountBps` (max 10%), `setVestingPeriod` (max 7 days), `setSolvencyManager` | Owner | |
+| `SynthToken.mint` | Minter (set by owner) | |
+| `SynthToken.burn` / `burnFrom` | Holder / approved spender | |
 
-### 4.6 `AssistantFund.sol` (implemented — Layer 2)
-
-**Role:** Emergency USDC reserve (Layer 2 of the solvency system).
-
-| Function                       | Access           | Description                                             |
-| :----------------------------- | :--------------- | :----------------------------------------------------- |
-| `injectFunds(amount)`          | SolvencyManager  | Transfer reserve USDC to the Vault to cover a deficit  |
-| `skim()`                       | Public           | Send `balance - targetCap` overflow to the Vault       |
-| `balance()` / `isFunded()`     | View             | Current reserve; whether it has reached `targetCap`    |
-| `setSolvencyManager(addr)`     | Owner            | Set the Phase 10 orchestrator allowed to inject        |
-| `setTargetCap(cap)`            | Owner            | Set the reserve cap above which fees overflow           |
-
-**Design decisions:**
-
-- **Input:** 20% of all trading fees, received as **plain USDC transfers** by pointing the TradingEngine `treasury` at this contract — no engine changes and no per-transfer hook.
-- **Injection:** only callable by `SolvencyManager` (Phase 10). The address is owner-settable (`setSolvencyManager`), so Phase 9 does not depend on Phase 10; until it is set, `injectFunds` reverts `SolvencyManagerNotSet`.
-- **Overflow:** because plain transfers have no hook, the excess above `targetCap` is skimmed lazily by the permissionless `skim()` (anyone or a keeper), sending `balance - targetCap` to the Vault so the reserve does not over-accumulate fees at the LPs' expense.
-
-### 4.7 `BondDepository.sol`
-
-**Role:** Last resort mechanism. Sells $SYNTH at discount.
-
-| Parameter        | Value    | Description                       |
-| :--------------- | :------- | :-------------------------------- |
-| `DISCOUNT`       | 5-10%    | Discount vs TWAP                  |
-| `VESTING_PERIOD` | 0-7 days | Vesting period (based on urgency) |
-| `BOND_CAP`       | Variable | Maximum USDC to raise             |
+A round stays open until its cap is used; it does not close when the vault recovers.
 
 ---
 
-## 5. Detailed Execution Flows
+## 5. Execution Flows
 
-> **Note:** All trading functions that require a price accept `bytes[] calldata priceUpdate` as a parameter. The frontend fetches signed price data from Pyth Hermes API and includes it in the transaction calldata (pull oracle model). These functions are `payable`: the caller attaches the Pyth fee as `msg.value`, TradingEngine forwards it to the oracle, and any surplus is refunded back to the caller (TradingEngine never retains ETH).
+All price-consuming functions take `bytes[] calldata priceUpdate` and are `payable`.
 
-### 5.1 Open Trade Flow
+### 5.1 Open trade
 
 ```mermaid
 sequenceDiagram
-    participant Frontend
-    participant Hermes as Pyth Hermes
     participant User
-    participant Trading as TradingEngine
+    participant Engine as TradingEngine
     participant Oracle as PythChainlinkOracle
-    participant Pyth as Pyth Contract
-    participant CL as Chainlink Feed
+    participant Spread as SpreadManager
     participant Storage as TradingStorage
-    participant Vault
 
-    Frontend->>Hermes: GET /v2/updates/price/latest
-    Hermes-->>Frontend: priceUpdate (signed bytes)
-
-    User->>Trading: openTrade{value: fee}(pair, 100 USDC, 10x, Long, priceUpdate)
-
-    Trading->>Oracle: getPrice(pairIndex, priceUpdate)
-    Oracle->>Pyth: updatePriceFeeds{value: fee}(priceUpdate)
-    Oracle->>Pyth: getPriceNoOlderThan(feedId, MAX_STALENESS)
-    Pyth-->>Oracle: PythPrice(price, conf, expo, publishTime)
-    Oracle->>CL: latestRoundData()
-    CL-->>Oracle: chainlinkPrice
-    Note over Oracle: Staleness + Confidence + Deviation checks
-    Oracle-->>Trading: validatedPrice (18 decimals)
-
-    Trading->>Trading: Validations:<br/>- OI check<br/>- Leverage check<br/>- Pair active
-
-    Trading->>Trading: Calculate:<br/>- Entry price with spread<br/>- Fees (0.08%)
-
-    Trading->>Storage: transferFrom(user, 100 USDC)
-    Storage-->>Trading: Collateral received
-
-    Trading->>Storage: storeTrade(trade params)
-    Trading->>Storage: increaseOI(pair, +1000 USD)
-
-    Trading-->>User: Emit TradeOpened(tradeId)
+    User->>Engine: openTrade{value: fee}(pair, isLong, 100 USDC, 10x, expectedPrice, slippage, tp, sl, priceUpdate)
+    Engine->>Storage: getPair (active, maxLeverage)
+    Engine->>Oracle: getPrice{value}(pairIndex, priceUpdate)
+    Oracle-->>Engine: price18 (surplus ETH refunded)
+    Note over Engine: TP/SL vs oracle price
+    Engine->>Storage: getOpenInterest
+    Engine->>Spread: getSpreadBps
+    Note over Engine: execution price, slippage, opening guard
+    Engine->>Storage: funding index update
+    Engine->>Storage: USDC transferFrom(user) to TradingStorage
+    Engine->>Storage: sendCollateral: 80% of fee to Vault, 20% to treasury
+    Engine->>Storage: storeTrade, setTradeFundingIndex, increaseOpenInterest
+    Engine-->>User: TradeOpened, leftover ETH
 ```
 
-### 5.2 Close Trade with Profit Flow
+### 5.2 Close with profit
+
+Example: long 10x, 100 USDC deposited, oracle 50,000 at open and 52,000 at close, 5 BPS spread, no
+funding accrued.
+
+| Item | Value |
+| :--- | :---- |
+| Open fee | 0.80 USDC (0.64 to vault, 0.16 to treasury) |
+| Stored collateral | 99.20 USDC |
+| Open price / exit price | 50,025 / 51,974 |
+| PnL | 38.648835 USDC |
+| Close fee | 0.7936 USDC |
+| Payout | 137.055235 USDC: 98.4064 from TradingStorage, 38.648835 from the Vault |
 
 ```mermaid
 sequenceDiagram
-    participant Frontend
-    participant Hermes as Pyth Hermes
     participant User
-    participant Trading as TradingEngine
+    participant Engine as TradingEngine
     participant Oracle as PythChainlinkOracle
     participant Storage as TradingStorage
     participant Vault
 
-    Frontend->>Hermes: GET /v2/updates/price/latest
-    Hermes-->>Frontend: priceUpdate (signed bytes)
-
-    User->>Trading: closeTrade{value: fee}(tradeId, priceUpdate)
-
-    Trading->>Storage: getTrade(tradeId)
-    Storage-->>Trading: trade{owner, entryPrice, size...}
-
-    Trading->>Trading: Verify msg.sender == owner
-
-    Trading->>Oracle: getPrice(pairIndex, priceUpdate)
-    Oracle-->>Trading: exitPrice = 52,000 USD (validated)
-
-    Trading->>Trading: Calculate PnL:<br/>- Raw PnL = +400 USDC<br/>- After fees = +384 USDC<br/>- Payout = 484 USDC
-
-    Note over Trading: EFFECTS first (CEI pattern)
-    Trading->>Storage: deleteTrade(tradeId)
-    Trading->>Storage: decreaseOI(pair, -1000 USD)
-
-    Note over Trading: INTERACTIONS last
-    Trading->>Storage: sendCollateral(user, 100 USDC)
-    Trading->>Vault: sendPayout(user, 384 USDC)
-
-    Trading-->>User: Emit TradeClosed(tradeId, +384)
+    User->>Engine: closeTrade{value: fee}(tradeId, expectedPrice, slippage, priceUpdate)
+    Engine->>Storage: getTrade (owner check)
+    Engine->>Oracle: getPrice
+    Note over Engine: close spread, slippage, funding index update, PnL, funding, payout cap, close fee
+    Engine->>Storage: deleteTrade, decreaseOpenInterest
+    Engine->>Storage: sendCollateral: close fee split (Vault, treasury)
+    Engine->>Storage: sendCollateral(user, collateral - closeFee)
+    Engine->>Vault: sendPayout(user, profit)
+    Engine-->>User: TradeClosed, leftover ETH
 ```
 
-### 5.3 Liquidation Flow
+On a partial loss, `TradingStorage` pays the trader the payout and sends the rest of the collateral to the
+vault. On a full loss, all collateral goes to the vault.
+
+### 5.3 Liquidation
 
 ```mermaid
 sequenceDiagram
-    participant Frontend
-    participant Hermes as Pyth Hermes
-    participant Bot as Liquidator Bot
-    participant Trading as TradingEngine
+    participant Bot as Liquidator
+    participant Engine as TradingEngine
     participant Oracle as PythChainlinkOracle
     participant Storage as TradingStorage
     participant Vault
 
-    Note over Bot: Monitors positions off-chain via Pyth Hermes streaming
-    Frontend->>Hermes: GET /v2/updates/price/latest
-    Hermes-->>Frontend: priceUpdate (signed bytes)
-
-    Bot->>Trading: liquidate{value: fee}(tradeId, priceUpdate)
-
-    Trading->>Storage: getTrade(tradeId)
-    Storage-->>Trading: trade{...}
-
-    Trading->>Oracle: getPrice(pairIndex, priceUpdate)
-    Oracle-->>Trading: currentPrice (validated)
-
-    Trading->>Trading: Calculate loss %
-
-    alt Loss >= 90% (Liquidatable)
-        Trading->>Storage: deleteTrade(tradeId)
-        Trading->>Storage: decreaseOI(pair, -size)
-
-        Note over Trading: Distribute remaining 10%
-        Trading->>Storage: sendCollateral(vault, 9 USDC)
-        Trading->>Storage: sendCollateral(bot, 1 USDC)
-
-        Trading-->>Bot: Emit TradeLiquidated(tradeId)
-    else Loss < 90% (Not Liquidatable)
-        Trading-->>Bot: revert NotLiquidatable()
+    Bot->>Engine: liquidate{value: fee}(tradeId, priceUpdate)
+    Engine->>Storage: getTrade
+    Engine->>Oracle: getPrice (price, conf)
+    Note over Engine: price +/- conf, close spread, funding index update, loss incl. funding
+    alt loss >= 90% of collateral
+        Engine->>Storage: deleteTrade, decreaseOpenInterest
+        Engine->>Storage: sendCollateral(Vault, collateral - reward)
+        Engine->>Storage: sendCollateral(bot, reward)
+        Engine-->>Bot: TradeLiquidated
+    else
+        Engine-->>Bot: revert NotLiquidatable
     end
 ```
 
@@ -553,61 +347,31 @@ sequenceDiagram
 
 ## 6. Design Patterns
 
-### 6.1 Checks-Effects-Interactions (CEI)
+### 6.1 Checks, effects, interactions
 
-**CRITICAL** to avoid reentrancy:
+`openTrade`, `closeTrade`, `liquidate` and `executeLimit` are `nonReentrant` (`updateTp`/`updateSl` are
+not). They call the oracle (an external, owner-configured contract) and update the funding state in
+`TradingStorage` before the trade is deleted; the trade deletion and OI change happen before any USDC
+transfer.
 
-```solidity
-function closeTrade(uint256 tradeId) external nonReentrant {
-    Trade storage t = trades[tradeId];
+### 6.2 Access-control helpers
 
-    // 1. CHECKS
-    if (msg.sender != t.user) revert NotTradeOwner();
+Each access check is a modifier that calls an internal `_require*` function (for example `onlyTradingEngine`
+calls `_requireTradingEngine`), which keeps the check in one place in the bytecode.
 
-    // 2. EFFECTS (update state BEFORE external calls)
-    uint256 payout = _calculatePnL(t);
-    delete trades[tradeId];
-    openInterest[t.pairIndex] -= t.size;
+### 6.3 Push payouts
 
-    // 3. INTERACTIONS (external calls LAST)
-    if (payout > 0) {
-        vault.sendPayout(msg.sender, payout);
-    }
-}
-```
+Payouts are pushed to the trader in the same call. If the token blocks a trader's address, that trader's
+close reverts. A pull ("claim") pattern is not used.
 
-### 6.2 Diamond Pattern (EIP-2535)
+### 6.4 Contract size
 
-Recommended if system exceeds 24kb per contract limit:
-
-```
-┌─────────────────────────────┐
-│      Diamond Proxy          │
-│  (Single entry point)       │
-├─────────────────────────────┤
-│ Facet: TradingFacet         │
-│ Facet: VaultFacet           │
-│ Facet: OracleFacet          │
-│ Facet: SolvencyFacet        │
-└─────────────────────────────┘
-```
-
-### 6.3 Pull over Push
-
-For profit withdrawals, consider "claim" pattern:
-
-```solidity
-// Instead of:
-vault.sendPayout(user, amount); // Push (can fail)
-
-// Use:
-pendingPayouts[user] += amount;
-// User claims later
-```
+`TradingEngine` runtime size is 22,911 bytes, 1,665 bytes under the 24,576 byte limit
+(`forge build --sizes`). No proxy or diamond pattern is used; contracts are not upgradeable.
 
 ---
 
 **See also:**
 
-- [Guide 4: Trade-offs and Problems](./04-tradeoffs.md) - Risks and mitigations
-- [Guide 5: Solidity Implementation](./05-implementation.md) - Detailed code
+- [Guide 4: Trade-offs and Risks](./04-tradeoffs.md)
+- [Guide 5: Implementation](./05-implementation.md)
