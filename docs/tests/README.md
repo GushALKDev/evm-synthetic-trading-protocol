@@ -1,229 +1,226 @@
-# 🧪 Test Suite
+# Test Suite
 
-> ⚠️ **DISCLAIMER:** This is a **Proof of Concept with an educational purpose**. It has **not been
-> audited by an external firm** and **must not be used in production** or with real funds.
+**Status:** Proof of concept. Not audited and not deployed.
 
-**553 tests** across unit, fuzz, invariant, integration and fork suites. This document explains what
-each group covers, why it exists, which invariant it belongs to, and links to the code.
+All numbers below were measured on 2026-09-28 from a clean `git clone --recursive` at commit `f89ca0c`
+after `npm ci`, with forge 1.7.1 and solc 0.8.24, and without `FORK_RPC_URL` set.
 
-| Suite       | File                                             | Tests | Purpose                                      |
-| :---------- | :----------------------------------------------- | ----: | :------------------------------------------- |
-| Unit        | [`test/unit/`](../../test/unit/)                 |   474 | Per-contract behaviour and access control    |
-| Integration | [`test/integration/`](../../test/integration/)   |    23 | The full wired system, end to end            |
-| Invariant   | [`test/invariant/`](../../test/invariant/)       |    11 | Properties that must never break             |
-| Fork        | [`test/fork/`](../../test/fork/)                 |    13 | Real Pyth + Chainlink feeds on mainnet       |
-| Fuzz        | spread across suites (`testFuzz_*`)              |    36 | Randomized inputs over financial math        |
+| Group | Location | Tests | Command that counts them |
+| :---- | :------- | ----: | :----------------------- |
+| Unit | `test/unit/` | 506 | `forge test --match-path "test/unit/*" --summary` |
+| Integration | `test/integration/Solvency.integration.t.sol` | 17 | `forge test --match-path "test/integration/*" --summary` |
+| Invariant (integration) | `test/integration/Solvency.invariant.t.sol` | 6 | same as above |
+| Invariant | `test/invariant/` | 11 | `forge test --match-path "test/invariant/*" --summary` |
+| Fork | `test/fork/` | 13 | skipped without `FORK_RPC_URL` |
+| **Total** | | **553** | `forge test --list --json 2>/dev/null \| jq '[.[][][]] \| length'` |
+
+`forge test` result in mock mode: 540 passed, 0 failed, 13 skipped.
+
+Across these groups there are 35 stateless fuzz tests (functions named `testFuzz_*`, 32 in unit files and 3
+in the integration file) and 17 stateful invariant functions (`invariant_*`). Count them with:
 
 ```bash
-forge test                                    # everything
+forge test --list --json 2>/dev/null | jq '[.[][][] | select(startswith("testFuzz_"))] | length'   # 35
+forge test --list --json 2>/dev/null | jq '[.[][][] | select(startswith("invariant_"))] | length'  # 17
+```
+
+`foundry.toml` has no `[fuzz]` or `[invariant]` section, so Foundry defaults apply: 256 runs per fuzz test,
+and 256 runs of 500 calls per invariant (forge reports 128,000 calls per invariant function).
+
+```bash
+forge test                                    # everything (fork tests skip without FORK_RPC_URL)
 forge test --match-path "test/integration/*"  # integration only
 forge test --match-path "test/invariant/*"    # invariants only
 forge test --match-test testFuzz              # fuzz only
-FORK_RPC_URL=<rpc> forge test --match-path "test/fork/*"   # fork (skipped without the env var)
-forge coverage                                # coverage report
+FORK_RPC_URL=<hyperevm-rpc> forge test --match-path "test/fork/*"
+forge coverage --report summary
 ```
 
 ---
 
-## 🔗 Integration Tests
+## Integration tests
 
-The unit suites test each contract in isolation — `SolvencyManager` in particular runs against a
-`MockVault` — so nothing there proves the layers actually **compose**. The integration suite deploys
-the real contracts through [`DeployLib`](../../script/Deploy.s.sol), the same code the deploy script
-uses, so the tested topology is the deployed topology.
+The unit suite tests each contract in isolation; `SolvencyManager` in particular runs against a
+`MockVault`. The integration suite deploys the real contracts through `DeployLib` in
+[`script/Deploy.s.sol`](../../script/Deploy.s.sol), the same code the deploy script uses. It does not
+deploy a `TradingEngine` with trades: trader payouts are simulated by calling `Vault.sendPayout` from the
+engine address.
 
-### [`Solvency.integration.t.sol`](../../test/integration/Solvency.integration.t.sol) — 17 tests
+### [`Solvency.integration.t.sol`](../../test/integration/Solvency.integration.t.sol): 17 tests
 
 | Group | Covers |
 | :---- | :----- |
-| Wiring | Every cross-contract permission is granted, and `treasury` points at the AssistantFund so the fee split actually funds the reserve |
-| Healthy / Warning | `checkAndAct` is a no-op above 100% CR and never spends reserve in the 100–110% warning band |
-| Layer 2 | Reserve injection restores CR without opening a round when it suffices |
-| Layer 3 | Bonding opens for the exact shortfall, closes when the cap is exhausted, and does not stack rounds |
-| Full cycle | Drain → rescue → bond → vest → claim, ending at 100% CR |
-| Total insolvency | Regression for the division-by-zero bug below |
-| Fuzz | `checkAndAct` never worsens CR nor overshoots; injection is bounded by both the deficit and the reserve; a full round always restores solvency |
+| Wiring | Cross-contract permissions are granted and `treasury` points at the AssistantFund |
+| Healthy / Warning | `checkAndAct` does nothing at or above 100% CR and does not spend reserve in the 100% to 110% band |
+| Layer 2 | Reserve injection restores CR without opening a bonding round when it is enough |
+| Layer 3 | Bonding opens for the shortfall, closes when the cap is used up, and does not stack rounds |
+| Full cycle | Drain, rescue, bond, vest, claim, ending at 100% CR |
+| Total insolvency | Regression tests for the division by zero described below |
+| Fuzz (3) | `testFuzz_CheckAndAct_NeverWorsensCR`, `testFuzz_Injection_BoundedByDeficitAndReserve`, `testFuzz_Bonding_AlwaysRestoresToTarget` |
 
-### [`Solvency.invariant.t.sol`](../../test/integration/Solvency.invariant.t.sol) — 6 invariants
+### [`Solvency.invariant.t.sol`](../../test/integration/Solvency.invariant.t.sol): 6 invariant functions
 
-Driven by [`SolvencyHandler`](../../test/integration/handlers/SolvencyHandler.sol), which interleaves
-LP deposits, trader payouts, fee accrual, rescues, bonding, claims and skims against the live system.
+Driven by [`SolvencyHandler`](../../test/integration/handlers/SolvencyHandler.sol), which interleaves LP
+deposits, simulated trader payouts, fee accrual (`deal`), rescues, bonding, claims and skims.
 
-| Invariant | What it guarantees |
-| :-------- | :----------------- |
-| `invariant_RescueAlwaysCallable` | `deficitToTarget` stays well-defined and `checkAndAct` never reverts — **in any reachable state, including total insolvency** |
-| `invariant_EscrowSolventUnderFullSystem` | The vesting escrow covers unclaimed positions even while rescues and payouts churn around it |
-| `invariant_SynthSupplyOnlyFromBonding` | $SYNTH is only ever minted by bonding, across rescue cycles |
-| `invariant_ReserveNeverExceedsCapAfterSkim` | Reserve overflow above `targetCap` is always recoverable to the Vault |
-| `invariant_RescueNeverOvershootsWildly` | A rescue never inflates CR far past its target |
-
----
-
-## 🔒 Invariants (Roadmap 12.3)
-
-Invariants are properties asserted after **every** step of a random action sequence. Each suite runs
-256 sequences × 500 calls ≈ **128,000 calls per invariant**. All state changes go through a handler
-that only issues valid calls, so a revert would mean a real bug rather than a bad input.
-
-### Protocol — [`Protocol.invariant.t.sol`](../../test/invariant/Protocol.invariant.t.sol)
-
-Driven by [`ProtocolHandler`](../../test/invariant/handlers/ProtocolHandler.sol), which deposits,
-opens, closes, liquidates, moves the oracle price (±30%) and warps time.
-
-| Invariant | Roadmap | What it guarantees | Why it matters |
-| :-------- | :------ | :----------------- | :------------- |
-| [`invariant_TotalAssetsBackedByBalance`](../../test/invariant/Protocol.invariant.t.sol) | **12.3.1** | `vault.totalAssets() == USDC balance` | `totalAssets` is balance-based; any drift means the Vault promises LPs liquidity it does not hold. |
-| [`invariant_OpenInterestWithinMax`](../../test/invariant/Protocol.invariant.t.sol) | **12.3.2** | Long and short OI each stay `<= pair.maxOI` | The OI cap bounds the Vault's worst-case payout. Breaching it is unbounded risk for LPs. |
-| [`invariant_SharePricePositive`](../../test/invariant/Protocol.invariant.t.sol) | **12.3.3** | `convertToAssets(1e18) > 0` while shares exist | A zero share price breaks deposit/withdraw math (division by zero, infinite mint). |
-| [`invariant_StorageCoversOpenCollateral`](../../test/invariant/Protocol.invariant.t.sol) | custody | TradingStorage holds `>=` the collateral owed to open trades | Trader collateral lives in TradingStorage, never the Vault. A shortfall means a trader cannot be paid on close. |
-| [`invariant_SharesBackedByAssets`](../../test/invariant/Protocol.invariant.t.sol) | custody | Non-zero share supply implies non-zero assets | The insolvency end-state; would let the next depositor mint against an empty Vault. |
-
-### Bonding — [`Bonding.invariant.t.sol`](../../test/invariant/Bonding.invariant.t.sol)
-
-Driven by [`BondingHandler`](../../test/invariant/handlers/BondingHandler.sol), which opens rounds,
-bonds, claims, warps time and re-prices via the admin setters.
-
-| Invariant | What it guarantees | Why it matters |
-| :-------- | :----------------- | :------------- |
-| [`invariant_EscrowCoversUnclaimedSynth`](../../test/invariant/Bonding.invariant.t.sol) | Depository $SYNTH balance `>=` promised − claimed | $SYNTH is minted into escrow at bond time. Below this, a bonder's `claim()` reverts and their USDC bought nothing. |
-| [`invariant_SupplyEqualsPromised`](../../test/invariant/Bonding.invariant.t.sol) | `synth.totalSupply() == total bonded` | Minting is minter-gated to the depository. A larger supply means an unaccounted mint path. |
-| [`invariant_ClaimedNeverExceedsPromised`](../../test/invariant/Bonding.invariant.t.sol) | Per position, `claimedSynth <= totalSynth` | Guards linear-vesting accounting from paying beyond the bond. |
-| [`invariant_RaisedWithinCap`](../../test/invariant/Bonding.invariant.t.sol) | Vault USDC equals the tracked raise | `bond()` clamps to the round cap; over-raising would dilute $SYNTH beyond the approved deficit. |
-
-> `invariant_CallSummary` in both suites is not an assertion — it prints how often each action ran, so
-> a silently idle suite (everything reverting, nothing asserted) is visible instead of passing vacuously.
+| Invariant | What it asserts |
+| :-------- | :-------------- |
+| `invariant_RescueAlwaysCallable` | Calls `checkAndAct` and asserts `deficitToTarget` is at most the nominal liabilities (`totalSupply / 1e12`) |
+| `invariant_EscrowSolventUnderFullSystem` | Depository $SYNTH balance covers unclaimed vesting |
+| `invariant_SynthSupplyOnlyFromBonding` | $SYNTH supply equals the amount the handler bonded |
+| `invariant_ReserveNeverExceedsCapAfterSkim` | Calls `skim` and asserts the reserve is at most `targetCap` |
+| `invariant_RescueNeverOvershootsWildly` | CR stays below 100x (`assertLt(cr, 100 * WAD)`); a loose bound |
+| `invariant_CallSummary` | Logs call counts, asserts nothing |
 
 ---
 
-## 🎲 Fuzz Tests (Roadmap 12.2)
+## Invariant suites
 
-Randomized inputs over the financial math, where off-by-one and rounding errors hide.
+Each invariant is checked after every call of a random sequence produced by a handler that only issues
+calls expected to succeed.
 
-| Area | Representative tests | Property under test |
-| :--- | :------------------- | :------------------ |
-| PnL & payouts | `testFuzz_CloseTrade_PnL`, `testFuzz_ProfitCap`, `testFuzz_OpenTrade` | PnL is symmetric and the 9× profit cap always binds. |
-| Liquidations | `testFuzz_Liquidate_TotalConserved`, `testFuzz_Liquidate_ShortRoundingFavorsPool` | Reward + Vault share always equals collateral; rounding never favours the trader. |
-| Funding | `testFuzz_IndexDelta_Symmetry`, `testFuzz_FundingOwed_LongShortOpposite`, `testFuzz_Funding_FundsConservation` | Longs and shorts pay exact opposites; funding is zero-sum. |
-| Spread | `testFuzz_GetSpreadBps_NeverExceedsMax`, `testFuzz_GetSpreadBps_MonotonicInOI` | Spread is monotonic in OI/volatility and never exceeds `maxSpreadBps`. |
-| Vault | `testFuzz_DepositAndWithdraw`, `testFuzz_SendPayout`, `testFuzz_CR_TracksTotalAssets` | Share accounting round-trips; CR tracks `totalAssets` exactly. |
-| Bonding | `testFuzz_Bond_ConservesCapAndInjects`, `testFuzz_Vested_MonotonicAndBounded`, `testFuzz_Claim_NoDustAfterFullVesting` | Vesting is monotonic, bounded by the total, and leaves no dust. |
-| Limit orders | `testFuzz_ExecuteLimit_ConservesFunds` | Executor reward is carved from the payout, never from the Vault. |
+### Protocol: [`Protocol.invariant.t.sol`](../../test/invariant/Protocol.invariant.t.sol)
 
----
+Driven by [`ProtocolHandler`](../../test/invariant/handlers/ProtocolHandler.sol) with `MockOracle` and
+`MockSpreadManager(5)`. Actions: deposit, open (leverage 1 to 50, collateral 10 to 5,000 USDC, no TP/SL),
+close, liquidate, move the price within 30% of 50,000, and warp 1 minute to 7 days. It does not cover
+`executeLimit`, withdrawals, pausing or admin changes.
 
-## 📋 Unit Tests by Contract
+| Invariant | What it asserts | Notes |
+| :-------- | :-------------- | :---- |
+| `invariant_TotalAssetsBackedByBalance` | `vault.totalAssets() == usdc.balanceOf(vault)` | Always true by construction: Solady's `totalAssets()` returns that balance |
+| `invariant_OpenInterestWithinMax` | Long OI and short OI are each `<= maxOI` | The contract caps long + short together, which is stronger than what this checks |
+| `invariant_SharePricePositive` | `convertToAssets(1e18) > 0` while shares exist | |
+| `invariant_StorageCoversOpenCollateral` | TradingStorage USDC `>=` sum of open collateral tracked by the handler | |
+| `invariant_SharesBackedByAssets` | Non-zero share supply implies non-zero assets | |
+| `invariant_CallSummary` | Logs call counts | Asserts nothing |
 
-| Contract | Test file | Tests | Focus |
-| :------- | :-------- | ----: | :---- |
-| TradingEngine | [`TradingEngine.t.sol`](../../test/unit/TradingEngine.t.sol) | 141 | Open/close, liquidation, limit orders, fees, funding, spread, slippage, pause |
-| TradingStorage | [`TradingStorage.t.sol`](../../test/unit/TradingStorage.t.sol) | 107 | Trade CRUD, OI tracking, custody, pair config, access control |
-| Vault | [`Vault.t.sol`](../../test/unit/Vault.t.sol) | 58 | ERC-4626 accounting, 3-epoch withdrawal lock, payouts, CR, pause |
-| SpreadManager | [`SpreadManager.t.sol`](../../test/unit/SpreadManager.t.sol) | 43 | Spread formula, volatility bounds, keeper and admin setters |
-| BondDepository | [`BondDepository.t.sol`](../../test/unit/BondDepository.t.sol) | 35 | Rounds, pricing, discount caps, linear vesting, claims |
-| PythChainlinkOracle | [`PythChainlinkOracle.t.sol`](../../test/unit/PythChainlinkOracle.t.sol) | 30 | Staleness, confidence, deviation anchor, normalization |
-| AssistantFund | [`AssistantFund.t.sol`](../../test/unit/AssistantFund.t.sol) | 18 | Reserve injection, permissionless skim, access control |
-| SynthToken | [`SynthToken.t.sol`](../../test/unit/SynthToken.t.sol) | 18 | Minter gating, burn/burnFrom, supply invariants |
-| FundingLib | [`FundingLib.t.sol`](../../test/unit/FundingLib.t.sol) | 12 | Index delta and funding-owed math |
-| SolvencyManager | [`SolvencyManager.t.sol`](../../test/unit/SolvencyManager.t.sol) | 12 | CR thresholds, reserve-then-bonding routing, deficit math |
+### Bonding: [`Bonding.invariant.t.sol`](../../test/invariant/Bonding.invariant.t.sol)
 
-### Mocks — [`test/mocks/`](../../test/mocks/)
+Driven by [`BondingHandler`](../../test/invariant/handlers/BondingHandler.sol): open rounds, bond, claim,
+warp and change price, discount and vesting through the admin setters.
 
-`MockOracle` (preset prices + confidence, payable fee flow), `MockChainlinkFeed` (configurable answer
-and staleness), `MockSpreadManager` (fixed spread). `MockUSDC` is duplicated per test file by design,
-so suites stay independent.
+| Invariant | What it asserts |
+| :-------- | :-------------- |
+| `invariant_EscrowCoversUnclaimedSynth` | Depository $SYNTH balance `>=` promised minus claimed |
+| `invariant_SupplyEqualsPromised` | `synth.totalSupply()` equals the total bonded |
+| `invariant_ClaimedNeverExceedsPromised` | Per position, `claimedSynth <= totalSynth` |
+| `invariant_RaisedWithinCap` | Vault USDC equals the USDC the handler bonded (the name suggests a cap check; the cap itself is not asserted) |
+| `invariant_CallSummary` | Logs call counts, asserts nothing |
 
----
-
-## 🌐 Fork Tests (Roadmap 12.4)
-
-[`PythChainlinkOracle.fork.t.sol`](../../test/fork/PythChainlinkOracle.fork.t.sol) — 13 tests against
-**real mainnet Pyth and Chainlink feeds**, fetching live Hermes price updates. They validate what
-mocks cannot: real exponents (`-8`), real confidence bands, real cross-oracle deviation, and 18-decimal
-normalization against actual BTC/ETH prices.
-
-Requires `FORK_RPC_URL`; without it the tests **skip** (they do not fail), which is how CI runs them.
+There is no invariant that ties vault assets, open trader collateral, open PnL and fees together.
 
 ---
 
-## 📊 Coverage (Roadmap 12.1)
+## Fuzz tests
 
-**100% line coverage on all 9 `src/` contracts.** The repository-wide percentage is lower only
-because `forge coverage` also counts `node_modules/` (Pyth SDK) and test mocks.
-
-| Contract | Lines | Branches |
-| :------- | :---- | :------- |
-| AssistantFund | 100% | 100% |
-| BondDepository | 100% | 75% |
-| PythChainlinkOracle | 100% | 100% |
-| SolvencyManager | 100% | 100% |
-| SpreadManager | 100% | 100% |
-| SynthToken | 100% | 100% |
-| TradingEngine | 100% | 90% |
-| TradingStorage | 100% | 100% |
-| Vault | 100% | 100% |
+| Area | Tests | Property |
+| :--- | :---- | :------- |
+| PnL and payouts | `testFuzz_CloseTrade_PnL`, `testFuzz_ProfitCap`, `testFuzz_OpenTrade` | PnL symmetry, payout cap |
+| Liquidations | `testFuzz_Liquidate_TotalConserved`, `testFuzz_Liquidate_ShortRoundingFavorsPool` | Reward plus vault share equals collateral; short rounding favours the pool |
+| Funding | `testFuzz_IndexDelta_Symmetry`, `testFuzz_FundingOwed_LongShortOpposite`, `testFuzz_Funding_FundsConservation` | Per unit of size, longs and shorts owe opposite amounts; total USDC is conserved. The conservation test opens equal long and short sizes, so the index does not move and no funding is exchanged |
+| Spread | `testFuzz_GetSpreadBps_NeverExceedsMax`, `testFuzz_GetSpreadBps_MonotonicInOI` | Cap and monotonicity |
+| Vault | `testFuzz_DepositAndWithdraw`, `testFuzz_SendPayout`, `testFuzz_CR_TracksTotalAssets` | Share accounting and CR |
+| Bonding | `testFuzz_Bond_ConservesCapAndInjects`, `testFuzz_Vested_MonotonicAndBounded`, `testFuzz_Claim_NoDustAfterFullVesting` | Vesting bounds, no dust |
+| Limit orders | `testFuzz_ExecuteLimit_ConservesFunds` | Executor reward comes from the payout, not the vault |
 
 ---
 
-## 🔍 Static Analysis (Roadmap 12.5)
+## Unit tests by contract
 
-| Tool | Result |
-| :--- | :----- |
-| **Slither** 0.11.3 | **No criticals or highs.** Remaining findings are naming-convention noise (the `_param` / `IMMUTABLE` conventions are deliberate) plus documented false positives. |
-| **Aderyn** 0.6.8 | 2 "High" findings, both reviewed and dismissed — see below. |
+Counts from `forge test --match-path "test/unit/*" --summary`.
 
-```bash
-slither . --filter-paths "lib|node_modules|test"
-aderyn --src src
-```
+| Contract | Test file | Tests |
+| :------- | :-------- | ----: |
+| TradingEngine | [`TradingEngine.t.sol`](../../test/unit/TradingEngine.t.sol) | 149 |
+| TradingStorage | [`TradingStorage.t.sol`](../../test/unit/TradingStorage.t.sol) | 111 |
+| Vault | [`Vault.t.sol`](../../test/unit/Vault.t.sol) | 62 |
+| SpreadManager | [`SpreadManager.t.sol`](../../test/unit/SpreadManager.t.sol) | 48 |
+| BondDepository | [`BondDepository.t.sol`](../../test/unit/BondDepository.t.sol) | 38 |
+| PythChainlinkOracle | [`PythChainlinkOracle.t.sol`](../../test/unit/PythChainlinkOracle.t.sol) | 31 |
+| AssistantFund | [`AssistantFund.t.sol`](../../test/unit/AssistantFund.t.sol) | 19 |
+| SynthToken | [`SynthToken.t.sol`](../../test/unit/SynthToken.t.sol) | 19 |
+| FundingLib | [`FundingLib.t.sol`](../../test/unit/FundingLib.t.sol) | 16 |
+| SolvencyManager | [`SolvencyManager.t.sol`](../../test/unit/SolvencyManager.t.sol) | 13 |
 
-### Findings review
+### Mocks: [`test/mocks/`](../../test/mocks/)
 
-| Finding | Verdict |
-| :------ | :------ |
-| Slither `pyth-unchecked-confidence` | **False positive.** Confidence *is* validated in [`PythChainlinkOracle.sol`](../../src/PythChainlinkOracle.sol) before use; the detector does not recognise the pattern. |
-| Slither `unused-return` (Chainlink) | **False positive.** `answer` and `updatedAt` are consumed; the ignored fields (`roundId`, `answeredInRound`) are deprecated. |
-| Slither `unused-return` (TradingEngine) | **Intentional.** `conf18` is deliberately discarded on open/close — the conservative band applies only to liquidation (Phase 7.7). |
-| Slither `missing-zero-check` (`Vault._asset`) | **Fixed.** A zero-address check was added to the `Vault` constructor, matching every other contract. |
-| Aderyn H-1 "locks Ether" | **False positive.** Flags all 9 contracts for being `Ownable`; only the oracle receives ETH and it already refunds the surplus. |
-| Aderyn H-2 "unsafe cast" | **Not reachable.** Overflowing `uint128(synthOut)` would need a ~3.4e14 USDC round, far above USDC's total supply. Documented inline in `BondDepository.bond()`. |
-
-### 🐛 Bugs found and fixed during this phase
-
-#### 2. Division by zero in `SolvencyManager` — the rescue was uncallable when most needed
-
-Found by the **integration invariants**, not by any unit test: `SolvencyManager` is unit-tested
-against a `MockVault`, so this state was unreachable there.
-
-When the Vault is fully drained (`totalAssets == 0` with shares outstanding), `collateralizationRatio`
-returns 0. The deficit was computed as `totalAssets * (WAD - cr) / cr` → **panic `0x12`**. The
-permissionless `checkAndAct` reverted, so the Layer 2/3 rescue could not be invoked **precisely in the
-total-insolvency scenario the solvency system exists to resolve**. The stale comment in the code even
-asserted this was impossible.
-
-Fixed by deriving the deficit from the nominal deposit basis instead
-(`Vault.collateralizationDeficit()`), which is arithmetically equivalent while the Vault holds assets
-and stays well-defined at zero. Regression tests: `test_TotalInsolvency_RescueStillCallable`,
-`test_TotalInsolvency_DeficitEqualsNominalLiabilities` and `test_TotalInsolvency_BondingRestoresFromZero`.
-
-#### 1. Division by zero in `BondDepository`
-
-Static analysis led to a **real division-by-zero** in `BondDepository`:
-
-`setReferencePrice` only rejected `0`, but the discount is applied with integer division
-(`referencePrice * (10000 - discountBps) / 10000`). A small enough price floored the effective price
-to zero, so `quoteBond` panicked (`0x12`) and **every bond reverted — bricking the recapitalization
-round exactly when the protocol needs it**.
-
-Fixed by validating the *computed* effective price (not just the input) in both `setReferencePrice`
-and `setDiscountBps`, via the new `EffectivePriceZero` error. Regression tests:
-`test_SetReferencePrice_EffectivePriceZeroReverts` and
-`test_SetReferencePrice_QuoteStillWorksAfterRejectedPrice` in
-[`BondDepository.t.sol`](../../test/unit/BondDepository.t.sol).
+`MockOracle` (preset prices and confidence, payable fee flow, optional revert), `MockChainlinkFeed`
+(configurable answer, decimals and timestamp), `MockSpreadManager` (fixed spread). `MockUSDC` is defined
+in each test file.
 
 ---
 
-## 🔗 Related
+## Fork tests
 
-- [ROADMAP](../ROADMAP.md) — Phase 12 items and progress
-- [Security](../08-security.md) — threat model and invariant rationale
-- [Vault SSL Architecture](../07-vault-ssl.md) — 3-layer solvency the invariants protect
+[`PythChainlinkOracle.fork.t.sol`](../../test/fork/PythChainlinkOracle.fork.t.sol) has 13 tests. It
+hardcodes the Pyth contract and two Chainlink aggregators on HyperEVM, forks the latest block of
+`FORK_RPC_URL` (the block is not pinned and no variable pins it), and fetches Pyth updates from the Hermes
+API through `ffi` (`curl` piped into `python3`; `ffi = true` is set in `foundry.toml`).
+
+Without `FORK_RPC_URL` the tests skip. In this review the Hermes endpoint returned HTTP 401 and no
+HyperEVM RPC was available, so the fork results could not be reproduced.
+
+---
+
+## Coverage
+
+From `forge coverage --report summary` (coverage builds disable the optimizer and `viaIR`).
+
+| Contract | Lines | Statements | Branches | Functions |
+| :------- | :---- | :--------- | :------- | :-------- |
+| AssistantFund | 100% (33/33) | 100% (37/37) | 100% (6/6) | 100% (9/9) |
+| BondDepository | 100% (86/86) | 94.44% (102/108) | 72.73% (16/22) | 100% (17/17) |
+| PythChainlinkOracle | 100% (40/40) | 100% (63/63) | 100% (11/11) | 100% (5/5) |
+| SolvencyManager | 100% (29/29) | 100% (40/40) | 100% (5/5) | 100% (4/4) |
+| SpreadManager | 100% (54/54) | 100% (58/58) | 100% (13/13) | 100% (12/12) |
+| SynthToken | 100% (23/23) | 100% (18/18) | 100% (4/4) | 100% (9/9) |
+| TradingEngine | 100% (264/264) | 97.58% (363/372) | 90.14% (64/71) | 100% (36/36) |
+| TradingStorage | 100% (130/130) | 100% (134/134) | 100% (31/31) | 100% (30/30) |
+| Vault | 100% (93/93) | 100% (102/102) | 100% (15/15) | 100% (28/28) |
+| FundingLib | 100% (7/7) | 100% (5/5) | 100% (2/2) | 100% (2/2) |
+
+The "Total" row of the report (81.30% lines) is lower because it also counts `node_modules/`, `script/`
+and `test/`. Line coverage says a line ran, not that its result was checked.
+
+---
+
+## Static analysis
+
+Raw counts from this review. The findings have not been triaged in this round.
+
+| Tool | Command | Result |
+| :--- | :------ | :----- |
+| Slither 0.11.6 | `slither . --filter-paths "lib\|node_modules\|test"` | 141 results: 0 High, 6 Medium, 14 Low, 121 Informational |
+| Aderyn 0.6.8 | `aderyn --src src` | 2 High, 7 Low |
+
+Slither by detector: `incorrect-equality` 3, `pyth-unchecked-confidence` 1, `unused-return` 2 (Medium);
+`timestamp` 9, `reentrancy-events` 5 (Low); `naming-convention` 113, `missing-inheritance` 4,
+`unindexed-event-address` 4 (Informational). Aderyn: H-1 "Contract locks Ether without a withdraw
+function" (9 instances), H-2 "Unsafe Casting of integers" (2 instances: `BondDepository.sol:215`,
+`PythChainlinkOracle.sol:136`), and L-1 to L-7.
+
+---
+
+## Bugs fixed before this review
+
+These are the author's records of earlier fixes. The regression tests named here exist and pass.
+
+1. **Division by zero in `BondDepository`.** `setReferencePrice` only rejected 0, but the discounted price
+   is `referencePrice * (10000 - discountBps) / 10000`, which can floor to 0 and make `quoteBond` divide
+   by zero, so every `bond` call reverted. Both setters now check the computed price
+   (`EffectivePriceZero`). Tests: `test_SetReferencePrice_EffectivePriceZeroReverts`,
+   `test_SetReferencePrice_QuoteStillWorksAfterRejectedPrice`.
+2. **Division by zero in `SolvencyManager`.** With `totalAssets == 0` and shares outstanding, CR is 0 and
+   the old deficit formula divided by it, so `checkAndAct` reverted in the total-insolvency case. The
+   deficit now comes from `Vault.collateralizationDeficit()`. Tests:
+   `test_TotalInsolvency_RescueStillCallable`, `test_TotalInsolvency_DeficitEqualsNominalLiabilities`,
+   `test_TotalInsolvency_BondingRestoresFromZero`.
+
+---
+
+## Related
+
+- [ROADMAP](../ROADMAP.md)
+- [Security](../08-security.md)
+- [Vault and solvency](../07-vault-ssl.md)
