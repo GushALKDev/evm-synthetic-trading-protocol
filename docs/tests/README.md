@@ -3,7 +3,8 @@
 **Status:** Proof of concept. Not audited and not deployed.
 
 All numbers below were measured on 2026-09-28 from a clean `git clone --recursive` at commit `f89ca0c`
-after `npm ci`, with forge 1.7.1 and solc 0.8.24, and without `FORK_RPC_URL` set.
+after `npm ci`, with forge 1.7.1 and solc 0.8.24, and without `FORK_RPC_URL` set. Later documentation
+commits do not change `src/` or `test/`.
 
 | Group | Location | Tests | Command that counts them |
 | :---- | :------- | ----: | :----------------------- |
@@ -16,8 +17,8 @@ after `npm ci`, with forge 1.7.1 and solc 0.8.24, and without `FORK_RPC_URL` set
 
 `forge test` result in mock mode: 540 passed, 0 failed, 13 skipped.
 
-Across these groups there are 35 stateless fuzz tests (functions named `testFuzz_*`, 32 in unit files and 3
-in the integration file) and 17 stateful invariant functions (`invariant_*`). Count them with:
+Across these groups there are 35 functions named `testFuzz_*` (32 in unit files and 3 in the integration
+file); no other test function takes parameters and 17 stateful invariant functions (`invariant_*`). Count them with:
 
 ```bash
 forge test --list --json 2>/dev/null | jq '[.[][][] | select(startswith("testFuzz_"))] | length'   # 35
@@ -187,7 +188,8 @@ and `test/`. Line coverage says a line ran, not that its result was checked.
 
 ## Static analysis
 
-Raw counts from this review. The findings have not been triaged in this round.
+Raw counts from this review, run in the repository checkout at commit `f89ca0c`. The findings have not been
+triaged in this round.
 
 | Tool | Command | Result |
 | :--- | :------ | :----- |

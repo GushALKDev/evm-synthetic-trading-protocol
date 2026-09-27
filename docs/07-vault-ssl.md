@@ -45,7 +45,8 @@ sequenceDiagram
 
 ### Withdrawal
 
-`withdraw` and `redeem` always revert with `UseRequestWithdrawalFlow`. LPs use a two-step flow:
+`withdraw` and `redeem` always revert with `UseRequestWithdrawalFlow`. LPs use a two-step flow (source:
+`src/Vault.sol` at commit `f89ca0c`):
 
 ```solidity
 function requestWithdrawal(uint256 shares) external nonReentrant whenNotPaused {
@@ -137,7 +138,8 @@ function.
 
 What exists in code:
 
-- **Payout cap.** `TradingEngine._calculatePayout` caps the payout at 9x collateral:
+- **Payout cap.** `TradingEngine._calculatePayout` caps the payout at 9x collateral (source:
+  `src/TradingEngine.sol` at commit `f89ca0c`):
 
   ```solidity
   uint256 public constant MAX_PROFIT_MULTIPLIER = 9;

@@ -133,7 +133,8 @@ can:
 - Point `Vault.tradingEngine` and `TradingStorage.tradingEngine` at any address. That address can then
   move all vault USDC (`sendPayout`) and all trader collateral (`sendCollateral`).
 - Pause `TradingEngine` (blocks `openTrade`, `closeTrade`, `executeLimit`, `updateTp`, `updateSl`) while
-  `liquidate` keeps working, and pause the vault (blocks `deposit`, `mint`, `requestWithdrawal`).
+  `liquidate` keeps working, and pause the vault (blocks `deposit`, `mint`, `requestWithdrawal`;
+  `executeWithdrawal` and `cancelWithdrawal` stay available).
 - Add pairs with any `maxLeverage` up to 65,535 and any `maxOI`, and change or deactivate them. Opens at
   1,250x or more revert because the 0.08% open fee on notional would reach the whole collateral.
 - Set oracle feeds (`setPairFeed`), all `SpreadManager` parameters and its keeper, the treasury address,
@@ -165,14 +166,15 @@ Requested shares are not escrowed and the request does not expire, so once an LP
 ## Testing
 
 Measured on 2026-09-28 from a clean `git clone --recursive` at commit `f89ca0c`, with forge 1.7.1 and solc
-0.8.24 (fixed by the pragma in every source file; `foundry.toml` does not pin `solc`).
+0.8.24 (fixed by the pragma in every source file; `foundry.toml` does not pin `solc`). Later documentation
+commits do not change `src/`, `test/` or the build configuration.
 
 | Command | Result |
 | :------ | :----- |
 | `forge build` | Compiles. It fails before `npm ci` because the Pyth SDK is an npm dependency |
 | `forge test` (no `FORK_RPC_URL`) | 553 tests: 540 passed, 0 failed, 13 skipped (the fork suite skips without the variable) |
 | `forge test --list --json 2>/dev/null \| jq '[.[][][]] \| length'` | 553 |
-| `forge test --list --json 2>/dev/null \| jq '[.[][][] \| select(startswith("testFuzz_"))] \| length'` | 35 stateless fuzz tests (256 runs each, Foundry default) |
+| `forge test --list --json 2>/dev/null \| jq '[.[][][] \| select(startswith("testFuzz_"))] \| length'` | 35 functions named `testFuzz_*` (256 fuzz runs each, Foundry default) |
 | `forge test --list --json 2>/dev/null \| jq '[.[][][] \| select(startswith("invariant_"))] \| length'` | 17 stateful invariant functions (256 runs x 500 calls, Foundry default); 3 of them (`invariant_CallSummary`) only log and assert nothing |
 | `forge coverage --report summary` | 100% line coverage on every file in `src/`. Branch coverage is 100% except `BondDepository.sol` 72.73% (16/22) and `TradingEngine.sol` 90.14% (64/71). The "Total" row is lower because it includes `node_modules/`, `script/` and `test/` |
 
