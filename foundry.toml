@@ -8,10 +8,19 @@ remappings = [
     "solady/=lib/solady/src/"
 ]
 ffi = false
+optimizer = true
+optimizer_runs = 200
+# cancun: TradingEngine keeps the ETH refund baseline in transient storage (tstore/tload)
+evm_version = "cancun"
 # Gas benchmarks live in test/gas and run only under the gas profile: FOUNDRY_PROFILE=gas forge test
 no_match_path = "test/gas/*"
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+
+# forge coverage compiles without the optimizer, where contracts can exceed EIP-170; this profile lifts the
+# code size limit for coverage only: FOUNDRY_PROFILE=coverage forge coverage --report summary
+[profile.coverage]
+code_size_limit = 1000000
 
 [profile.gas]
 match_path = "test/gas/*"
