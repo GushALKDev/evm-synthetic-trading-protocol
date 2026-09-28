@@ -109,7 +109,6 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     error SlippageExceeded(uint128 executionPrice, uint128 expectedPrice, uint16 slippageBps);
     error TpAlreadyTriggered(uint128 tp, uint128 oraclePrice);
     error SlAlreadyTriggered(uint128 sl, uint128 oraclePrice);
-    error FeeExceedsCollateral(uint256 fee, uint64 collateral);
     error NotLiquidatable(uint256 tradeId, uint256 loss, uint256 threshold);
     error LimitNotTriggered(uint256 tradeId, uint128 oraclePrice);
     error NoLimitSet(uint256 tradeId);
@@ -365,8 +364,8 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         uint128 _tp,
         uint128 _sl
     ) internal returns (uint32 tradeId) {
+        // Below the collateral: _validatePair caps leverage at MAX_LEVERAGE (100), so the fee is at most 8% of it
         uint256 fee = _calculateFee(_collateral, _leverage, OPEN_FEE_BPS);
-        if (fee >= uint256(_collateral)) revert FeeExceedsCollateral(fee, _collateral);
         ASSET.safeTransferFrom(_user, address(TRADING_STORAGE), uint256(_collateral));
         uint64 effectiveCollateral = uint64(uint256(_collateral) - fee);
         _distributeFees(fee);

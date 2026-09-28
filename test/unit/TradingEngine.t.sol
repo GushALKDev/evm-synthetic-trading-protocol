@@ -358,6 +358,19 @@ contract TradingEngineTest is Test {
         engine.openTrade(DEFAULT_PAIR_INDEX, true, DEFAULT_COLLATERAL, 101, DEFAULT_LONG_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE);
     }
 
+    /**
+     * @notice The open fee stays below the collateral for every leverage the engine accepts
+     * @dev The fee rate is a constant (no owner setter) and leverage above MAX_LEVERAGE reverts before the fee is
+     *      computed, so fee = collateral * leverage * OPEN_FEE_BPS / 10,000 <= 8% of collateral. This is why the
+     *      former FeeExceedsCollateral check could not be reached and was removed.
+     */
+    function testFuzz_OpenFee_BelowCollateralForEveryAcceptedLeverage(uint64 _collateral, uint16 _leverage) public view {
+        _leverage = uint16(bound(_leverage, 1, engine.MAX_LEVERAGE()));
+        uint256 fee = (uint256(_collateral) * _leverage * engine.OPEN_FEE_BPS()) / engine.BPS_DENOMINATOR();
+        assertLe(fee * 100, uint256(_collateral) * 8);
+        if (_collateral > 0) assertLt(fee, _collateral);
+    }
+
     /// @notice A pair limit below MAX_LEVERAGE is enforced on its own
     function test_OpenTrade_RevertOnLeverageExceedsPairMax() public {
         vm.prank(owner);
