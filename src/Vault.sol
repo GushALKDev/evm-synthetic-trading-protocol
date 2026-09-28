@@ -561,7 +561,7 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
      *      and it uses the latest PnL snapshot even if stale. When totalSupply == 0 it reports max.
      * @return ratio The collateralization ratio in WAD
      */
-    function collateralizationRatio() public view returns (uint256 ratio) {
+    function collateralizationRatio() external view returns (uint256 ratio) {
         uint256 supply = totalSupply();
         if (supply == 0) return type(uint256).max;
         return (totalAssets() * (10 ** _decimalsOffset()) * WAD) / supply;
