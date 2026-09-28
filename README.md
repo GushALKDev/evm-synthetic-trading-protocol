@@ -27,7 +27,9 @@ the row), **Designed only** (described in the docs, no code), **Not found**. Fil
 | :------ | :----- | :------- |
 | ERC-4626 vault, sUSDC shares (18 decimals, `_decimalsOffset() = 12`) | Implemented | `Vault.sol` (Solady `ERC4626`); `test/unit/Vault.t.sol` |
 | 3-epoch withdrawal lock (1 epoch = 1 day) with escrow and a 1-epoch execution window | Implemented | `Vault.requestWithdrawal` escrows the shares in the vault; `executeWithdrawal` works only in the epoch after unlock, then reverts `WithdrawalExpired`; `cancelWithdrawal` returns the shares. `test/regression/WithdrawalRegression.t.sol`, `Vault.t.sol` |
-| ERC-4626 `max*` functions | Implemented | `maxWithdraw` and `maxRedeem` return 0 (the actions always revert); `maxDeposit` and `maxMint` return 0 while paused. Each is tested against its action in `Vault.t.sol` |
+| ERC-4626 `max*` functions | Implemented | `maxWithdraw` and `maxRedeem` return 0 (the actions always revert); `maxDeposit` and `maxMint` return 0 while paused, with a stale PnL snapshot or below 100% coverage. Each is tested against its action in `Vault.t.sol`, `VaultNav.t.sol` and the regression tests |
+| Share price at a conservative NAV with open trader PnL | Implemented | `Vault.totalAssets` = USDC balance minus the positive net unrealised trader PnL of the latest snapshot. Per pair and side aggregates in `TradingStorage` (`getPairOpenTotals`), math in `libraries/OpenPnlLib.sol`, snapshot in `Vault.refreshPnlSnapshot` (at most `MAX_PAIRS` = 20 pairs). `deposit`, `mint` and `executeWithdrawal` need a snapshot at most `maxPnlSnapshotAge` old (60 s by default) with no open or close since; `refreshAndDeposit`, `refreshAndMint`, `refreshAndExecuteWithdrawal` refresh in the same call. `test/unit/VaultNav.t.sol`, `test/regression/OpenPnlNavRegression.t.sol` |
+| Deposits blocked below 100% LP principal coverage | Implemented | `Vault.deposit`/`mint` revert with `CoverageBelowPar`; `test/regression/DepositCoverageRegression.t.sol` |
 | Pyth pull integration: update data, caller-paid fee with refund, 5 s price age (owner-set up to 30 s), 2% confidence cap | Implemented | `PythChainlinkOracle.getPrice`; `test/unit/PythChainlinkOracle.t.sol` (MockPyth); fork suite on Arbitrum One at a pinned block, 19 tests |
 | L2 sequencer uptime check (Chainlink feed, 1 hour grace period) | Implemented | `PythChainlinkOracle` constructor parameter, `address(0)` disables it; `test/regression/SequencerRegression.t.sol` and the fork suite |
 | Chainlink deviation anchor (3%) and Chainlink heartbeat check | Implemented | `PythChainlinkOracle.getPrice`, `_getChainlinkPrice18`. On disagreement above 3% or a stale Chainlink answer the call reverts; there is no fallback price |
@@ -42,9 +44,9 @@ the row), **Designed only** (described in the docs, no code), **Not found**. Fil
 | Opening guard | Implemented | `_validateNotPreLiquidatable` rejects a position `liquidate` would accept in the same block at an unchanged price (close spread at the post-open OI, collateral net of the open fee) |
 | Asset classes (crypto, forex, commodities) | Partial | Any pair with a Pyth feed ID and a Chainlink feed can be configured. No per-class logic (no market hours, no weekend handling). Tests use BTC and ETH only |
 | Fee split: 0.08% open and close fee on notional, 80% vault / 20% treasury | Implemented | `TradingEngine._distributeFees`; `script/Deploy.s.sol` sets the treasury to the `AssistantFund` |
-| `SolvencyManager.checkAndAct`: inject reserve below 100% CR, open a bonding round below 95%, close it at 100% | Implemented | `SolvencyManager.sol`. CR is the vault share price relative to 1.0 USDC per share and does not include unrealised trader PnL |
+| `SolvencyManager.checkAndAct`: inject reserve below a 100% NAV ratio, open a bonding round below a 95% realised ratio, close it at 100% realised | Implemented | `SolvencyManager.sol`. The injection needs a fresh PnL snapshot (`refreshAndCheckAndAct` takes one); bonding uses the USDC balance per share, so an unrealised move does not sell discounted $SYNTH. `test/regression/SolvencySplitRegression.t.sol` |
 | `AssistantFund.injectFunds` and permissionless `skim` | Implemented | `AssistantFund.sol`; `test/unit/AssistantFund.t.sol` |
-| `BondDepository`: discounted $SYNTH sale with linear vesting | Implemented | `BondDepository.bond` / `claim`. A bond takes at most the current vault deficit and the round closes when CR is back at 100%. Price comes from an owner-set `referencePrice`, not from a market |
+| `BondDepository`: discounted $SYNTH sale with linear vesting | Implemented | `BondDepository.bond` / `claim`. A bond takes at most the current realised vault deficit and the round closes when the realised ratio is back at 100%. Price comes from an owner-set `referencePrice`, not from a market |
 | `SynthToken` minter gating | Implemented | `SynthToken.mint` (`onlyMinter`); the owner can change the minter at any time |
 | Surplus buyback of $SYNTH above 110% CR | Designed only | Described in `docs/02-mathematics.md`; no code |
 | Circuit breakers, emergency withdrawal, role-based access control, timelock | Designed only | Earlier design documents only. Every contract uses a single `Ownable` owner |
@@ -58,9 +60,10 @@ the row), **Designed only** (described in the docs, no code), **Not found**. Fil
 - **Traders** deposit USDC collateral and open a long or short position with a chosen leverage. The
   collateral is held by `TradingStorage`, not by the vault.
 - **LPs** deposit USDC into the vault and receive sUSDC shares. The vault is the counterparty to every
-  trade: when a trader closes with a profit, the profit is paid from the vault and the share price
-  falls; when a trader loses, the lost collateral is sent to the vault and the share price rises. LPs
-  carry the open PnL of all traders. There is no impermanent loss in the AMM sense because the vault
+  trade: trader profits are paid from the vault and trader losses are sent to it. The share price uses a
+  conservative NAV: the USDC balance minus the net unrealised trader profit recorded in the latest PnL
+  snapshot (net trader losses are not added), so it falls when a snapshot shows traders in profit and
+  rises when losing positions settle. There is no impermanent loss in the AMM sense because the vault
   holds only USDC, but LPs can lose part of their deposit when traders are net profitable.
 - **Keepers and bots** are needed for liveness: liquidations and TP/SL execution are permissionless and
   paid from trader collateral, `SolvencyManager.checkAndAct` and `AssistantFund.skim` are permissionless
@@ -87,9 +90,12 @@ flowchart TD
     Storage -->|trader losses, 80% of fees| Vault[Vault ERC-4626]
     Storage -->|20% of fees to treasury| AF[AssistantFund]
     Engine -->|sendPayout: trader profit| Vault
-    LP([LP]) -->|deposit, mint, requestWithdrawal, executeWithdrawal| Vault
-    Anyone([Anyone]) -->|checkAndAct| SM[SolvencyManager]
-    SM -->|reads collateralizationRatio, collateralizationDeficit| Vault
+    LP([LP]) -->|deposit, mint, requestWithdrawal, executeWithdrawal, refreshAnd*| Vault
+    Anyone([Anyone]) -->|checkAndAct, refreshAndCheckAndAct| SM[SolvencyManager]
+    Anyone -->|refreshPnlSnapshot + Pyth update data| Vault
+    Vault -->|open PnL aggregates, positions nonce| Storage
+    Vault -->|getPrice per pair with open interest| Oracle
+    SM -->|reads NAV and realised ratios and deficits, snapshot freshness| Vault
     SM -->|injectFunds| AF
     AF -->|injected USDC, skim above targetCap| Vault
     SM -->|activateBonding, closeBonding| BD[BondDepository]
@@ -104,8 +110,10 @@ Notes on the diagram:
   `AssistantFund`; the unit tests use a plain address.
 - `TradingStorage` pays the liquidator reward and the TP/SL executor reward out of the position's
   collateral. The vault never pays these rewards.
-- `SolvencyManager` holds no funds. It reads the vault ratio and calls `AssistantFund.injectFunds` and
+- `SolvencyManager` holds no funds. It reads the vault ratios and calls `AssistantFund.injectFunds` and
   `BondDepository.activateBonding`, which only accept calls from it.
+- The vault reads the open PnL aggregates from `TradingStorage` and prices them with the same oracle as the
+  engine when its PnL snapshot is refreshed.
 
 ### Oracle design
 
@@ -126,12 +134,18 @@ updates anchored to Chainlink are used instead.
 - **Layer 1, preventive:** payout cap, static per-pair OI cap and dynamic spread; volatility-adaptive OI
   caps are designed only. The payout cap limits collateral plus price PnL to 9x the collateral.
 - **Layer 2, reserve:** `AssistantFund` receives the 20% fee share (when it is set as the treasury) and
-  `SolvencyManager.checkAndAct` injects it into the vault when the vault ratio is below 100%.
-- **Layer 3, bonding:** below 95%, `checkAndAct` opens a round in which anyone can buy $SYNTH at a
-  discount; the USDC goes to the vault and the $SYNTH vests linearly.
+  `SolvencyManager.checkAndAct` injects it into the vault when the NAV ratio is below 100% and the PnL
+  snapshot is fresh.
+- **Layer 3, bonding:** below a 95% realised ratio, `checkAndAct` opens a round in which anyone can buy
+  $SYNTH at a discount; the USDC goes to the vault and the $SYNTH vests linearly.
 
-The vault ratio used by layers 2 and 3 is `totalAssets * 1e12 * 1e18 / totalSupply`, the share price
-relative to its 1.0 starting value. It does not include the unrealised PnL of open trades.
+The NAV ratio, called the LP principal coverage ratio in the docs, is `totalAssets * 1e12 * 1e18 /
+totalSupply` with the conservative NAV: the share price relative to its 1.0 starting value. It measures
+whether the NAV covers the principal LPs would have paid in at 1.0; it does not measure whether the vault can
+pay every open trade at its cap, or how much of the NAV is liquid USDC. Deposits revert while it is below
+100%. The realised ratio is the same formula on the USDC balance alone and is never below the NAV ratio;
+bonding uses it so that $SYNTH is not sold at a discount because of an unrealised move that can reverse.
+Formulas: [Guide 2, section 8](./docs/02-mathematics.md#8-collateralization-ratio-and-solvency-actions).
 
 ---
 
@@ -143,10 +157,11 @@ can:
 - Point `Vault.tradingEngine` and `TradingStorage.tradingEngine` at any address. That address can then
   move all vault USDC (`sendPayout`) and all trader collateral (`sendCollateral`).
 - Pause `TradingEngine` (blocks `openTrade`, `closeTrade`, `executeLimit`, `updateTp`, `updateSl`) while
-  `liquidate` keeps working, and pause the vault (blocks `deposit`, `mint`, `requestWithdrawal`;
-  `executeWithdrawal` and `cancelWithdrawal` stay available).
-- Add pairs with any `maxLeverage` up to `MAX_LEVERAGE` (100) and any `maxOI`, and change or deactivate
-  them.
+  `liquidate` keeps working, and pause the vault (blocks `deposit`, `mint`, their refresh-and-act variants
+  and `requestWithdrawal`; `executeWithdrawal`, `cancelWithdrawal` and `refreshPnlSnapshot` stay available).
+- Add pairs (up to `MAX_PAIRS`, 20) with any `maxLeverage` up to `MAX_LEVERAGE` (100) and any `maxOI`, and
+  change or deactivate them.
+- Set the maximum PnL snapshot age (`setMaxPnlSnapshotAge`, 1 s to the immutable 3,600 s ceiling).
 - Set oracle feeds (`setPairFeed`), the Pyth price age (`setMaxPriceAge`, 1 to 30 s), the funding factor
   (`setFundingFactor`, within 1e12 to 1e15; the 0.01% per hour ceiling is a constant), all `SpreadManager`
   parameters and its keeper, the treasury address, the `AssistantFund` target cap, the bond
@@ -167,9 +182,9 @@ the Pyth Core upgrade of 2026-08-26.
 **LP risk.** LPs are the counterparty to trader PnL and can lose part of their deposit.
 
 **Withdrawal lock.** Withdrawals go through `requestWithdrawal`, which escrows the shares, and
-`executeWithdrawal` in the epoch that starts 3 epochs later, which pays at the share price of the
-execution moment. After that epoch the request expires; `cancelWithdrawal` or a new request returns the
-shares.
+`executeWithdrawal` in the epoch that starts 3 epochs later, which pays at the conservative NAV of the
+execution moment and needs a fresh PnL snapshot. After that epoch the request expires; `cancelWithdrawal`
+or a new request returns the shares.
 
 **Known limitations.**
 
@@ -182,9 +197,31 @@ shares.
 - **Oracle latency window.** Within `maxPriceAge` (5 s) the caller still chooses which Pyth update to
   submit, so a trader can open on a price up to 5 seconds old and close on the current one. The round trip
   costs about 26 BPS of notional with the deploy parameters.
-- **Deposits have no lock.** A new LP can deposit just before a known trader loss or a reserve injection.
-- **Share price and CR ignore unrealised PnL.** `totalAssets`, the share price and the collateralization
-  ratio only move with realised PnL. Including open PnL is planned for a later round.
+- **Deposits have no lock.** Deposits are priced at the NAV and revert below 100% coverage, so a new LP can
+  no longer enter ahead of a reserve injection or at a price that ignores open trader profit. Because the
+  NAV does not add net trader losses, a new LP can still enter while traders are net losing and share in
+  those losses when they settle: a deposit `D` into a NAV `A` takes `D x L / (A + D)` of a later realised
+  loss `L`, from the LPs already in.
+- **NAV biases.** The NAV ignores the 9x payout cap (it overstates trader profit by
+  `sum max(0, pnl_i - 8 x collateral_i)`, conservative) and clamps losses per pair side, not per position:
+  a position past 100% loss that is not yet liquidated offsets winners on its side, understating the
+  liability by at most its excess loss `E = sum max(0, -pnl_i - collateral_i)`. E is zero until a position
+  passes 100% loss without being liquidated, so it is bounded by liquidation latency
+  ([Guide 2, section 8.2](./docs/02-mathematics.md#82-known-biases-of-the-nav)).
+- **Snapshot age window.** `deposit`, `mint` and `executeWithdrawal` accept a snapshot up to
+  `maxPnlSnapshotAge` old (60 s by default, owner-set up to 3,600 s) if no position opened or closed since.
+  Within that window an LP can act on the stored snapshot or refresh first with a Pyth update of their
+  choice (within the oracle's `maxPriceAge`); the difference is the price move since the snapshot times the
+  open quantity. `totalAssets` and the previews use the latest snapshot even when it is stale.
+- **Deposits can stay blocked for a long time.** While the NAV ratio is below 100% deposits revert. With the
+  AssistantFund empty, the realised ratio at or above 95% (so no bonding), profitable positions kept open
+  and a static price, nothing moves the ratio and the block has no time limit. It ends with a price move
+  against the open profit, fee income (a NAV deficit `D` needs about `D x 10,000 / 8` of traded notional at
+  the 0.08% open and close fees when nothing else changes), or a bonding round if the realised ratio falls
+  below 95% (sized on the realised deficit, so it can end with the NAV ratio still below 100%). Closing the
+  profitable positions only adds back what the NAV overstated (the close fee, profit above the 9x cap, the
+  confidence edge and the close spread). Withdrawals keep working at the NAV. There is no owner override
+  ([Guide 7](./docs/07-vault-ssl.md#known-biases-and-the-deposit-freeze)).
 - **A winning close can revert.** `closeTrade` and `executeLimit` revert with `InsufficientVaultBalance`
   when the vault holds less USDC than the profit owed, until the vault is refilled.
 
@@ -192,57 +229,66 @@ shares.
 
 ## Testing
 
-Measured on 2026-09-28 at commit `aaceb08` with forge 1.7.1 and solc 0.8.24 (fixed by the pragma in every
-source file; `foundry.toml` does not pin `solc`), after `npm ci`. Later commits only change documentation
-and add `script/analysis/pyth_update_age.py`. Details: [docs/tests/README.md](./docs/tests/README.md).
+Measured on 2026-09-28 at commit `2e390d7` (branch `fix/open-pnl-nav`) with forge 1.7.1 and solc 0.8.24
+(fixed by the pragma in every source file; `foundry.toml` does not pin `solc`), after `npm ci`. Later
+commits only change documentation. Details: [docs/tests/README.md](./docs/tests/README.md).
 
 | Command | Result |
 | :------ | :----- |
-| `forge build` | Compiles. It fails before `npm ci` because the Pyth SDK is an npm dependency |
-| `forge build --sizes` | Exits 0. `TradingEngine` runtime 24,563 bytes, 13 under the 24,576 byte limit |
-| `forge test` (`FORK_RPC_URL` empty) | 632 tests: 613 passed, 0 failed, 19 skipped (the fork suite) |
-| `forge test --list --json 2>/dev/null \| jq '[.[][][]] \| length'` | 632: unit 539, regression 33, integration 17 plus 8 invariant functions, invariant suites 16, fork 19 |
-| `forge test --list --json 2>/dev/null \| jq '[.[][][] \| select(startswith("testFuzz_"))] \| length'` | 39 functions named `testFuzz_*` (256 fuzz runs each, Foundry default) |
-| `forge test --list --json 2>/dev/null \| jq '[.[][][] \| select(startswith("invariant_"))] \| length'` | 24 stateful invariant functions (256 runs x 500 calls, Foundry default); call summaries are in `afterInvariant` hooks |
+| `forge build` | Compiles (optimizer on, 200 runs). It fails before `npm ci` because the Pyth SDK is an npm dependency |
+| `forge build --sizes` | Exits 0. `TradingEngine` runtime 17,311 bytes (7,265 under the 24,576 byte limit), `Vault` 13,013, `TradingStorage` 10,276 |
+| `FORK_RPC_URL= forge test` | 714 tests: 695 passed, 0 failed, 19 skipped (the fork suite) |
+| `forge test --list --json 2>/dev/null \| jq '[.[][][]] \| length'` | 714: unit 599, regression 50, integration 17 plus 8 invariant functions, invariant suites 21, fork 19 |
+| `forge test --list --json 2>/dev/null \| jq '[.[][][] \| select(startswith("testFuzz_"))] \| length'` | 45 functions named `testFuzz_*` (256 fuzz runs each, Foundry default) |
+| `forge test --list --json 2>/dev/null \| jq '[.[][][] \| select(startswith("invariant_"))] \| length'` | 29 stateful invariant functions (256 runs x 500 calls, Foundry default); call summaries are in `afterInvariant` hooks |
 | `FORK_RPC_URL=<arbitrum-one-archive-rpc> forge test --match-path "test/fork/*"` | 19 passed at the pinned block 504,522,171 |
-| `FOUNDRY_PROFILE=gas forge test` | 9 gas benchmarks passed, written to `snapshots/*.json`; not part of the 632 |
+| `FOUNDRY_PROFILE=gas forge test` | 14 gas benchmarks passed, written to `snapshots/*.json`; not part of the 714 |
 | `forge fmt --check` | Exits 0 |
-| `forge coverage --report summary` | Per contract below |
+| `FORK_RPC_URL= FOUNDRY_PROFILE=coverage forge coverage --report summary` | Per contract below. The `coverage` profile only lifts the contract size limit, since coverage builds run without the optimizer |
 
 | Contract | Lines | Statements | Branches | Functions |
 | :------- | :---- | :--------- | :------- | :-------- |
 | AssistantFund | 100% (33/33) | 100% (37/37) | 100% (6/6) | 100% (9/9) |
 | BondDepository | 100% (93/93) | 94.92% (112/118) | 75.00% (18/24) | 100% (18/18) |
 | PythChainlinkOracle | 100% (53/53) | 100% (85/85) | 100% (16/16) | 100% (7/7) |
-| SolvencyManager | 100% (32/32) | 100% (45/45) | 100% (6/6) | 100% (4/4) |
+| SolvencyManager | 100% (44/44) | 100% (57/57) | 100% (10/10) | 100% (6/6) |
 | SpreadManager | 100% (54/54) | 100% (58/58) | 100% (13/13) | 100% (12/12) |
 | SynthToken | 100% (23/23) | 100% (18/18) | 100% (4/4) | 100% (9/9) |
 | TradingEngine | 100% (280/280) | 99.24% (392/395) | 95.65% (66/69) | 100% (41/41) |
-| TradingStorage | 100% (132/132) | 100% (139/139) | 100% (33/33) | 100% (30/30) |
-| Vault | 98.18% (108/110) | 98.39% (122/124) | 100% (17/17) | 100% (32/32) |
+| TradingStorage | 100% (153/153) | 100% (159/159) | 100% (34/34) | 100% (34/34) |
+| Vault | 98.99% (196/198) | 99.17% (240/242) | 100% (27/27) | 100% (50/50) |
 | FundingLib | 100% (16/16) | 100% (28/28) | 100% (4/4) | 100% (3/3) |
+| OpenPnlLib | 100% (21/21) | 100% (32/32) | 100% (5/5) | 100% (4/4) |
 
 The protocol invariant suite runs the whole system (engine, vault, AssistantFund, SolvencyManager,
 bonding) with `MockOracle`. It models every settlement and LP or solvency flow and checks the vault and
 reserve balances against the model, that funding credits never exceed charges, that the vault's funding
 exposure stays within the tracked bad debt, that storage holds exactly the open collateral, that escrowed
-shares match pending requests, and that a rescue never lifts CR above 100%. The model does not include
-unrealised PnL.
+shares match pending requests, that an injection never lifts the NAV ratio above 100% and a bond never lifts
+the realised ratio above 100%, that `totalAssets` is the balance minus the snapshot liability, that the open
+PnL aggregates equal the open positions per side, that every snapshot equals a brute-force valuation and
+stays within the excess-loss bound, that no deposit goes through below 100% coverage or on a stale snapshot,
+and that no bonding round opens at a realised ratio of 95% or more. The suite has one pair.
 
 Gas of one call per entry point, from `FOUNDRY_PROFILE=gas forge test` (`snapshots/*.json`), with the real
 `PythChainlinkOracle` on `MockPyth` (no Wormhole signature verification) and the real `SpreadManager`:
 
 | Function | Gas |
 | :------- | --: |
-| `TradingEngine.openTrade` (with TP and SL) | 325,076 |
-| `TradingEngine.closeTrade` (profit) | 166,923 |
-| `TradingEngine.liquidate` | 160,049 |
-| `TradingEngine.executeLimit` (TP) | 197,611 |
-| `Vault.deposit` | 43,300 |
-| `Vault.requestWithdrawal` | 63,014 |
-| `Vault.executeWithdrawal` | 32,221 |
-| `SolvencyManager.checkAndAct` (opens a bonding round) | 62,826 |
-| `BondDepository.bond` | 141,854 |
+| `TradingEngine.openTrade` (with TP and SL) | 298,003 |
+| `TradingEngine.closeTrade` (profit) | 129,571 |
+| `TradingEngine.liquidate` | 126,939 |
+| `TradingEngine.executeLimit` (TP) | 158,702 |
+| `Vault.deposit` (fresh snapshot) | 49,605 |
+| `Vault.refreshAndDeposit` | 171,080 |
+| `Vault.requestWithdrawal` | 61,840 |
+| `Vault.executeWithdrawal` (fresh snapshot) | 33,076 |
+| `Vault.refreshAndExecuteWithdrawal` | 156,588 |
+| `Vault.refreshPnlSnapshot`, 1 pair | 126,621 |
+| `Vault.refreshPnlSnapshot`, 20 pairs (`MAX_PAIRS`), a long and a short on each | 640,239 |
+| `SolvencyManager.checkAndAct` (injects the reserve, opens a bonding round) | 66,562 |
+| `SolvencyManager.refreshAndCheckAndAct` (same path) | 199,194 |
+| `BondDepository.bond` | 137,962 |
 
 **Fork tests.** `test/fork/PythChainlinkOracle.fork.t.sol` runs against Arbitrum One at
 `FORK_BLOCK_NUMBER` (default 504,522,171), a block right after an on-chain Pyth update of BTC/USD and
@@ -255,9 +301,10 @@ close through `TradingEngine`.
 
 ## Review notes
 
-Findings from the round 1 review, fixed in round 2 on branch `fix/review-findings`. The tests named
-`test_Regression_*` (and `testFuzz_Regression_*`) failed against the code before their fix; the other tests
-in the same files pass before and after.
+Findings from the round 1 review, fixed in round 2 on branch `fix/review-findings` (entries 1 to 14) and in
+round 2b on branch `fix/open-pnl-nav` (entries 15 and 16). The tests named `test_Regression_*` (and
+`testFuzz_Regression_*`) failed against the code before their fix; the other tests in the same files pass
+before and after.
 
 1. **Funding paid by the vault, not normalised (High).** Cause: the index moved by the absolute USD
    imbalance (a 1,000 USD imbalance gave 3.6% of notional per hour) and settled against the vault, so a
@@ -310,6 +357,28 @@ in the same files pass before and after.
 14. **Test suite (Info).** Weak or tautological invariants replaced, call summaries moved to
     `afterInvariant`, tolerances tightened, `test_CloseTrade_UsesSpreadOnClose` given an assertion,
     compiler warnings removed. Commits `37119cf`, `7a51384`, `857580a`, `0577333`, `aaceb08`.
+15. **LP timing, part c: the share price ignored unrealised PnL.** Cause: `totalAssets` was the USDC
+    balance, so withdrawals, deposits and previews were priced without the open trader PnL; an LP could exit
+    ahead of a large unrealised trader profit and leave it to the LPs who stayed
+    (`test_Regression_Nav_WithdrawalPaidAtConservativeNav`, run against the `src/` of commit `c359a1b`, paid
+    500,159.999999 USDC instead of 488,780.689655 at the NAV). Fix: per pair and side aggregates in `TradingStorage` (size, collateral, quantity, removal
+    exact), a PnL snapshot refreshed permissionlessly through the oracle checks (confidence edge that shows
+    the most trader profit, at most `MAX_PAIRS` = 20 pairs), `totalAssets` = balance minus the positive
+    snapshot, a maximum snapshot age for `deposit`, `mint` and `executeWithdrawal` with refresh-and-act entry
+    points, and `sendPayout` checked against the balance. Tests: `test/regression/OpenPnlNavRegression.t.sol`,
+    `test/regression/MaxPairsRegression.t.sol`, `test/unit/VaultNav.t.sol`, `test/unit/OpenPnlLib.t.sol`, the
+    aggregate tests in `test/unit/TradingStorage.t.sol`. Commits `c359a1b`, `e225c14`.
+16. **LP timing, the ratio: deposits below 100% and solvency triggers on the balance.** Cause: the
+    collateralization ratio ignored open PnL, a deposit below 1.0 took part of the next injection (in
+    `test_Regression_DepositRevertsBelowFullCoverage_ThenInjectionRestoresPar`, run against commit
+    `e225c14`, a 1,000,000 USDC deposit at a 90% ratio was worth 1,052,631.578947 USDC after a 100,000 USDC
+    injection), and once the ratio included open PnL, an unrealised move could have opened a discounted
+    $SYNTH round. Fix: the ratio (LP
+    principal coverage ratio) uses the NAV; deposits and mints revert below 100% (`CoverageBelowPar`) and
+    `maxDeposit`/`maxMint` return 0; the injection follows the NAV ratio with a fresh snapshot; bonding
+    opens, sizes, clamps and closes on the realised ratio. Tests:
+    `test/regression/DepositCoverageRegression.t.sol`, `test/regression/SolvencySplitRegression.t.sol`,
+    `test/unit/SolvencyManager.t.sol`. Commits `1ccbe10`, `d83c52b`.
 
 ---
 
@@ -335,7 +404,7 @@ Other commands:
 forge test --match-path "test/regression/*"    # round 2 regression tests
 forge test --match-path "test/invariant/*"     # invariant suites
 forge test --match-path "test/integration/*"   # full wired system
-forge coverage --report summary
+FOUNDRY_PROFILE=coverage forge coverage --report summary   # coverage profile lifts the size limit
 FOUNDRY_PROFILE=gas forge test                 # gas benchmarks, written to snapshots/
 FORK_RPC_URL=<arbitrum-one-rpc> forge test --match-path "test/fork/*"
 npx solhint 'src/**/*.sol'
@@ -375,8 +444,8 @@ deploy script was not run in this review.
 
 ```
 src/
-  Vault.sol                 ERC-4626 LP vault with withdrawal requests
-  TradingStorage.sol        Trades, pairs, open interest, funding index, trader collateral
+  Vault.sol                 ERC-4626 LP vault at a conservative NAV, PnL snapshot, withdrawal requests
+  TradingStorage.sol        Trades, pairs, open interest, open PnL aggregates, funding index, trader collateral
   TradingEngine.sol         Open, close, liquidate, executeLimit, spread, fees, funding
   PythChainlinkOracle.sol   Pyth price with Chainlink deviation check
   SpreadManager.sol         Spread from OI and keeper-set volatility
@@ -386,6 +455,7 @@ src/
   SynthToken.sol            $SYNTH ERC-20 with a single minter
   interfaces/               IOracle, ISolvency, ISynthToken, AggregatorV3Interface
   libraries/FundingLib.sol  Funding index math
+  libraries/OpenPnlLib.sol  Open PnL of a pair from the per-side aggregates
 test/
   unit/  regression/  integration/  invariant/  fork/  gas/  mocks/
 script/

@@ -21,7 +21,8 @@ code, it says so.
     - Execution price with dynamic spread
     - Liquidation condition and reward
     - Funding index
-    - Vault collateralization ratio and bonding math
+    - Conservative NAV, open PnL aggregates and their biases
+    - LP principal coverage ratio, realised ratio and bonding math
 
 3. **[Architecture and data flow](./03-architecture.md)**
     - Component diagram
@@ -47,6 +48,7 @@ code, it says so.
 
 7. **[Vault and solvency](./07-vault-ssl.md)**
     - ERC-4626 vault and withdrawal requests
+    - Conservative NAV, PnL snapshot and the deposit freeze
     - Layer 1: payout cap, static OI cap, dynamic spread
     - Layer 2: AssistantFund
     - Layer 3: BondDepository and $SYNTH
@@ -59,7 +61,7 @@ code, it says so.
 
 9. **[Test suite](./tests/README.md)**
     - Test groups and counts
-    - Regression tests for the round 2 findings
+    - Regression tests for the round 2 and 2b findings
     - Invariants, handler call distribution and tolerances
     - Fork tests (Arbitrum One, pinned block) and gas benchmarks
     - Coverage and static analysis counts

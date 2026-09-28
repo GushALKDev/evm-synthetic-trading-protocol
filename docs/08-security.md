@@ -28,7 +28,8 @@ a bug bounty. None of those exist in the code; this version describes what does.
 | Actor | Trust | What they can do |
 |:---|:---|:---|
 | Trader | Untrusted | Open and close own trades, choose the Pyth update within `maxPriceAge` (5 s by default), set TP/SL |
-| LP | Untrusted | Deposit, request and execute withdrawals, time entries and exits |
+| LP | Untrusted | Deposit (fresh snapshot, coverage >= 100%), request and execute withdrawals (fresh snapshot), time entries and exits, choose whether to act on the stored snapshot or refresh first |
+| Anyone | Untrusted | Refresh the PnL snapshot with a Pyth update of their choice, run `checkAndAct` |
 | Liquidator / executor bot | Untrusted | Call `liquidate` and `executeLimit` on any trade, choose the Pyth update |
 | Volatility keeper | Trusted for spread input | Set per-pair volatility within the relative change bound |
 | Owner (one per contract) | Fully trusted | See section 2; can redirect all funds |
@@ -58,12 +59,13 @@ There are no roles, no multisig requirement and no timelock in code.
 
 | Function | Caller | Pause |
 |:---|:---|:---|
-| `deposit`, `mint` | Anyone | Blocked when paused |
+| `deposit`, `mint`, `refreshAndDeposit`, `refreshAndMint` | Anyone | Blocked when paused |
 | `requestWithdrawal` | Share holder (shares move into escrow) | Blocked when paused |
-| `executeWithdrawal`, `cancelWithdrawal` | Requester | Not blocked |
+| `executeWithdrawal`, `refreshAndExecuteWithdrawal`, `cancelWithdrawal` | Requester | Not blocked |
+| `refreshPnlSnapshot` | Anyone | Not blocked |
 | `withdraw`, `redeem` | Anyone | Always revert |
 | `sendPayout` | `tradingEngine` | Not blocked |
-| `setTradingEngine`, `pause`, `unpause` | Owner | |
+| `setTradingEngine`, `setMaxPnlSnapshotAge` (1 to 3,600 s), `pause`, `unpause` | Owner | |
 
 ### TradingEngine
 
@@ -89,7 +91,7 @@ All state-changing functions except the admin ones are `onlyTradingEngine`. Owne
 | `SpreadManager` | `setBaseSpreadBps`, `setImpactFactor`, `setVolFactor`, `setMaxSpreadBps`, `setMaxVolatilityChangeBps`, `setKeeper` | Owner |
 | `AssistantFund` | `injectFunds` | SolvencyManager |
 | `AssistantFund` | `setSolvencyManager`, `setTargetCap` | Owner |
-| `SolvencyManager` | none (`checkAndAct` is public) | |
+| `SolvencyManager` | none (`checkAndAct` and `refreshAndCheckAndAct` are public) | |
 | `BondDepository` | `activateBonding`, `closeBonding` | SolvencyManager |
 | `BondDepository` | `setSolvencyManager`, `setReferencePrice`, `setDiscountBps`, `setVestingPeriod` | Owner |
 | `SynthToken` | `mint` | Minter |
@@ -103,6 +105,9 @@ All state-changing functions except the admin ones are `onlyTradingEngine`. Owne
 - Set oracle feeds and the price age limit (up to 30 s), spread parameters and keeper, pair leverage (up to
   `MAX_LEVERAGE` = 100) and OI caps, the funding factor (within bounds; the per-hour ceiling is a
   constant), the treasury, the reserve cap, and bond price, discount and vesting.
+- Set the maximum PnL snapshot age between 1 s and the immutable ceiling of 3,600 s, which widens or narrows
+  the window in which an LP can act on an older snapshot.
+- Add pairs up to `MAX_PAIRS` (20), the bound on the snapshot loop.
 - Pause trading (liquidations continue) and the vault.
 
 ---
@@ -123,19 +128,27 @@ equations and the handler call distribution are in the [test suite documentation
 | Protocol | `invariant_StorageHoldsExactlyOpenCollateral` | TradingStorage USDC equals the open collateral |
 | Protocol | `invariant_OpenInterestMatchesPositionsAndCap` | OI per side equals open positions; long + short `<= maxOI` |
 | Protocol | `invariant_EscrowedSharesMatchRequests` | Shares held by the vault equal pending withdrawal requests |
-| Protocol | `invariant_RescueNeverOvershootsTarget` | A rescue never lifts CR above 100% |
+| Protocol | `invariant_RescueNeverOvershootsTarget` | An injection never lifts the NAV ratio above 100%, a bond never lifts the realised ratio above 100% |
 | Protocol | `invariant_SharePricePositive`, `invariant_SharesBackedByAssets` | Share price and assets positive while shares exist |
+| Protocol | `invariant_TotalAssetsIsBalanceMinusSnapshotLiability` | `totalAssets` equals the balance minus the positive part of the latest snapshot, floored at 0 |
+| Protocol | `invariant_OpenTotalsMatchPositions` | Per side, the open PnL aggregates equal the positions rebuilt one by one, exactly |
+| Protocol | `invariant_SnapshotMatchesBruteForceAndIsConservative` | At every refresh the snapshot equals the brute-force valuation, and the brute-force liability (8x cap, floor at minus collateral) is at most `max(0, snapshot)` plus the excess loss |
+| Protocol | `invariant_NoDepositBelowParOrStaleAction` | No deposit went through below 100% coverage, no deposit or withdrawal on a stale snapshot |
+| Protocol | `invariant_BondingNeverStartsAboveCriticalRealisedRatio` | `checkAndAct` never opened a round with the realised ratio at or above 95% |
 | Bonding | `invariant_EscrowCoversUnclaimedSynth`, `invariant_SupplyEqualsPromised`, `invariant_ClaimedNeverExceedsPromised` | Vesting escrow and supply |
 | Bonding | `invariant_RaisedWithinCap` | Round raise within its cap, total within the sum of caps, vault USDC equals the raise |
-| Bonding | `invariant_BondsNeverExceedDeficit` | Each bond takes `min(amount, cap, deficit)` and closes the round when it takes all of it |
+| Bonding | `invariant_BondsNeverExceedDeficit` | Each bond takes `min(amount, cap, realised deficit)` and closes the round when it takes all of it |
 | Solvency (integration) | `invariant_VaultBalanceMatchesModelledFlows`, `invariant_AssistantFundBalanceMatchesModelledFlows`, `invariant_FlowsMatchModel` | Same equations over the wired solvency contracts |
 | Solvency (integration) | `invariant_RescueNeverOvershootsTarget` | A rescue never lifts CR above 100% (tolerance 0) |
 | Solvency (integration) | `invariant_RescueAlwaysCallable`, `invariant_ReserveNeverExceedsCapAfterSkim`, `invariant_EscrowSolventUnderFullSystem`, `invariant_SynthSupplyOnlyFromBonding` | Rescue liveness, skim, escrow, supply |
 
 Properties that are **not** checked by any invariant:
 
-- Vault assets plus open collateral cover open trader PnL (the model tracks realised flows only).
-- Total OI across pairs stays below a global limit (there is no global limit; the suite has one pair).
+- The vault can pay every open position at its settlement value at once (the NAV subtracts the net
+  profit; it does not check liquidity against the winners alone).
+- Total OI across pairs stays below a global limit (there is no global limit; the suite has one pair, so
+  the aggregate and snapshot invariants run on one pair; several pairs are covered by unit tests and by
+  the gas benchmark at `MAX_PAIRS`).
 
 The protocol suite uses `MockOracle` and a fixed 5 BPS `MockSpreadManager`.
 
@@ -146,7 +159,10 @@ The protocol suite uses `MockOracle` and a fixed 5 BPS `MockSpreadManager`.
 ### 4.1 Reentrancy
 
 `TradingEngine.openTrade`, `closeTrade`, `liquidate`, `executeLimit`, `updateTp`, `updateSl` and the
-vault's deposit, mint, withdrawal-request, withdrawal-execution and payout functions are `nonReentrant`.
+vault's deposit, mint, withdrawal-request, withdrawal-execution, snapshot refresh, refresh-and-act and
+payout functions are `nonReentrant`. The vault's refresh calls the oracle before it writes the snapshot and
+refunds the ETH surplus last; `SolvencyManager.refreshAndCheckAndAct` has no guard of its own, calls the
+vault (guarded) first and refunds last.
 USDC transfers happen after the trade is deleted and OI is reduced, and the ETH refund to the caller is the
 last interaction; `test/regression/ReentrancyRegression.t.sol` re-enters from that refund. The oracle is
 an owner-configured external contract called before state changes.
@@ -169,10 +185,14 @@ notional.
 - Withdrawal requests escrow the shares and expire one epoch after they unlock, so an LP cannot keep a
   standing option to exit; staggering requests across addresses keeps at most a quarter of a position
   executable at any time.
-- Deposits are immediate, so a new LP can enter just before a known trader loss or a reserve injection
-  (current limitation).
-- The share price ignores unrealised PnL, which makes the timing visible from public state (current
-  limitation; planned for a later round).
+- Deposits and withdrawals are priced at the conservative NAV, which subtracts unrealised trader profit;
+  they need a snapshot at most `maxPnlSnapshotAge` old (60 s by default) with no open or close since.
+- Deposits revert below 100% coverage, so a new LP cannot enter ahead of a reserve injection or bond
+  proceeds.
+- Remaining: deposits are immediate and the NAV does not add net trader losses, so a new LP can enter while
+  traders are net losing and share in those losses when they are realised; and within the snapshot age
+  window an LP can choose between the stored snapshot and a refresh with a Pyth update of their choice,
+  worth the price move since the snapshot times the open quantity.
 
 ### 4.5 Liquidation incentives
 
@@ -191,10 +211,12 @@ Guide 2.
 
 ### 4.7 Solvency layers
 
-`checkAndAct` is permissionless; it recapitalises below 100% CR and closes an open bonding round at or
-above it. A bond never raises more than the current deficit. Anyone depositing when the share price is
-below 1.0 shares in any reserve injection or bond proceeds that follow. `referencePrice` is set by the
-owner.
+`checkAndAct` is permissionless. It injects the reserve below a 100% NAV ratio, only with a fresh snapshot,
+and opens a bonding round only below a 95% realised ratio, so an unrealised trader profit that reverses
+cannot trigger a discounted $SYNTH sale (`test_Regression_Solvency_UnrealisedTraderProfitInjectsButDoesNotBond`).
+A bond never raises more than the current realised deficit, and an open round closes once the realised ratio
+is back at 100%. Deposits revert while the NAV ratio is below 100%, which can last indefinitely (see
+[Guide 7](./07-vault-ssl.md#known-biases-and-the-deposit-freeze)). `referencePrice` is set by the owner.
 
 ---
 
@@ -203,7 +225,8 @@ owner.
 What exists:
 
 - `TradingEngine.pause` blocks opening, closing, TP/SL execution and TP/SL updates. Liquidations continue.
-- `Vault.pause` blocks deposits, mints and new withdrawal requests. Pending requests can still be executed.
+- `Vault.pause` blocks deposits, mints (including the refresh-and-act variants) and new withdrawal requests.
+  Pending requests can still be executed and the PnL snapshot can still be refreshed.
 
 What does not exist: automatic circuit breakers (price jump, volume, solvency), an emergency withdrawal
 path for LPs, or an on-chain emergency mode. Any response to an incident relies on the owner.
@@ -212,28 +235,18 @@ path for LPs, or an on-chain emergency mode. Any response to an incident relies 
 
 ## 6. Before an Audit
 
-Figures measured at commit `aaceb08` ([test suite documentation](./tests/README.md)).
+Figures measured at commit `2e390d7` ([test suite documentation](./tests/README.md)).
 
 | Item | State |
 |:---|:---|
 | Code freeze | No |
-| Coverage on `src/` (`forge coverage --report summary`) | Lines 100% on every contract except `Vault` (98.18%, the two `return 0` bodies of `maxWithdraw`/`maxRedeem`); branches below 100% on `BondDepository` (75.00%) and `TradingEngine` (95.65%) |
-| Fuzz tests on math | 39 `testFuzz_*` functions |
-| Invariants | 24 invariant functions over three suites; vault, reserve and funding accounting modelled; unrealised PnL not modelled |
-| Regression tests for the round 1 findings | 33 tests in `test/regression/` |
-| Slither | 0 High, 8 Medium, 20 Low, 128 Informational; not triaged |
-| Aderyn | 3 High (13 instances), 5 Low (47 instances); not triaged |
-| Contract size | `TradingEngine` 24,563 bytes, 13 under the limit |
-| Architecture documentation | This set of guides |
-| External audit | Not done |
-
----|:---|
-| Code freeze | No |
-| Line coverage on `src/` | 100% (`forge coverage --report summary`); branch coverage below 100% for `BondDepository` and `TradingEngine` |
-| Fuzz tests on math | 35 `testFuzz_*` functions |
-| Invariants | 14 asserting invariant functions; the gaps in section 3 remain |
-| Slither | 0 High, 6 Medium, 14 Low, 121 Informational; not triaged |
-| Aderyn | 2 High, 7 Low; not triaged |
+| Coverage on `src/` (`FOUNDRY_PROFILE=coverage forge coverage --report summary`) | Lines 100% on every contract except `Vault` (98.99%, the two `return 0` bodies of `maxWithdraw`/`maxRedeem`); branches below 100% on `BondDepository` (75.00%) and `TradingEngine` (95.65%) |
+| Fuzz tests on math | 45 `testFuzz_*` functions |
+| Invariants | 29 invariant functions over three suites; vault, reserve and funding accounting modelled; open PnL aggregates and the snapshot checked against a brute-force valuation |
+| Regression tests | 50 tests in `test/regression/` (round 1 findings and round 2b) |
+| Slither | 4 High, 16 Medium, 43 Low, 134 Informational; not triaged (the four High results are one line, see the test suite documentation) |
+| Aderyn | 3 High (14 instances), 6 Low (53 instances); not triaged |
+| Contract size | `TradingEngine` 17,311 bytes with the optimizer (200 runs), 7,265 under the limit (`forge build --sizes`) |
 | Architecture documentation | This set of guides |
 | External audit | Not done |
 

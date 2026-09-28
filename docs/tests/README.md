@@ -2,29 +2,29 @@
 
 **Status:** Proof of concept. Not audited and not deployed.
 
-All numbers below were measured on 2026-09-28 at commit `aaceb08` (branch `fix/review-findings`) after
+All numbers below were measured on 2026-09-28 at commit `2e390d7` (branch `fix/open-pnl-nav`) after
 `npm ci`, with forge 1.7.1 and solc 0.8.24. Mock-mode numbers are taken with `FORK_RPC_URL` empty; later
-commits only change documentation and add `script/analysis/pyth_update_age.py`.
+commits only change documentation.
 
 | Group | Location | Tests | Command that counts them |
 | :---- | :------- | ----: | :----------------------- |
-| Unit | `test/unit/` | 539 | `forge test --match-path "test/unit/*" --summary` |
-| Regression (round 2 findings) | `test/regression/` | 33 | `forge test --match-path "test/regression/*" --summary` |
+| Unit | `test/unit/` | 599 | `forge test --match-path "test/unit/*" --summary` |
+| Regression (round 2 and 2b findings) | `test/regression/` | 50 | `forge test --match-path "test/regression/*" --summary` |
 | Integration | `test/integration/Solvency.integration.t.sol` | 17 | `forge test --match-path "test/integration/*" --summary` |
 | Invariant (integration) | `test/integration/Solvency.invariant.t.sol` | 8 | same as above |
-| Invariant | `test/invariant/` | 16 | `forge test --match-path "test/invariant/*" --summary` |
+| Invariant | `test/invariant/` | 21 | `forge test --match-path "test/invariant/*" --summary` |
 | Fork | `test/fork/` | 19 | skipped without `FORK_RPC_URL` |
-| **Total (correctness)** | | **632** | `forge test --list --json 2>/dev/null \| jq '[.[][][]] \| length'` |
-| Gas benchmarks (not counted above) | `test/gas/` | 9 | `FOUNDRY_PROFILE=gas forge test --list --json 2>/dev/null \| jq '[.[][][]] \| length'` |
+| **Total (correctness)** | | **714** | `forge test --list --json 2>/dev/null \| jq '[.[][][]] \| length'` |
+| Gas benchmarks (not counted above) | `test/gas/` | 14 | `FOUNDRY_PROFILE=gas forge test --list --json 2>/dev/null \| jq '[.[][][]] \| length'` |
 
-`forge test` in mock mode: 613 passed, 0 failed, 19 skipped (the fork suite).
+`FORK_RPC_URL= forge test` (mock mode): 695 passed, 0 failed, 19 skipped (the fork suite).
 
-There are 39 functions named `testFuzz_*` and 24 stateful invariant functions (`invariant_*`). Count them
+There are 45 functions named `testFuzz_*` and 29 stateful invariant functions (`invariant_*`). Count them
 with:
 
 ```bash
-forge test --list --json 2>/dev/null | jq '[.[][][] | select(startswith("testFuzz_"))] | length'   # 39
-forge test --list --json 2>/dev/null | jq '[.[][][] | select(startswith("invariant_"))] | length'  # 24
+forge test --list --json 2>/dev/null | jq '[.[][][] | select(startswith("testFuzz_"))] | length'   # 45
+forge test --list --json 2>/dev/null | jq '[.[][][] | select(startswith("invariant_"))] | length'  # 29
 ```
 
 `foundry.toml` has no `[fuzz]` or `[invariant]` section, so Foundry defaults apply: 256 runs per fuzz test,
@@ -33,21 +33,29 @@ profile skips `test/gas`; the `gas` profile runs only it.
 
 ```bash
 forge test                                    # correctness suite (fork tests skip without FORK_RPC_URL)
-forge test --match-path "test/regression/*"   # round 2 regression tests
+forge test --match-path "test/regression/*"   # regression tests
 forge test --match-path "test/invariant/*"    # invariants
 FORK_RPC_URL=<arbitrum-one-archive-rpc> forge test --match-path "test/fork/*"
 FOUNDRY_PROFILE=gas forge test                # gas benchmarks, written to snapshots/*.json
-forge coverage --report summary
+FOUNDRY_PROFILE=coverage forge coverage --report summary
 ```
+
+**Coverage profile.** The default profile builds with the optimizer (200 runs) and keeps the EIP-170
+contract size limit, which `forge build --sizes` enforces in CI. `forge coverage` compiles without the
+optimizer, where contracts are larger, so `foundry.toml` has a `coverage` profile that only raises
+`code_size_limit`; run coverage with `FOUNDRY_PROFILE=coverage`. Do not pass `--no-match-path` on the command
+line: it replaces the profile's `no_match_path` and runs the gas benchmarks, which rewrite
+`snapshots/*.json`.
 
 ---
 
-## Regression tests (round 2)
+## Regression tests (rounds 2 and 2b)
 
 One file per finding, in [`test/regression/`](../../test/regression/). The tests named `test_Regression_*`
 and `testFuzz_Regression_*` failed against the code before their fix (the failing output is in the round 2
-report); the other tests in these files pass before and after. Most use only functions that existed before
-the fix, so they compile against it.
+and round 2b reports); the other tests in these files pass before and after. Most use only functions that
+existed before the fix, so they compile against it; new functions are called with low-level calls and new
+errors are matched by selector literal.
 
 | File | Finding | Tests |
 | :--- | :------ | ----: |
@@ -62,6 +70,10 @@ the fix, so they compile against it.
 | `EthRefundRegression.t.sol` | Force-sent ETH paid to the next caller | 2 |
 | `ReentrancyRegression.t.sol` | `updateTp`/`updateSl` without `nonReentrant`; re-entry through the ETH refund | 4 |
 | `BondingRoundRegression.t.sol` | Bonding round not closed when CR recovers | 3 |
+| `MaxPairsRegression.t.sol` | No bound on the number of pairs the PnL snapshot iterates (2b) | 1 |
+| `OpenPnlNavRegression.t.sol` | Share price ignored unrealised trader PnL; stale snapshot; payout check against the NAV (2b) | 7 |
+| `DepositCoverageRegression.t.sol` | Deposits below 100% coverage took part of the next injection (2b) | 5 |
+| `SolvencySplitRegression.t.sol` | Bonding on an unrealised move; bond clamp and round close on the realised ratio; injection on a stale snapshot (2b) | 4 |
 
 ---
 
@@ -77,14 +89,21 @@ Deploys the engine, storage, vault, `AssistantFund` (as treasury), `SolvencyMana
 handlers:
 
 - [`ProtocolHandler`](../../test/invariant/handlers/ProtocolHandler.sol): open (collateral 10 to 5,000
-  USDC, leverage 1 to 100, optional TP/SL), close, liquidate, `executeLimit`, `updateTp`, `updateSl`. It
-  models every settlement from the documented formulas and compares the trader and keeper payouts with the
-  model. `closeTrade`, `liquidate` and `executeLimit` revert when they settle nothing, so in the metrics
-  table below calls minus reverts is the number of settlements.
+  USDC, leverage 1 to 100, optional TP/SL), close, liquidate, `executeLimit`, `updateTp`, `updateSl`, and
+  `refreshSnapshot`. It models every settlement from the documented formulas and compares the trader and
+  keeper payouts with the model. `closeTrade`, `liquidate` and `executeLimit` revert when they settle
+  nothing, so in the metrics table below calls minus reverts is the number of settlements. At each refresh
+  it rebuilds the open totals position by position and checks the snapshot against them (exact), and checks
+  the conservativeness bound below with the excess loss `E` as a ghost variable.
 - [`LiquidityHandler`](../../test/invariant/handlers/LiquidityHandler.sol): deposit, withdrawal request,
   execution and cancellation, epoch advance, warp (1 minute to 1 day), price moves up or down by up to 5%
   per call within 60% to 140% of 50,000, pause and unpause of the engine or the vault, `checkAndAct`,
-  `bond`, `skim`. Each flow is modelled before the call and compared with the measured amount.
+  `bond`, `skim`. Each flow is modelled before the call and compared with the measured amount. `deposit`,
+  `executeWithdrawal` and `checkAndAct` take a mode seed: act on the current snapshot (possibly stale),
+  refresh first, or go through the refresh-and-act entry point. A deposit or execution rejected for a
+  documented reason (paused, stale snapshot, coverage below 100%, nothing to execute) ends with
+  `NotExecuted`, so calls minus reverts is the number that went through; an unexpected revert counts as a
+  mismatch.
 
 | Invariant | What it asserts |
 | :-------- | :-------------- |
@@ -96,30 +115,43 @@ handlers:
 | `invariant_StorageHoldsExactlyOpenCollateral` | TradingStorage USDC = sum of open collateral |
 | `invariant_OpenInterestMatchesPositionsAndCap` | long and short OI equal the open positions of each side, and long + short <= `maxOI` |
 | `invariant_EscrowedSharesMatchRequests` | shares held by the vault = shares of all pending withdrawal requests |
-| `invariant_RescueNeverOvershootsTarget` | CR after a rescue action (injection or bond) that raised it is <= 100% |
+| `invariant_RescueNeverOvershootsTarget` | the NAV ratio after an injection that raised it, and the realised ratio after a bond that raised it, are <= 100% |
 | `invariant_SharePricePositive` | `convertToAssets(1e18) > 0` while shares exist |
 | `invariant_SharesBackedByAssets` | shares outstanding imply assets > 0 |
+| `invariant_TotalAssetsIsBalanceMinusSnapshotLiability` | `totalAssets` = max(balance - max(0, snapshot), 0), and the balance while no trade is open |
+| `invariant_OpenTotalsMatchPositions` | per side, size, collateral and quantity aggregates = the sums over open positions, exactly; open trade count = open positions |
+| `invariant_SnapshotMatchesBruteForceAndIsConservative` | at every refresh: snapshot = `toUsdcUp(pairPnl(brute-force totals))` exactly, and L <= max(0, snapshot) + E, where L is the positive part of the sum of per-position PnL capped at 8x collateral and floored at minus collateral, and E the excess loss of positions past 100% loss (tolerance 0) |
+| `invariant_NoDepositBelowParOrStaleAction` | no deposit went through with the coverage ratio below 100%; no deposit or withdrawal execution went through on a stale snapshot |
+| `invariant_BondingNeverStartsAboveCriticalRealisedRatio` | no `checkAndAct` opened a bonding round with the realised ratio at or above 95% |
 
 Call distribution for the `invariant_VaultBalanceMatchesModelledFlows` campaign (256 runs x 500 calls),
-from `forge test --match-path "test/invariant/Protocol.invariant.t.sol" -vv` (forge runs one campaign per
-invariant function; the other campaigns are within a few percent):
+from `FOUNDRY_INVARIANT_SHOW_METRICS=true forge test --match-contract ProtocolInvariantTest --match-test invariant_VaultBalanceMatchesModelledFlows -vv`
+(forge runs one campaign per invariant function; the other campaigns are within a few percent):
 
-| Handler | Action | Calls | Reverts | Settled |
+| Handler | Action | Calls | Reverts | Went through |
 | :------ | :----- | ----: | ------: | ------: |
-| ProtocolHandler | openTrade | 7,429 | 0 | |
-| ProtocolHandler | closeTrade | 7,567 | 3,766 | 3,801 |
-| ProtocolHandler | liquidate | 7,396 | 6,710 | 686 |
-| ProtocolHandler | executeLimit | 7,533 | 7,337 | 196 |
-| ProtocolHandler | updateTp / updateSl | 7,615 / 7,493 | 0 / 0 | |
-| LiquidityHandler | deposit / requestWithdrawal / executeWithdrawal / cancelWithdrawal | 7,271 / 7,630 / 7,581 / 7,613 | 0 | |
-| LiquidityHandler | advanceEpoch / warp / movePrice / togglePause | 7,557 / 7,466 / 7,630 / 7,536 | 0 | |
-| LiquidityHandler | checkAndAct / bond / skim | 7,497 / 7,635 / 7,551 | 0 | |
+| ProtocolHandler | openTrade | 7,110 | 0 | |
+| ProtocolHandler | closeTrade | 7,060 | 3,391 | 3,669 |
+| ProtocolHandler | liquidate | 7,219 | 6,629 | 590 |
+| ProtocolHandler | executeLimit | 7,077 | 6,846 | 231 |
+| ProtocolHandler | updateTp / updateSl | 7,028 / 7,126 | 0 / 0 | |
+| ProtocolHandler | refreshSnapshot | 7,141 | 0 | 7,141 |
+| LiquidityHandler | deposit | 7,006 | 4,768 | 2,238 |
+| LiquidityHandler | executeWithdrawal | 7,016 | 6,888 | 128 |
+| LiquidityHandler | requestWithdrawal / cancelWithdrawal | 7,101 / 7,292 | 0 | |
+| LiquidityHandler | advanceEpoch / warp / movePrice / togglePause | 7,169 / 7,277 / 7,070 / 7,113 | 0 | |
+| LiquidityHandler | checkAndAct / bond / skim | 7,088 / 7,126 / 6,981 | 0 | |
 
-Of the 4,683 settlements, 686 (14.6%) were liquidations, 3,801 (81.2%) closes and 196 (4.2%) TP/SL
-executions. Before round 2 the funding rate liquidated most leveraged positions within minutes of a warp.
-The logs of the last run of each campaign report between 585 and 721 USDC of unpaid funding
-(`funding bad debt`): the handler liquidates a random position per call, so a liquidatable payer can stay
-open for days of warps, which is the residual described in
+Of the 4,490 settlements, 590 (13.1%) were liquidations, 3,669 (81.7%) closes and 231 (5.1%) TP/SL
+executions. `deposit` reverts with `NotExecuted` while the vault is paused, the snapshot is stale or the
+coverage ratio is below 100%; `executeWithdrawal` when no request is in its execution window or the
+snapshot is stale.
+The last run's log of that campaign reports 20 refreshes with a largest excess loss `E` of 0; an earlier
+run of the same campaign on commit `c3d552a` (same `src/` and `test/invariant/`) logged a largest `E` of
+8,259.96 USD at a refresh, so the conservativeness bound is also checked with `E > 0`, and
+`test_TotalAssets_UnderwaterPositionOffsetsWinnerWithinSide` builds that case on purpose. The
+handler liquidates a random position per call, so a liquidatable payer can stay open for days of warps,
+which leaves unpaid funding: the residual described in
 [Guide 2](../02-mathematics.md#residual-funding-a-payer-cannot-pay).
 
 Mutation checks: each of these temporary changes to `src/` made at least one invariant fail with 20 runs of
@@ -130,11 +162,18 @@ reward without its floor (same two), receivers credited 1% more than payers pay
 deficit clamp made `BondsNeverExceedDeficit` (bonding suite) and `VaultBalanceMatchesModelledFlows`
 (solvency suite) fail with 100 runs.
 
+Round 2b mutation checks, each with the default configuration and
+`forge test --match-contract ProtocolInvariantTest --match-test <invariant>`: deposits without the coverage
+check (`NoDepositBelowParOrStaleAction`: `deposit below 100% coverage: 1 != 0`), bonding triggered on the
+NAV ratio (`BondingNeverStartsAboveCriticalRealisedRatio`: `1 != 0`), quantity removed with the short
+rounding for longs (`OpenTotalsMatchPositions`: `long quantity: 1 != 0`), and the snapshot halved
+(`SnapshotMatchesBruteForceAndIsConservative`: `snapshot differs from the brute-force valuation: 1 != 0`).
+
 ### Bonding: [`Bonding.invariant.t.sol`](../../test/invariant/Bonding.invariant.t.sol)
 
 Driven by [`BondingHandler`](../../test/invariant/handlers/BondingHandler.sol): open rounds, bond, claim,
-warp, change price, discount and vesting, set the vault deficit (`MockSolvencyVault`) and close recovered
-rounds as `checkAndAct` would.
+warp, change price, discount and vesting, set the vault's realised deficit (`MockSolvencyVault`) and close
+recovered rounds as `checkAndAct` would.
 
 | Invariant | What it asserts |
 | :-------- | :-------------- |
@@ -142,13 +181,13 @@ rounds as `checkAndAct` would.
 | `invariant_SupplyEqualsPromised` | `synth.totalSupply()` = total bonded |
 | `invariant_ClaimedNeverExceedsPromised` | per position, `claimedSynth <= totalSynth` |
 | `invariant_RaisedWithinCap` | current round raise <= its cap, total raise <= sum of caps, vault USDC = total raise |
-| `invariant_BondsNeverExceedDeficit` | each bond took `min(amount, cap, deficit)` and the bond that took all of it closed the round |
+| `invariant_BondsNeverExceedDeficit` | each bond took `min(amount, cap, realised deficit)` and the bond that took all of it closed the round |
 
 ### Solvency (integration): [`Solvency.invariant.t.sol`](../../test/integration/Solvency.invariant.t.sol)
 
 Driven by [`SolvencyHandler`](../../test/integration/handlers/SolvencyHandler.sol) on the wired
 `DeployLib` deployment: LP deposits, simulated trader payouts (`sendPayout`), fee accrual, rescues, bonding,
-claims and skims.
+claims and skims. No trade is opened, so the NAV and realised ratios are equal in this suite.
 
 | Invariant | What it asserts |
 | :-------- | :-------------- |
@@ -178,7 +217,7 @@ claims and skims.
 
 ## Fuzz tests
 
-A selection of the 39 `testFuzz_*` functions, by area.
+A selection of the 45 `testFuzz_*` functions, by area.
 
 | Area | Tests | Property |
 | :--- | :---- | :------- |
@@ -191,6 +230,9 @@ A selection of the 39 `testFuzz_*` functions, by area.
 | Storage | `testFuzz_DeleteTrade_UserListStaysConsistent` | The user's trade list holds exactly the open trades after random deletions |
 | Bonding | `testFuzz_Bond_ConservesCapAndInjects`, `testFuzz_Vested_MonotonicAndBounded`, `testFuzz_Claim_NoDustAfterFullVesting` | Vesting bounds, no dust |
 | Limit orders | `testFuzz_ExecuteLimit_ConservesFunds` | Executor reward comes from the payout, not the vault |
+| Open PnL math | `testFuzz_Quantity_LongAtMostOneAboveShort`, `testFuzz_SidePnl_OverstatesPerPositionSum`, `testFuzz_PairPnl_AtLeastAnyPriceInBand` | Rounding direction, aggregate at least the per-position sum, band edge choice (2 wei tolerance) |
+| Open PnL aggregates | `testFuzz_Aggregates_NoDriftAfterManyOpensAndCloses` | Totals return exactly to the brute-force sums after random opens and closes |
+| NAV | `testFuzz_PreviewsMatchActionsAtNav`, `testFuzz_Ratios_RealisedAtLeastNav` | `previewDeposit`/`previewMint` equal `deposit`/`mint` with a fresh snapshot; realised ratio >= NAV ratio |
 
 ---
 
@@ -201,22 +243,25 @@ Counts from `forge test --match-path "test/unit/*" --summary`.
 | Contract | Test file | Tests |
 | :------- | :-------- | ----: |
 | TradingEngine | [`TradingEngine.t.sol`](../../test/unit/TradingEngine.t.sol) | 158 |
-| TradingStorage | [`TradingStorage.t.sol`](../../test/unit/TradingStorage.t.sol) | 111 |
+| TradingStorage | [`TradingStorage.t.sol`](../../test/unit/TradingStorage.t.sol) | 117 |
 | Vault | [`Vault.t.sol`](../../test/unit/Vault.t.sol) | 71 |
+| Vault (NAV, snapshot, ratios) | [`VaultNav.t.sol`](../../test/unit/VaultNav.t.sol) | 35 |
 | SpreadManager | [`SpreadManager.t.sol`](../../test/unit/SpreadManager.t.sol) | 48 |
 | BondDepository | [`BondDepository.t.sol`](../../test/unit/BondDepository.t.sol) | 44 |
 | PythChainlinkOracle | [`PythChainlinkOracle.t.sol`](../../test/unit/PythChainlinkOracle.t.sol) | 37 |
+| SolvencyManager | [`SolvencyManager.t.sol`](../../test/unit/SolvencyManager.t.sol) | 23 |
 | AssistantFund | [`AssistantFund.t.sol`](../../test/unit/AssistantFund.t.sol) | 19 |
 | SynthToken | [`SynthToken.t.sol`](../../test/unit/SynthToken.t.sol) | 19 |
 | FundingLib | [`FundingLib.t.sol`](../../test/unit/FundingLib.t.sol) | 17 |
-| SolvencyManager | [`SolvencyManager.t.sol`](../../test/unit/SolvencyManager.t.sol) | 15 |
+| OpenPnlLib | [`OpenPnlLib.t.sol`](../../test/unit/OpenPnlLib.t.sol) | 11 |
 
 ### Mocks: [`test/mocks/`](../../test/mocks/)
 
 `MockOracle` (preset prices and confidence, payable fee flow, optional revert), `MockChainlinkFeed`
 (configurable answer, decimals, `startedAt` and `updatedAt`; also plays the sequencer uptime feed),
-`MockSpreadManager` (fixed spread), `MockSolvencyVault` (settable collateralization deficit for the bonding
-tests). `MockUSDC` is defined in each test file.
+`MockSpreadManager` (fixed spread), `MockSolvencyVault` (settable realised collateralization deficit for the
+bonding tests). `MockUSDC` is defined in each test file. `MockOracle` charges its fee on every call, so the
+multi-pair refresh tests run it with a zero fee; the gas benchmark at `MAX_PAIRS` uses the real oracle.
 
 ---
 
@@ -271,71 +316,84 @@ mode needs `FORK_RPC_URL` absent or empty.
 per entry point with `vm.snapshotGasLastCall` into [`snapshots/`](../../snapshots/). The contracts are wired
 as in `DeployLib` with the real `PythChainlinkOracle` on `MockPyth` (no Wormhole signature verification, so
 the Pyth part costs less than on a live chain), a sequencer uptime feed and the real `SpreadManager`; one
-position is already open on the pair.
+position is already open on the pair, so `deposit`, `executeWithdrawal` and `checkAndAct` run after a
+snapshot refresh that is not measured. The build uses the optimizer with 200 runs.
 
 | Call | Gas (`FOUNDRY_PROFILE=gas forge test`, `snapshots/*.json`) |
 | :--- | --: |
-| `TradingEngine.openTrade` (with TP and SL) | 325,076 |
-| `TradingEngine.closeTrade` (profit) | 166,923 |
-| `TradingEngine.liquidate` | 160,049 |
-| `TradingEngine.executeLimit` (TP) | 197,611 |
-| `Vault.deposit` | 43,300 |
-| `Vault.requestWithdrawal` | 63,014 |
-| `Vault.executeWithdrawal` | 32,221 |
-| `SolvencyManager.checkAndAct` (opens a bonding round) | 62,826 |
-| `BondDepository.bond` | 141,854 |
+| `TradingEngine.openTrade` (with TP and SL) | 298,003 |
+| `TradingEngine.closeTrade` (profit) | 129,571 |
+| `TradingEngine.liquidate` | 126,939 |
+| `TradingEngine.executeLimit` (TP) | 158,702 |
+| `Vault.deposit` | 49,605 |
+| `Vault.refreshAndDeposit` | 171,080 |
+| `Vault.requestWithdrawal` | 61,840 |
+| `Vault.executeWithdrawal` | 33,076 |
+| `Vault.refreshAndExecuteWithdrawal` | 156,588 |
+| `Vault.refreshPnlSnapshot`, 1 pair | 126,621 |
+| `Vault.refreshPnlSnapshot`, 20 pairs (`MAX_PAIRS`), a long and a short on each | 640,239 |
+| `SolvencyManager.checkAndAct` (injects the reserve and opens a bonding round) | 66,562 |
+| `SolvencyManager.refreshAndCheckAndAct` (same path) | 199,194 |
+| `BondDepository.bond` | 137,962 |
 
 ---
 
 ## Coverage
 
-From `forge coverage --report summary` (coverage builds disable the optimizer and `viaIR`; the default
-profile excludes `test/gas`). The run executed 632 tests: 613 passed, 19 skipped.
+From `FORK_RPC_URL= FOUNDRY_PROFILE=coverage forge coverage --report summary` (coverage builds disable the
+optimizer and `viaIR`; the profile excludes `test/gas`). The run executed 714 tests: 695 passed, 19 skipped.
 
 | Contract | Lines | Statements | Branches | Functions |
 | :------- | :---- | :--------- | :------- | :-------- |
 | AssistantFund | 100% (33/33) | 100% (37/37) | 100% (6/6) | 100% (9/9) |
 | BondDepository | 100% (93/93) | 94.92% (112/118) | 75.00% (18/24) | 100% (18/18) |
 | PythChainlinkOracle | 100% (53/53) | 100% (85/85) | 100% (16/16) | 100% (7/7) |
-| SolvencyManager | 100% (32/32) | 100% (45/45) | 100% (6/6) | 100% (4/4) |
+| SolvencyManager | 100% (44/44) | 100% (57/57) | 100% (10/10) | 100% (6/6) |
 | SpreadManager | 100% (54/54) | 100% (58/58) | 100% (13/13) | 100% (12/12) |
 | SynthToken | 100% (23/23) | 100% (18/18) | 100% (4/4) | 100% (9/9) |
 | TradingEngine | 100% (280/280) | 99.24% (392/395) | 95.65% (66/69) | 100% (41/41) |
-| TradingStorage | 100% (132/132) | 100% (139/139) | 100% (33/33) | 100% (30/30) |
-| Vault | 98.18% (108/110) | 98.39% (122/124) | 100% (17/17) | 100% (32/32) |
+| TradingStorage | 100% (153/153) | 100% (159/159) | 100% (34/34) | 100% (34/34) |
+| Vault | 98.99% (196/198) | 99.17% (240/242) | 100% (27/27) | 100% (50/50) |
 | FundingLib | 100% (16/16) | 100% (28/28) | 100% (4/4) | 100% (3/3) |
+| OpenPnlLib | 100% (21/21) | 100% (32/32) | 100% (5/5) | 100% (4/4) |
 
-The two `Vault` lines reported as not covered are the `return 0` bodies of `maxWithdraw` and `maxRedeem`,
+The two `Vault` lines reported as not covered are the `return 0` bodies of `maxWithdraw` and `maxRedeem`
+(the `DA` entries with 0 hits in `FORK_RPC_URL= FOUNDRY_PROFILE=coverage forge coverage --report lcov`),
 which `test/unit/Vault.t.sol` and `test/regression/WithdrawalRegression.t.sol` call and check. In
 `TradingEngine`, the `FeeExceedsCollateral` check cannot be reached while `MAX_LEVERAGE` is 100 (the open fee
-is at most 8% of the collateral). The "Total" row of the report (85.13% lines) also counts
+is at most 8% of the collateral). The "Total" row of the report (86.39% lines) also counts
 `node_modules/`, `script/` and `test/`. Line coverage says a line ran, not that its result was checked.
 
 ---
 
 ## Static analysis
 
-Raw counts at commit `aaceb08`, not triaged except where noted.
+Raw counts, not triaged except where noted. They were run at commit `c3d552a`; the only later change to code
+is a test file, outside the analysed paths (`src/` for Aderyn, `test` filtered out for Slither).
 
 | Tool | Command | Result |
 | :--- | :------ | :----- |
-| Slither 0.11.6 | `slither . --filter-paths "lib\|node_modules\|test" --json <file>` | 156 results: 0 High, 8 Medium, 20 Low, 128 Informational |
-| Aderyn 0.6.8 | `aderyn --src src` | 3 High (13 instances), 5 Low (47 instances) |
-| Solhint 6.0.3 | `npx solhint 'src/**/*.sol'` | 517 warnings, 0 errors |
+| Slither 0.11.6 | `slither . --filter-paths "lib\|node_modules\|test" --json <file>` | 197 results: 4 High, 16 Medium, 43 Low, 134 Informational |
+| Aderyn 0.6.8 | `aderyn --src src` | 3 High (14 instances), 6 Low (53 instances) |
+| Solhint 6.0.3 | `npx solhint 'src/**/*.sol'` | 592 warnings, 0 errors |
 
-Slither by detector (counted from the JSON `results.detectors[].check`): Medium `incorrect-equality` 3,
-`unused-return` 3, `pyth-unchecked-confidence` 1, `reentrancy-no-eth` 1; Low `timestamp` 10,
-`reentrancy-events` 5, `calls-loop` 5; Informational `naming-convention` 118, `missing-inheritance` 4,
-`unindexed-event-address` 4, `assembly` 2. The `reentrancy-no-eth` result is
-`TradingEngine.setFundingFactor`, which calls TradingStorage (owner-set) to accrue every pair before it
-writes the new factor; the accrual must use the old factor.
+Slither by detector (counted from the JSON with `jq -r '.results.detectors[] | "\(.impact) \(.check)"' <file> | sort | uniq -c`):
+High `msg-value-loop` 4; Medium `incorrect-equality` 6, `unused-return` 5, `uninitialized-local` 3,
+`pyth-unchecked-confidence` 1, `reentrancy-no-eth` 1; Low `timestamp` 19, `calls-loop` 17,
+`reentrancy-events` 6, `reentrancy-benign` 1; Informational `naming-convention` 122, `assembly` 4,
+`missing-inheritance` 4, `unindexed-event-address` 4. The four `msg-value-loop` results are the same line of
+`Vault._refreshPnlSnapshot`, reached from its four callers: `msg.value` goes only to the first priced pair
+(a flag skips it afterwards), which the gas benchmark at `MAX_PAIRS` exercises by paying the fee for 20
+feeds once. The `reentrancy-no-eth` result is `TradingEngine.setFundingFactor`, which calls TradingStorage
+(owner-set) to accrue every pair before it writes the new factor; the accrual must use the old factor.
 
-Aderyn: H-1 "Contract locks Ether without a withdraw function" (9 instances, one per contract), H-2
-"Reentrancy: State change after external call" (2: `BondDepository.sol:206`, the `view` call to the
-vault's `collateralizationDeficit` before `remainingCap` is written, and `TradingEngine.sol:817`,
-`setFundingFactor`), H-3 "Unsafe Casting of integers" (2: `BondDepository.sol:223`,
-`PythChainlinkOracle.sol:168`); L-1 to L-5 (centralization risk 34, large numeric literal 5, literal
-instead of constant 2, modifier invoked once 5, state change without event 1).
+Aderyn: H-1 "Contract locks Ether without a withdraw function" (9 instances), H-2 "Reentrancy: State
+change after external call" (2: `BondDepository.sol:207`, the `view` call to the vault's
+`realisedCollateralizationDeficit` before `remainingCap` is written, and `TradingEngine.sol:817`,
+`setFundingFactor`), H-3 "Unsafe Casting of integers" (3: `BondDepository.sol:224`,
+`PythChainlinkOracle.sol:168`, `Vault.sol:279`, the constant 60 cast to `uint32`); L-1 to L-6
+(centralization risk 35, large numeric literal 5, literal instead of constant 6, modifier invoked once 5,
+state change without event 1, uninitialized local variable 1).
 
 ---
 

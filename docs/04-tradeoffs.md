@@ -105,9 +105,15 @@ exceed the vault balance.
   unpaid part of its funding stays with the vault. At a flat price this needs a payer at 100x to stay
   unliquidated for more than 9.5 hours after crossing the threshold, and then grows by at most 1% of its
   collateral per hour.
-- **The vault ratio ignores open PnL.** The share price and CR only move with realised PnL; layers 2 and 3
-  react to realised losses only. Including unrealised PnL is planned for a later round.
-- **Deposits have no lock.** A new LP can enter just before a known trader loss or a reserve injection.
+- **NAV biases.** The share price and CR use a conservative NAV that ignores the 9x payout cap
+  (conservative), lets positions past 100% loss offset winners on their side until liquidated (optimistic,
+  bounded by their excess loss) and does not add net trader losses
+  ([Guide 2, section 8.2](./02-mathematics.md#82-known-biases-of-the-nav)).
+- **Snapshot age window.** Deposits and withdrawals can use a snapshot up to `maxPnlSnapshotAge` old (60 s by
+  default, owner-set up to 3,600 s) if no position opened or closed since.
+- **Deposits have no lock.** A new LP can enter while traders are net losing and share in those losses.
+  Deposits revert below 100% coverage, which can last indefinitely
+  ([Guide 7](./07-vault-ssl.md#known-biases-and-the-deposit-freeze)).
 - **Winning closes can revert.** If the vault holds less USDC than the profit owed, `closeTrade` and
   `executeLimit` revert with `InsufficientVaultBalance` until the vault is refilled. No code change in
   round 2; the trader can retry after the vault receives USDC.
@@ -215,7 +221,7 @@ Qualitative, as assessed in this review.
 | Risk | What the code does | Remaining exposure |
 |:---|:---|:---|
 | Latency arbitrage | 5 s price age, spread, fees | Caller chooses the update within 5 s; no minimum holding time |
-| Vault insolvency | Payout cap, static OI cap, reserve, bonding, zero-sum capped funding | Funding bad debt when payers are liquidated late, ratio ignores open PnL, deposits without a lock, winning closes revert when the vault is short |
+| Vault insolvency | Payout cap, static OI cap, reserve, bonding, zero-sum capped funding, NAV with open PnL | Funding bad debt when payers are liquidated late, NAV biases, deposits without a lock, winning closes revert when the vault is short |
 | Oracle manipulation | Signed Pyth updates, Chainlink deviation check, confidence cap | 3% band |
 | Oracle outage | Revert | All positions frozen |
 | Liquidation incentives | Permissionless, reward from collateral with a 0.5% floor | Small rewards on small positions |

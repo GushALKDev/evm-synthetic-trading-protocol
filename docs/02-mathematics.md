@@ -32,20 +32,81 @@ The vault is a Solady `ERC4626` with `_decimalsOffset() = 12` (USDC 6 decimals, 
 
 $$SharePrice = \frac{totalAssets}{totalSupply} \times 10^{12}$$
 
-- `totalAssets()` is the vault's USDC balance. It does not include open trader PnL, open collateral
-  (held by `TradingStorage`) or pending fees.
+`totalAssets()` is a conservative NAV (`Vault.totalAssets`):
+
+$$totalAssets = \max\left(balance - \max(0,\ netPnl_{snapshot}),\ 0\right)$$
+
+- `balance` is the vault's USDC balance. Open collateral (held by `TradingStorage`) and fees not yet
+  collected are not in it.
+- `netPnl_snapshot` is the net unrealised trader PnL of all open positions from the latest PnL snapshot
+  (section 1.1), in USDC. A positive value (traders in profit) is subtracted; a negative value (traders
+  net losing) is not added. While no trade is open the snapshot is ignored and `totalAssets = balance`.
+- `totalAssets` uses the latest snapshot even when it is stale, so it never reverts; the previews and
+  `convertTo*` use the same value. `deposit`, `mint` and `executeWithdrawal` need a fresh snapshot
+  (section 1.2).
 - Deposit and mint follow Solady's ERC-4626 rounding (shares rounded down on `deposit`, assets rounded up
   on `mint`, assets rounded down on `previewRedeem`), with virtual shares from the decimals offset.
 
 | Event | totalAssets | totalSupply | Share price |
 |:---|:---|:---|:---|
 | Trader closes with a loss of 100 USDC | +100 | = | rises |
-| Trader closes with a profit of 100 USDC | -100 | = | falls |
+| Trader closes with a profit of 100 USDC | -100 from the balance, +100 at the next refresh (the profit leaves the snapshot) | = | unchanged after the refresh: it fell when the profit first appeared in a snapshot |
+| Refresh while traders hold 1,000 USDC of net profit | -1,000 | = | falls |
+| Refresh while traders are net losing | = | = | unchanged |
 | Fees: 80% of each open and close fee | + | = | rises |
 | LP deposits | + | + | unchanged, up to rounding |
 | LP executes a withdrawal | - | - | unchanged, up to rounding |
 
-Because only realised PnL changes `totalAssets`, the share price does not move while trades are open.
+The 1,000 USDC row is `test_TotalAssets_SubtractsSnapshotProfit` in `test/unit/VaultNav.t.sol` (a 10x long
+of 1,000 USDC after a 10% move; `forge test --match-test test_TotalAssets_SubtractsSnapshotProfit`).
+
+### 1.1 Open PnL aggregates
+
+`TradingStorage` keeps, per pair and side, the total size (the side's open interest, 18 decimals), the
+total collateral (USDC) and the total quantity `Q`, updated in `storeTrade` and `deleteTrade`
+(`_addToTotals`, `_removeFromTotals`). Each position contributes
+
+$$q = \frac{size_{wad} \times 10^{18}}{openPrice}, \qquad \text{rounded up for longs, down for shorts}$$
+
+`q` is the position's quantity in asset units scaled by 1e18 (WAD). `size_wad` is `collateral x leverage x
+1e12` and `openPrice` has 18 decimals, so `q` keeps 18 decimals of the asset quantity. Removal recomputes `q`
+from the stored trade with the same formula and rounding, so the totals return exactly to their previous
+value (`testFuzz_Aggregates_NoDriftAfterManyOpensAndCloses` in `test/unit/TradingStorage.t.sol`). Totals are
+`uint128` quantities packed with the side collateral in one slot.
+
+Per side, at a price `p` (`OpenPnlLib.sidePnl`, 18 decimals):
+
+$$PnL_{long} = \left\lceil \frac{p \times Q_{long}}{10^{18}} \right\rceil - S_{long}, \qquad PnL_{short} = S_{short} - \left\lfloor \frac{p \times Q_{short}}{10^{18}} \right\rfloor$$
+
+each clamped at `-collateral_side x 1e12` (a side cannot lose more than its total collateral). Per pair
+(`OpenPnlLib.pairPnl`), with the oracle confidence `conf`:
+
+$$PnL_{pair} = \max\left(net(p - conf),\ net(p + conf)\right), \qquad net(x) = PnL_{long}(x) + PnL_{short}(x)$$
+
+Each clamped side is convex in the price, so the maximum of their sum over the band `[p - conf, p + conf]` is
+at one of its edges; the chosen edge is the one that shows the most trader profit
+(`testFuzz_PairPnl_AtLeastAnyPriceInBand` in `test/unit/OpenPnlLib.t.sol`, tolerance 2 wei for the two
+rounded products). The snapshot is the sum over pairs converted to USDC rounded toward plus infinity
+(`OpenPnlLib.toUsdcUp`). Every rounding step (quantity, product, conversion) and the band edge overstate
+trader profit.
+
+Left out on purpose: pending funding (a transfer between traders; the vault only carries the bad-debt
+residual of section 6), close fees not yet collected and the close spread (both would lower the trader
+payout), and the 9x payout cap (section 2). All three omissions make the liability larger than what
+settlement would pay, except for the within-side offset described in section 8.2.
+
+### 1.2 Snapshot freshness
+
+`Vault.refreshPnlSnapshot(priceUpdate)` values every pair with open interest and stores
+`(netPnl, timestamp, nonce)`, where `nonce` is `TradingStorage`'s positions nonce, incremented by every open
+and every settlement. The snapshot is fresh when
+
+$$openTrades = 0 \quad \lor \quad \left(timestamp \ne 0 \ \land\ nonce = positionsNonce \ \land\ now - timestamp \le maxPnlSnapshotAge\right)$$
+
+`maxPnlSnapshotAge` is `DEFAULT_MAX_PNL_SNAPSHOT_AGE` (60 s) at deployment and owner-set within 1 s and
+`MAX_PNL_SNAPSHOT_AGE_CEILING` (3,600 s), both constants in `src/Vault.sol`. The nonce check keeps a
+settlement between a refresh and an action from being counted twice (once in the balance, once in the
+snapshot).
 
 ---
 
@@ -281,28 +342,77 @@ owner in `addPair` / `updatePair`. There is no global cap across pairs and no li
 
 ## 8. Collateralization Ratio and Solvency Actions
 
-`Vault.collateralizationRatio()`:
+Two ratios, both WAD (1e18 = 100%) and `type(uint256).max` when `totalSupply = 0`.
 
-$$CR = \left\lfloor \frac{totalAssets \times 10^{12} \times 10^{18}}{totalSupply} \right\rfloor \quad (\text{type(uint256).max if } totalSupply = 0)$$
+**LP principal coverage ratio** (`Vault.collateralizationRatio()`), on the conservative NAV:
 
-This is the share price relative to 1.0 USDC per share (1e18 = 100%), the price at which the first shares
-are minted. It does not include open trader PnL, and it does not depend on when each LP deposited.
+$$CR = \left\lfloor \frac{totalAssets \times 10^{12} \times 10^{18}}{totalSupply} \right\rfloor, \qquad deficit = \max\left(\left\lfloor \frac{totalSupply}{10^{12}} \right\rfloor - totalAssets,\ 0\right)$$
 
-`Vault.collateralizationDeficit()`:
+It is the share price at the conservative NAV relative to 1.0 USDC per share, the price at which the first
+shares are minted: below 100%, the NAV does not cover the principal LPs would have paid in at 1.0. It does
+not measure whether the vault can pay every open trade at its cap, it does not depend on the price each LP
+actually paid, it says nothing about how much of the NAV is liquid USDC, and it uses the latest snapshot
+even when that is stale.
 
-$$deficit = \max\left(\left\lfloor \frac{totalSupply}{10^{12}} \right\rfloor - totalAssets,\ 0\right)$$
+**Realised ratio** (`Vault.realisedCollateralizationRatio()`), on the USDC balance only:
+
+$$CR_{realised} = \left\lfloor \frac{balance \times 10^{12} \times 10^{18}}{totalSupply} \right\rfloor, \qquad deficit_{realised} = \max\left(\left\lfloor \frac{totalSupply}{10^{12}} \right\rfloor - balance,\ 0\right)$$
+
+Since `totalAssets <= balance`, `CR_realised >= CR` and `deficit_realised <= deficit`
+(`testFuzz_Ratios_RealisedAtLeastNav` in `test/unit/VaultNav.t.sol`).
+
+Deposits and mints revert with `CoverageBelowPar` while `CR < 100%`, and `maxDeposit`/`maxMint` return 0.
 
 `SolvencyManager.checkAndAct()`:
 
 | State | Condition | Action |
 |:---|:---|:---|
+| Round recovered | `CR_realised >= 100%` and a round is open | Close it (`closeBonding`, event `BondingClosed`) |
 | Healthy | CR >= 110% | Emit `Healthy` |
 | Warning | 100% <= CR < 110% | Emit `Warning` |
-| Deficit | CR < 100% | Inject `min(reserve, deficit)` from the AssistantFund |
-| Critical | CR < 95% and deficit not covered and no active round | Also open a bonding round for the shortfall |
+| Deficit | CR < 100% and the snapshot is fresh | Inject `min(reserve, deficit)` from the AssistantFund |
+| Deficit, stale snapshot | CR < 100% and the snapshot is stale | No injection; emit `ReserveInjectionSkipped` |
+| Critical | `CR_realised < 95%` (before the injection), no active round, `deficit_realised` after the injection above 0 | Open a bonding round for `deficit_realised` |
 
-At CR >= 100% an open bonding round is closed (`closeBonding`, event `BondingClosed`). No other action is
-taken above 110% (no buyback).
+The healthy and warning returns cannot skip a bonding round the realised ratio would need, because
+`CR_realised >= CR`. `refreshAndCheckAndAct(priceUpdate)` refreshes the snapshot first. No action is taken
+above 110% (no buyback).
+
+### 8.1 Rescue bounds
+
+An injection is sized on `deficit`, so the NAV ratio after it is at most 100%; a bond is clamped to
+`deficit_realised`, so the realised ratio after it is at most 100%:
+
+$$CR_{after} = \left\lfloor \frac{\lfloor totalSupply / 10^{12} \rfloor \times 10^{30}}{totalSupply} \right\rfloor \le 10^{18}$$
+
+(`invariant_RescueNeverOvershootsTarget` in `test/invariant/Protocol.invariant.t.sol`, tolerance 0.)
+
+### 8.2 Known biases of the NAV
+
+Let `pnl_i` be position i's PnL at the snapshot price and `c_i` its collateral.
+
+1. **The 9x payout cap is ignored (conservative).** The aggregate counts the full price PnL; settlement pays
+   at most 8x collateral of price profit. The liability is overstated by
+   `sum_i max(0, pnl_i - 8 c_i)`. The ratio and withdrawals are lower than settlement values would give; a
+   depositor (only possible at a ratio of 100% or more) buys shares below the settlement value by the same
+   amount.
+2. **Positions past 100% loss offset winners on their side (optimistic).** The clamp is per side, not per
+   position, so a position that has lost more than its collateral and is not yet liquidated offsets other
+   positions' profits on the same side. The liability is understated by at most the excess loss
+
+   $$E = \sum_{i:\ pnl_i < -c_i} (-pnl_i - c_i)$$
+
+   E is zero until a position's loss passes 100% of its collateral, which needs the price to move past the
+   liquidation threshold (90% loss) without a liquidation; it is bounded by liquidation latency. Example
+   from `test_TotalAssets_UnderwaterPositionOffsetsWinnerWithinSide` (`test/unit/VaultNav.t.sol`): the
+   snapshot shows -2,000 USDC, the per-position clamped PnL is +1,000 USDC owed to traders, E is 3,000
+   USDC. The protocol invariant `invariant_SnapshotMatchesBruteForceAndIsConservative` checks
+   `liability <= max(0, snapshot) + E` at every refresh, with the liability capped at 8x collateral per
+   position.
+3. **Net trader losses are not added (dilution).** When traders are net losing, `totalAssets` is the balance,
+   below what liquidations and closes will bring in. A deposit of `D` into a NAV `A` receives `D / (A + D)` of
+   any loss `L` realised later, `D x L / (A + D)`, taken from the LPs already in. It is a fairness cost for
+   existing LPs, not a solvency one; `L` is at most the collateral of the losing positions.
 
 ---
 
@@ -313,9 +423,10 @@ taken above 110% (no buyback).
 $$effectivePrice = \left\lfloor \frac{referencePrice \times (10000 - discountBps)}{10000} \right\rfloor, \qquad synthOut = \left\lfloor \frac{usdcIn \times 10^{18}}{effectivePrice} \right\rfloor$$
 
 - `referencePrice` is USDC (6 decimals) per 1 SYNTH, set by the owner (default 2 USDC).
-- `discountBps <= 1000`; `usdcIn = min(amount, remainingCap, collateralizationDeficit)`, and `bond`
+- `discountBps <= 1000`; `usdcIn = min(amount, remainingCap, realisedCollateralizationDeficit)`, and `bond`
   reverts with `NoActiveRound` when the last two are not both above zero. The bond that takes all that is
-  available closes the round, so a round never raises more than the deficit at the time of each bond.
+  available closes the round, so a round never raises more than the realised deficit at the time of each
+  bond.
 - Vesting is linear: `vested = floor(totalSynth x elapsed / duration)` until the end, then `totalSynth`.
 
 Example: `referencePrice = 1e6` (1 USDC), discount 10%: `effectivePrice = 900,000`, and 1,000 USDC buys
@@ -351,6 +462,9 @@ Example: `referencePrice = 1e6` (1 USDC), discount 10%: `effectivePrice = 900,00
 | `MAX_CONFIDENCE_BPS` | 200 | `PythChainlinkOracle` constant |
 | `MAX_DEVIATION_BPS` | 300 | `PythChainlinkOracle` constant |
 | `SAFE_CR`, `DEFICIT_CR`, `CRITICAL_CR` | 110%, 100%, 95% | `SolvencyManager` constants |
+| `DEFAULT_MAX_PNL_SNAPSHOT_AGE`, `MAX_PNL_SNAPSHOT_AGE_CEILING` | 60 s, 3,600 s | `Vault` constants |
+| `maxPnlSnapshotAge` | 60 s by default, owner-set within 1 to 3,600 s | `Vault.setMaxPnlSnapshotAge` |
+| `MAX_PAIRS` | 20 | `TradingStorage` constant |
 | `EPOCH_LENGTH`, `WITHDRAWAL_DELAY_EPOCHS`, `WITHDRAWAL_WINDOW_EPOCHS` | 1 day, 3, 1 | `Vault` constants |
 | `targetCap` | 1,000,000 USDC | `script/Deploy.s.sol` |
 | `discountBps` | 500 | `script/Deploy.s.sol` (max 1000) |

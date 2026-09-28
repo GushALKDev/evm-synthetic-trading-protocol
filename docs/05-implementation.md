@@ -33,9 +33,10 @@ has been replaced by the actual structures.
 | Pyth SDK | `@pythnetwork/pyth-sdk-solidity` `^4.3.1` (npm), remapped from `node_modules/`; `npm ci` is required before `forge build` | `package.json`, `foundry.toml` |
 | Formatter | `forge fmt`, `line_length = 160` | `foundry.toml` `[fmt]` |
 
-`foundry.toml` sets `ffi = false`, excludes `test/gas` from the default profile (a `gas` profile runs only
-the gas benchmarks) and does not set `solc`, the optimizer or `via_ir`, so forge defaults apply (optimizer
-off, EVM version `cancun` for solc 0.8.24).
+`foundry.toml` sets `ffi = false`, the optimizer with 200 runs and `evm_version = "cancun"` (the engine and
+the vault keep their ETH refund baseline in transient storage), excludes `test/gas` from the default profile
+(a `gas` profile runs only the gas benchmarks), and has a `coverage` profile that lifts the contract size
+limit for coverage builds only. It does not set `solc` or `via_ir`.
 
 The Pyth SDK stays on npm because there is no tagged Solidity SDK repository to use as a submodule:
 
@@ -48,8 +49,8 @@ The Pyth SDK stays on npm because there is no tagged Solidity SDK repository to 
   (`gh api --paginate 'repos/pyth-network/pyth-crosschain/git/matching-refs/tags/' --jq '.[].ref' | grep -ciE "solidity"`
   prints 0).
 
-Solady modules used: `ERC4626`, `ERC20`, `Ownable`, `ReentrancyGuard`, `SafeTransferLib`. OpenZeppelin
-is not a dependency.
+Solady modules used: `ERC4626`, `ERC20`, `Ownable`, `ReentrancyGuard`, `SafeTransferLib`, `SafeCastLib`.
+OpenZeppelin is not a dependency.
 
 ---
 
@@ -103,6 +104,34 @@ struct PairFeed {
 }
 ```
 
+### SideTotals (`TradingStorage.sol`), 1 slot per pair and side
+
+```solidity
+struct SideTotals {
+    uint128 collateral; // 16 bytes -┐  Slot 0 (full)
+    uint128 quantity; //   16 bytes -┘
+}
+```
+
+`_longTotals` and `_shortTotals` map a pair index to its totals; the side size is the existing open
+interest mapping. `quantity` is the sum of `size_wad x 1e18 / openPrice` over the side's positions, rounded
+up per long and down per short, in WAD asset units. `_openTradeCount` and `_positionsNonce` (both `uint32`)
+share slot 0 with `tradingEngine` and `_tradeCounter`; every `storeTrade` and `deleteTrade` increments the
+nonce.
+
+### PnlSnapshot (`Vault.sol`), 1 slot
+
+```solidity
+struct PnlSnapshot {
+    int128 netPnl; //   16 bytes -┐
+    uint48 timestamp; // 6 bytes  │  Slot 0 (26/32)
+    uint32 nonce; //     4 bytes -┘
+}
+```
+
+`netPnl` is USDC (6 decimals), positive when traders are in profit. `maxPnlSnapshotAge` (`uint32`) shares a
+slot with `tradingEngine` and `_paused`.
+
 ### WithdrawalRequest (`Vault.sol`), 2 slots
 
 ```solidity
@@ -147,8 +176,9 @@ requires a new engine deployment.
 ### ISolvency (`ISolvencyVault`, `IAssistantFund`, `IBondDepository`)
 
 Minimal views and calls used by `SolvencyManager` and `BondDepository`: `collateralizationRatio()`,
-`collateralizationDeficit()`, `totalAssets()`, `balance()`, `injectFunds(uint256)`, `isActive()`,
-`activateBonding(uint256)`, `closeBonding()`.
+`collateralizationDeficit()`, `realisedCollateralizationRatio()`, `realisedCollateralizationDeficit()`,
+`isPnlSnapshotFresh()`, `refreshPnlSnapshot(bytes[])` (payable), `totalAssets()`, `balance()`,
+`injectFunds(uint256)`, `isActive()`, `activateBonding(uint256)`, `closeBonding()`.
 
 ### ISynthToken
 
@@ -222,7 +252,9 @@ short the reverse).
 | Open interest, position size for OI | 18 | `collateral * leverage * 1e12` |
 | Funding index | 18 (signed), one per side | `FundingLib`; funding owed is `size x delta / 1e30` in USDC units |
 | Volatility | 18 | 3% = `3e16` |
-| Collateralization ratio | 18 | 1e18 = 100% |
+| Open PnL quantity (`SideTotals.quantity`) | 18 | asset units, `size_wad x 1e18 / openPrice` |
+| PnL snapshot (`PnlSnapshot.netPnl`) | 6 (signed) | rounded toward plus infinity |
+| Collateralization ratios (NAV and realised) | 18 | 1e18 = 100% |
 | Percentages | BPS | 10,000 = 100% |
 
 PnL (`TradingEngine._calculatePnl`):
@@ -259,7 +291,7 @@ State of the items usually checked before a deployment, as of this review:
 | Circuit breakers | Not implemented |
 | Emergency withdrawal for LPs | Not implemented |
 | Unit, fuzz, invariant, fork tests | Present; fork suite on Arbitrum One at a pinned block ([test docs](./tests/README.md)) |
-| Invariant tying vault assets, open collateral and fees | Present (`invariant_VaultBalanceMatchesModelledFlows`); open PnL is not in it |
+| Invariant tying vault assets, open collateral and fees | Present (`invariant_VaultBalanceMatchesModelledFlows`); the NAV is checked against the balance and the snapshot (`invariant_TotalAssetsIsBalanceMinusSnapshotLiability`) and the snapshot against a brute-force valuation |
 | Static analysis | Slither and Aderyn run; findings not triaged in this round |
 | External audit | Not done |
 | Bug bounty | None |

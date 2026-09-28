@@ -112,17 +112,19 @@ describes three layers:
 │ LAYER 2: RESERVE (AssistantFund)                                    │
 │ ├── USDC reserve                                                    │
 │ ├── Receives the 20% fee share when it is set as the treasury       │
-│ └── Injected into the Vault when CR < 100%                          │
+│ └── Injected into the Vault when CR < 100% (fresh PnL snapshot)     │
 ├─────────────────────────────────────────────────────────────────────┤
 │ LAYER 3: BONDING (BondDepository)                                   │
-│ ├── Opened when CR < 95% and the reserve did not cover the deficit  │
+│ ├── Opened when realised CR < 95% and a realised deficit remains    │
 │ ├── Anyone buys $SYNTH at a discount, vested linearly               │
 │ └── The USDC goes to the Vault                                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-CR here is `Vault.collateralizationRatio()`: the vault share price relative to 1.0 USDC per share. It does
-not include the unrealised PnL of open trades.
+CR here is `Vault.collateralizationRatio()`, the LP principal coverage ratio: the vault share price at a
+conservative NAV (USDC balance minus the net unrealised trader profit of the latest PnL snapshot) relative to
+1.0 USDC per share. Realised CR is the same ratio on the USDC balance alone; bonding uses it so that an
+unrealised move that can reverse does not sell discounted $SYNTH. Deposits revert while CR is below 100%.
 
 Layer 1 is preventive: payout cap, static OI cap and dynamic spread; volatility-adaptive OI caps are
 designed only. Also not implemented: a global OI cap across pairs and a surplus buyback of $SYNTH. Layer 3 depends on buyers valuing $SYNTH, whose reference price is set by the

@@ -35,10 +35,13 @@ flowchart TD
     Storage -->|trader losses, 80% of fees| Vault[Vault ERC-4626]
     Storage -->|20% of fees to treasury| AF[AssistantFund]
     Engine -->|sendPayout: trader profit| Vault
-    LP([LP]) -->|deposit, mint, requestWithdrawal, executeWithdrawal, cancelWithdrawal| Vault
-    Anyone([Anyone]) -->|checkAndAct| SM[SolvencyManager]
+    LP([LP]) -->|deposit, mint, requestWithdrawal, executeWithdrawal, cancelWithdrawal, refreshAnd*| Vault
+    Anyone([Anyone]) -->|checkAndAct, refreshAndCheckAndAct| SM[SolvencyManager]
     Anyone -->|skim| AF
-    SM -->|reads collateralizationRatio, collateralizationDeficit| Vault
+    Anyone -->|refreshPnlSnapshot + Pyth update data| Vault
+    Vault -->|getPairOpenTotals, getPositionState| Storage
+    Vault -->|getPrice per pair with open interest| Oracle
+    SM -->|reads NAV and realised ratios and deficits, isPnlSnapshotFresh; refreshPnlSnapshot| Vault
     SM -->|injectFunds| AF
     AF -->|USDC| Vault
     SM -->|activateBonding, closeBonding| BD[BondDepository]
@@ -142,21 +145,28 @@ Every contract uses Solady `Ownable` with a single owner. There is no role syste
 
 ### 4.1 `Vault.sol` (ERC-4626)
 
-Holds LP USDC, issues sUSDC, pays trader profits.
+Holds LP USDC, issues sUSDC at a conservative NAV, keeps the PnL snapshot, pays trader profits.
 
 | Function | Access | Description |
 | :------- | :----- | :---------- |
-| `deposit(assets, receiver)` / `mint(shares, receiver)` | Anyone, when not paused | Standard ERC-4626 entry |
+| `deposit(assets, receiver)` / `mint(shares, receiver)` | Anyone, when not paused | ERC-4626 entry at the NAV; reverts with `StalePnlSnapshot` or `CoverageBelowPar` |
+| `refreshAndDeposit` / `refreshAndMint(..., priceUpdate)` | Anyone, when not paused, payable | Refresh the snapshot, then deposit or mint; refund the ETH surplus |
+| `refreshPnlSnapshot(priceUpdate)` | Anyone, payable | Value every pair with open interest and store `(netPnl, timestamp, nonce)` |
+| `totalAssets()` | View | USDC balance minus the positive net trader PnL of the latest snapshot; never reverts |
 | `withdraw(...)` / `redeem(...)` | Anyone | Always revert with `UseRequestWithdrawalFlow` |
 | `requestWithdrawal(shares)` | Share holder, when not paused | Moves `shares` into escrow in the vault and records the current epoch; a new request returns the previous escrow first |
-| `executeWithdrawal()` | Requester | During the epoch after the 3-epoch delay, burns the escrowed shares at the current price and sends USDC; later it reverts with `WithdrawalExpired` |
+| `executeWithdrawal()` | Requester | During the epoch after the 3-epoch delay, burns the escrowed shares at the current NAV and sends USDC; needs a fresh snapshot; later it reverts with `WithdrawalExpired` |
+| `refreshAndExecuteWithdrawal(priceUpdate)` | Requester, payable | Refresh the snapshot, then execute the request |
 | `cancelWithdrawal()` | Requester | Deletes the request and returns the escrowed shares (also after expiry) |
-| `sendPayout(receiver, amount)` | `tradingEngine` only | Sends USDC; reverts if `amount > totalAssets()` |
-| `collateralizationRatio()` / `collateralizationDeficit()` | View | Used by `SolvencyManager` |
-| `setTradingEngine`, `pause`, `unpause` | Owner | |
+| `sendPayout(receiver, amount)` | `tradingEngine` only | Sends USDC; reverts if `amount` is above the USDC balance |
+| `collateralizationRatio()` / `collateralizationDeficit()` | View | NAV ratio and deficit (LP principal coverage); injection trigger in `SolvencyManager` |
+| `realisedCollateralizationRatio()` / `realisedCollateralizationDeficit()` | View | Balance-only ratio and deficit; bonding trigger and `bond` clamp |
+| `isPnlSnapshotFresh()` | View | No open trade, or snapshot within `maxPnlSnapshotAge` with no open or close since |
+| `setTradingEngine`, `setMaxPnlSnapshotAge`, `pause`, `unpause` | Owner | |
 
 `maxWithdraw` and `maxRedeem` return 0 because `withdraw` and `redeem` always revert; `maxDeposit` and
-`maxMint` return 0 while the vault is paused ([Guide 7](./07-vault-ssl.md#erc-4626-max-functions)).
+`maxMint` return 0 while the vault is paused, with a stale snapshot or below 100% coverage
+([Guide 7](./07-vault-ssl.md#erc-4626-max-functions)).
 
 ### 4.2 `TradingEngine.sol`
 
