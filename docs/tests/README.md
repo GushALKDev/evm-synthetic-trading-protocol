@@ -237,8 +237,22 @@ prices are therefore fresh and `getPrice` runs with empty update data: there is 
 | `0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612` | Chainlink ETH/USD, 8 decimals, heartbeat 1,755 s | same |
 | `0xFdB631F5EE196F0ed6FAa767959853A9F217697D` | Chainlink L2 sequencer uptime feed | `test_Fork_Sequencer_IsUpPastGracePeriod` |
 
-The heartbeats come from Chainlink's reference data for Arbitrum One
-(`https://reference-data-directory.vercel.app/feeds-ethereum-mainnet-arbitrum-1.json`). The tests cover the
+The heartbeats come from Chainlink's reference data for Arbitrum One:
+
+```bash
+curl -s https://reference-data-directory.vercel.app/feeds-ethereum-mainnet-arbitrum-1.json \
+  | jq -r '.[] | select(.proxyAddress=="0x6ce185860a4963106506C203335A2910413708e9" or .proxyAddress=="0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612") | "\(.name) \(.heartbeat) \(.decimals)"'
+```
+
+The Pyth Core upgrade of the Arbitrum One proxy is the `Upgraded(address)` event at block 498,630,307:
+
+```bash
+cast logs --rpc-url https://arb1.arbitrum.io/rpc --from-block 498427544 --to-block 498827543 \
+  --address 0xff1a0f4744e8582DF1aE09D5611b887B6a12925C 0xbc7cd75a20ee27fd9adebab32041f755214dbc6bffa90cc0225b39da2e5c2d3b
+cast block 498630307 --field timestamp --rpc-url https://arb1.arbitrum.io/rpc   # 1787760690, 2026-08-26 16:11:30 UTC
+```
+
+The tests cover the
 price path for both feeds, the Chainlink deviation (2 BPS for BTC and 1 BPS for ETH at the pinned block),
 confidence, staleness after a warp, the update fee (0 wei on Arbitrum One, for empty and real update data),
 a recorded signed update taken from the calldata of the updating transaction (verified with
