@@ -57,6 +57,7 @@ contract SolvencyIntegrationTest is Test {
         DeployConfig memory cfg = DeployConfig({
             asset: address(usdc),
             pyth: makeAddr("pyth"), // never called: these tests do not price trades
+            sequencerUptimeFeed: address(0),
             owner: owner,
             keeper: keeper,
             assistantFundTargetCap: 1_000_000 * 10 ** 6,

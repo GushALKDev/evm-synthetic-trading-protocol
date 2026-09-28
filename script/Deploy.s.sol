@@ -20,6 +20,7 @@ import {PythChainlinkOracle} from "../src/PythChainlinkOracle.sol";
 struct DeployConfig {
     address asset; // USDC (6 decimals)
     address pyth; // Pyth contract for the target chain
+    address sequencerUptimeFeed; // Chainlink L2 sequencer uptime feed, address(0) on chains without one
     address owner; // Protocol owner / admin
     address keeper; // SpreadManager volatility keeper
     uint256 assistantFundTargetCap; // Reserve cap; overflow is skimmed to the Vault
@@ -61,7 +62,7 @@ library DeployLib {
         // --- Core ---
         d.tradingStorage = new TradingStorage(_cfg.asset, _cfg.owner);
         d.vault = new Vault(_cfg.asset, _cfg.owner);
-        d.oracle = new PythChainlinkOracle(_cfg.pyth, _cfg.owner);
+        d.oracle = new PythChainlinkOracle(_cfg.pyth, _cfg.sequencerUptimeFeed, _cfg.owner);
         d.spreadManager =
             new SpreadManager(_cfg.baseSpreadBps, _cfg.impactFactor, _cfg.volFactor, _cfg.maxSpreadBps, _cfg.maxVolatilityChangeBps, _cfg.keeper, _cfg.owner);
 
@@ -105,7 +106,9 @@ library DeployLib {
  *      ```
  *
  *      Required env vars: `PRIVATE_KEY`, `USDC_ADDRESS`, `PYTH_ADDRESS`.
- *      Optional: `OWNER_ADDRESS`, `KEEPER_ADDRESS` (both default to the deployer).
+ *      Optional: `OWNER_ADDRESS`, `KEEPER_ADDRESS` (both default to the deployer) and
+ *      `SEQUENCER_UPTIME_FEED` (defaults to address(0), which disables the sequencer check; on Arbitrum One
+ *      use the Chainlink L2 sequencer uptime feed 0xFdB631F5EE196F0ed6FAa767959853A9F217697D).
  *
  *      Pair feeds are NOT configured here: `oracle.setPairFeed` and `tradingStorage.addPair` need
  *      per-chain Pyth feed IDs and Chainlink aggregators, so they are left as explicit owner actions.
@@ -118,6 +121,7 @@ contract Deploy is Script {
         DeployConfig memory cfg = DeployConfig({
             asset: vm.envAddress("USDC_ADDRESS"),
             pyth: vm.envAddress("PYTH_ADDRESS"),
+            sequencerUptimeFeed: vm.envOr("SEQUENCER_UPTIME_FEED", address(0)),
             owner: vm.envOr("OWNER_ADDRESS", deployer),
             keeper: vm.envOr("KEEPER_ADDRESS", deployer),
             assistantFundTargetCap: 1_000_000 * 10 ** 6, // 1M USDC reserve cap

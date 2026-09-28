@@ -39,7 +39,7 @@ contract PythChainlinkOracleTest is Test {
         mockChainlink.setAnswer(CL_BTC_PRICE);
 
         vm.prank(owner);
-        oracle = new PythChainlinkOracle(address(mockPyth), owner);
+        oracle = new PythChainlinkOracle(address(mockPyth), address(0), owner);
 
         vm.prank(owner);
         oracle.setPairFeed(PAIR_INDEX, BTC_FEED_ID, address(mockChainlink), CHAINLINK_HEARTBEAT);
@@ -82,7 +82,7 @@ contract PythChainlinkOracleTest is Test {
 
     function test_Constructor_RevertOnZeroPyth() public {
         vm.expectRevert(PythChainlinkOracle.InvalidPairFeed.selector);
-        new PythChainlinkOracle(address(0), owner);
+        new PythChainlinkOracle(address(0), address(0), owner);
     }
 
     /*//////////////////////////////////////////////////////////////

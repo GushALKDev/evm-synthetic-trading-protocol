@@ -51,6 +51,7 @@ contract SolvencyIntegrationInvariantTest is StdInvariant, Test {
         DeployConfig memory cfg = DeployConfig({
             asset: address(usdc),
             pyth: makeAddr("pyth"),
+            sequencerUptimeFeed: address(0),
             owner: owner,
             keeper: makeAddr("keeper"),
             assistantFundTargetCap: 100_000 * 10 ** 6,

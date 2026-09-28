@@ -49,7 +49,7 @@ contract PythChainlinkOracleForkTest is Test {
         vm.createSelectFork(forkUrl);
 
         vm.prank(owner);
-        oracle = new PythChainlinkOracle(PYTH, owner);
+        oracle = new PythChainlinkOracle(PYTH, address(0), owner);
 
         vm.startPrank(owner);
         oracle.setPairFeed(PAIR_BTC, PYTH_BTC_USD, CHAINLINK_UBTC_USD, CHAINLINK_HEARTBEAT);

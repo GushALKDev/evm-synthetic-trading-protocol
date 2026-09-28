@@ -15,7 +15,10 @@ import {IOracle} from "./interfaces/IOracle.sol";
  * @notice IOracle implementation: Pyth Network (primary) with Chainlink as deviation anchor
  * @dev Pyth is pull-based: callers submit signed priceData bytes, verified on-chain.
  *      Chainlink is ONLY used as a deviation anchor — if Pyth is stale, we REVERT (no fallback).
- *      Validation pipeline: Feed active → Pyth age → Non-zero → Confidence → Normalize → Chainlink staleness → Deviation
+ *      Validation pipeline: Feed active → Sequencer up → Pyth age → Non-zero → Confidence → Normalize → Chainlink staleness → Deviation
+ *      Sequencer up: on L2s with a Chainlink sequencer uptime feed, prices are refused while the sequencer is
+ *      down and for SEQUENCER_GRACE_PERIOD after it comes back, so positions are not settled before traders
+ *      could react to the outage. The feed is a constructor parameter; address(0) disables the check.
  *      Pyth age: publishTime must not be after block.timestamp and must be at most maxPriceAge old. Every
  *      getPrice call is a trade execution or a TP/SL validation, so the same limit applies to all of them.
  *      The caller funds the Pyth fee via msg.value on getPrice; any surplus is refunded to the caller.
@@ -29,6 +32,7 @@ contract PythChainlinkOracle is IOracle, Ownable {
 
     uint256 public constant MAX_STALENESS = 30; // seconds, immutable ceiling for maxPriceAge
     uint256 public constant DEFAULT_MAX_PRICE_AGE = 5; // seconds
+    uint256 public constant SEQUENCER_GRACE_PERIOD = 3600; // seconds after the sequencer comes back up
     uint256 public constant MAX_CONFIDENCE_BPS = 200; // 2%
     uint256 public constant MAX_DEVIATION_BPS = 300; // 3%
     uint256 public constant BPS_DENOMINATOR = 10_000;
@@ -52,6 +56,11 @@ contract PythChainlinkOracle is IOracle, Ownable {
     IPyth public immutable PYTH;
 
     /**
+     * @notice Chainlink L2 sequencer uptime feed (answer 0 = up, 1 = down); address(0) disables the check
+     */
+    AggregatorV3Interface public immutable SEQUENCER_UPTIME_FEED;
+
+    /**
      * @notice Maximum age of the Pyth price used by getPrice, in seconds (1 to MAX_STALENESS)
      */
     uint256 public maxPriceAge;
@@ -73,6 +82,8 @@ contract PythChainlinkOracle is IOracle, Ownable {
     error StalePrice(bytes32 feedId, uint256 publishTime, uint256 blockTime);
     error PriceFromFuture(bytes32 feedId, uint256 publishTime, uint256 blockTime);
     error InvalidMaxPriceAge(uint256 maxPriceAge);
+    error SequencerDown();
+    error SequencerGracePeriodNotOver(uint256 upSince, uint256 blockTime);
     error ConfidenceTooWide(uint64 confidence, int64 price);
     error ZeroPrice();
     error PriceDeviationTooHigh(uint256 pythPrice18, uint256 chainlinkPrice18);
@@ -84,10 +95,16 @@ contract PythChainlinkOracle is IOracle, Ownable {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address _pyth, address _owner) {
+    /**
+     * @param _pyth Pyth contract
+     * @param _sequencerUptimeFeed Chainlink L2 sequencer uptime feed, or address(0) on chains without one
+     * @param _owner Contract owner
+     */
+    constructor(address _pyth, address _sequencerUptimeFeed, address _owner) {
         if (_pyth == address(0)) revert InvalidPairFeed();
         _initializeOwner(_owner);
         PYTH = IPyth(_pyth);
+        SEQUENCER_UPTIME_FEED = AggregatorV3Interface(_sequencerUptimeFeed);
         maxPriceAge = DEFAULT_MAX_PRICE_AGE;
     }
 
@@ -97,7 +114,7 @@ contract PythChainlinkOracle is IOracle, Ownable {
 
     /**
      * @notice Get a validated price for a trading pair
-     * @dev Pipeline: Feed active → Update Pyth → Age → Non-zero → Confidence → Normalize → Chainlink check → Deviation.
+     * @dev Pipeline: Feed active → Sequencer up → Update Pyth → Age → Non-zero → Confidence → Normalize → Chainlink check → Deviation.
      *      The caller funds the Pyth fee via msg.value; any surplus is refunded to msg.sender.
      * @param pairIndex The pair index to get price for
      * @param priceData Pyth-signed price update data (submitted by user, verified on-chain)
@@ -107,6 +124,7 @@ contract PythChainlinkOracle is IOracle, Ownable {
     function getPrice(uint256 pairIndex, bytes[] calldata priceData) external payable returns (uint128 price18, uint128 conf18) {
         PairFeed storage feed = _pairFeeds[pairIndex];
         if (!feed.active) revert PairFeedNotSet(pairIndex);
+        _checkSequencerUp();
 
         // Caller funds the fee; require enough and refund the surplus at the end
         uint256 fee = PYTH.getUpdateFee(priceData);
@@ -157,6 +175,18 @@ contract PythChainlinkOracle is IOracle, Ownable {
     /*//////////////////////////////////////////////////////////////
                           INTERNAL HELPERS
     //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @dev Revert while the L2 sequencer is down or within SEQUENCER_GRACE_PERIOD of coming back up.
+     *      startedAt is the time of the last status change; Chainlink documents startedAt == 0 as an
+     *      uninitialized feed on Arbitrum, which is treated as down.
+     */
+    function _checkSequencerUp() internal view {
+        if (address(SEQUENCER_UPTIME_FEED) == address(0)) return;
+        (, int256 answer, uint256 startedAt,,) = SEQUENCER_UPTIME_FEED.latestRoundData();
+        if (answer != 0 || startedAt == 0) revert SequencerDown();
+        if (block.timestamp - startedAt <= SEQUENCER_GRACE_PERIOD) revert SequencerGracePeriodNotOver(startedAt, block.timestamp);
+    }
 
     /**
      * @dev Fetch Chainlink price, check heartbeat staleness, normalize to 18 decimals
