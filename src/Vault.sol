@@ -9,7 +9,9 @@ import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 /// @title Vault
 /// @author GushALKDev
 /// @notice ERC-4626 Vault with Single-Sided Liquidity for Synthetic Trading Protocol
-/// @dev Implements a withdrawal lock mechanism to prevent front-running of trader payouts
+/// @dev Implements a withdrawal lock mechanism to prevent front-running of trader payouts.
+///      Requested shares are escrowed in the vault itself: returned on cancel or on a new request, burned on
+///      execution. A request can be executed only during WITHDRAWAL_WINDOW_EPOCHS after it unlocks.
 contract Vault is ERC4626, Ownable, ReentrancyGuard {
     using SafeTransferLib for address;
 
@@ -19,6 +21,13 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
 
     uint256 public constant EPOCH_LENGTH = 1 days;
     uint256 public constant WITHDRAWAL_DELAY_EPOCHS = 3;
+
+    /**
+     * @notice Epochs after unlock during which a request can be executed; after that it has expired
+     * @dev One epoch gives the LP a full day to execute. It also bounds how much of a position can be kept
+     *      in an execute-at-will state by staggering requests across addresses: WINDOW / (DELAY + WINDOW) = 25%.
+     */
+    uint256 public constant WITHDRAWAL_WINDOW_EPOCHS = 1;
 
     /**
      * @notice WAD scalar (1e18) used to express the collateralization ratio
@@ -83,6 +92,7 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
     error InsufficientVaultBalance(uint256 amount, uint256 totalAssets);
     error InsufficientShares(uint256 shares, uint256 balance);
     error WithdrawalLocked(uint256 unlockEpoch);
+    error WithdrawalExpired(uint256 expiryEpoch);
     error CallerNotTradingEngine();
     error UseRequestWithdrawalFlow();
     error NoWithdrawalRequest();
@@ -184,47 +194,77 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
         revert UseRequestWithdrawalFlow();
     }
 
+    /**
+     * @dev ERC-4626 requires max* to report what the action accepts: deposit and mint revert while paused
+     */
+    function maxDeposit(address to) public view virtual override returns (uint256) {
+        return _paused ? 0 : super.maxDeposit(to);
+    }
+
+    function maxMint(address to) public view virtual override returns (uint256) {
+        return _paused ? 0 : super.maxMint(to);
+    }
+
+    /**
+     * @dev withdraw and redeem always revert (request/execute flow), so nothing can be withdrawn through them
+     */
+    function maxWithdraw(address) public view virtual override returns (uint256) {
+        return 0;
+    }
+
+    function maxRedeem(address) public view virtual override returns (uint256) {
+        return 0;
+    }
+
     /*//////////////////////////////////////////////////////////////
                         WITHDRAWAL MECHANISM
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Request a withdrawal of shares
+     * @notice Request a withdrawal of shares; the shares are moved into escrow in the vault
+     * @dev Replaces any existing request: its escrowed shares are returned first, then the new amount is escrowed.
      * @param shares The amount of shares to withdraw
      */
     function requestWithdrawal(uint256 shares) external nonReentrant whenNotPaused {
-        uint256 balance = balanceOf(msg.sender);
+        uint256 escrowed = withdrawalRequests[msg.sender].shares;
+        uint256 balance = balanceOf(msg.sender) + escrowed;
         if (balance < shares) revert InsufficientShares(shares, balance);
 
         uint256 epoch = currentEpoch();
         uint256 unlockEpoch = epoch + WITHDRAWAL_DELAY_EPOCHS;
 
-        // Overwrites any existing request (no need to cancel first)
         withdrawalRequests[msg.sender] = WithdrawalRequest({shares: shares, requestEpoch: epoch});
+        if (escrowed != 0) _transfer(address(this), msg.sender, escrowed);
+        _transfer(msg.sender, address(this), shares);
 
         emit WithdrawalRequested(msg.sender, shares, epoch, unlockEpoch);
     }
 
     /**
-     * @notice Cancel a pending withdrawal request
+     * @notice Cancel a withdrawal request (pending, unlocked or expired) and get the escrowed shares back
      */
     function cancelWithdrawal() external {
-        if (withdrawalRequests[msg.sender].shares == 0) revert NoWithdrawalRequest();
+        uint256 shares = withdrawalRequests[msg.sender].shares;
+        if (shares == 0) revert NoWithdrawalRequest();
 
         delete withdrawalRequests[msg.sender];
+        _transfer(address(this), msg.sender, shares);
 
         emit WithdrawalCancelled(msg.sender);
     }
 
     /**
-     * @notice Execute a pending withdrawal request
+     * @notice Execute a withdrawal request between its unlock epoch and the end of its window
+     * @dev An expired request cannot be executed; cancelWithdrawal or a new request returns its shares.
      */
     function executeWithdrawal() external nonReentrant {
         WithdrawalRequest storage req = withdrawalRequests[msg.sender];
         if (req.shares == 0) revert NoWithdrawalRequest();
 
         uint256 unlockEpoch = req.requestEpoch + WITHDRAWAL_DELAY_EPOCHS;
-        if (currentEpoch() < unlockEpoch) revert WithdrawalLocked(unlockEpoch);
+        uint256 epoch = currentEpoch();
+        if (epoch < unlockEpoch) revert WithdrawalLocked(unlockEpoch);
+        if (epoch >= unlockEpoch + WITHDRAWAL_WINDOW_EPOCHS) revert WithdrawalExpired(unlockEpoch + WITHDRAWAL_WINDOW_EPOCHS);
 
         uint256 sharesToBurn = req.shares;
         // Assets calculated at execution time (price per share may have changed since request)
@@ -233,8 +273,8 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
         // Clear request before external calls (CEI)
         delete withdrawalRequests[msg.sender];
 
-        // Burn shares
-        _burn(msg.sender, sharesToBurn);
+        // Burn the escrowed shares
+        _burn(address(this), sharesToBurn);
         emit WithdrawalExecuted(msg.sender, sharesToBurn, assets);
 
         // Transfer assets
@@ -258,14 +298,16 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Check if a user can execute their withdrawal
+     * @notice Check if a user can execute their withdrawal (unlocked and not expired)
      * @param user The user address to check
      * @return True if withdrawal can be executed
      */
     function canExecuteWithdrawal(address user) external view returns (bool) {
         WithdrawalRequest storage req = withdrawalRequests[user];
         if (req.shares == 0) return false;
-        return currentEpoch() >= req.requestEpoch + WITHDRAWAL_DELAY_EPOCHS;
+        uint256 unlockEpoch = req.requestEpoch + WITHDRAWAL_DELAY_EPOCHS;
+        uint256 epoch = currentEpoch();
+        return epoch >= unlockEpoch && epoch < unlockEpoch + WITHDRAWAL_WINDOW_EPOCHS;
     }
 
     /**
