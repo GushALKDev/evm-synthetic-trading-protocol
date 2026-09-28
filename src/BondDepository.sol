@@ -3,6 +3,7 @@ pragma solidity 0.8.24;
 
 import {Ownable} from "solady/auth/Ownable.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
+import {SafeCastLib} from "solady/utils/SafeCastLib.sol";
 import {ISynthToken} from "./interfaces/ISynthToken.sol";
 import {ISolvencyVault} from "./interfaces/ISolvency.sol";
 
@@ -215,13 +216,14 @@ contract BondDepository is Ownable {
         uint256 newCap = usdcIn == available ? 0 : cap - usdcIn;
         remainingCap = newCap;
 
+        // Safe cast: timestamps fit uint64 for about 5.8e11 years
         uint64 start = uint64(block.timestamp);
+        // forge-lint: disable-next-line(unsafe-typecast) safe: vestingPeriod is at most MAX_VESTING_PERIOD (BondDepository.sol:357)
         uint64 end = uint64(block.timestamp + vestingPeriod);
         bondId = _bonds[msg.sender].length;
-        // The uint128 cast cannot truncate in practice: with the smallest effective price the setters
-        // allow (1), overflowing would need a round of ~3.4e14 USDC, far above the total USDC supply.
-        // Kept as uint128 to pack the position into 2 slots.
-        _bonds[msg.sender].push(BondPosition({totalSynth: uint128(synthOut), claimedSynth: 0, start: start, end: end}));
+        // SafeCastLib: with the smallest effective price the setters allow (1), a uint128 overflow needs a round of
+        // about 3.4e14 USDC; the position stays uint128 to pack into 2 slots
+        _bonds[msg.sender].push(BondPosition({totalSynth: SafeCastLib.toUint128(synthOut), claimedSynth: 0, start: start, end: end}));
 
         // Interactions: USDC to Vault, $SYNTH minted into this contract's custody for vesting
         ASSET.safeTransferFrom(msg.sender, VAULT, usdcIn);
@@ -245,6 +247,7 @@ contract BondDepository is Ownable {
         claimed = _vested(pos) - pos.claimedSynth;
         if (claimed == 0) revert NothingToClaim();
 
+        // forge-lint: disable-next-line(unsafe-typecast) safe: claimed is at most totalSynth, a uint128 (BondDepository.sol:156)
         pos.claimedSynth += uint128(claimed);
         address(SYNTH).safeTransfer(msg.sender, claimed);
         emit Claimed(msg.sender, _bondId, claimed);

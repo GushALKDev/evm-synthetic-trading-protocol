@@ -1,9 +1,9 @@
 {
   "deposit": "65737",
   "executeWithdrawal": "33073",
-  "refreshAndDeposit": "187232",
-  "refreshAndExecuteWithdrawal": "156497",
-  "refreshPnlSnapshot_1pair": "126533",
-  "refreshPnlSnapshot_20pairs": "638479",
+  "refreshAndDeposit": "187346",
+  "refreshAndExecuteWithdrawal": "156611",
+  "refreshPnlSnapshot_1pair": "126647",
+  "refreshPnlSnapshot_20pairs": "640759",
   "requestWithdrawal": "61818"
 }

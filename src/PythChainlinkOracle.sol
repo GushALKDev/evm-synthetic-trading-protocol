@@ -3,6 +3,7 @@ pragma solidity 0.8.24;
 
 import {Ownable} from "solady/auth/Ownable.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
+import {SafeCastLib} from "solady/utils/SafeCastLib.sol";
 import {IPyth} from "@pythnetwork/pyth-sdk-solidity/IPyth.sol";
 import {PythStructs} from "@pythnetwork/pyth-sdk-solidity/PythStructs.sol";
 import {PythUtils} from "@pythnetwork/pyth-sdk-solidity/PythUtils.sol";
@@ -148,6 +149,7 @@ contract PythChainlinkOracle is IOracle, Ownable {
         if (pythPrice.price <= 0) revert ZeroPrice();
 
         // Confidence check: conf / |price| <= MAX_CONFIDENCE_BPS / BPS_DENOMINATOR
+        // Safe cast: the price is positive here (PythChainlinkOracle.sol:149)
         uint64 absPrice = uint64(pythPrice.price);
         if (uint256(pythPrice.conf) * BPS_DENOMINATOR > uint256(absPrice) * MAX_CONFIDENCE_BPS) {
             revert ConfidenceTooWide(pythPrice.conf, pythPrice.price);
@@ -155,6 +157,7 @@ contract PythChainlinkOracle is IOracle, Ownable {
 
         // Normalize Pyth price and confidence band to 18 decimals (conf shares the price exponent)
         uint256 pythNormalized = PythUtils.convertToUint(pythPrice.price, pythPrice.expo, TARGET_DECIMALS);
+        // Safe cast: conf is at most 2% of the price, a positive int64 (PythChainlinkOracle.sol:154)
         uint256 confNormalized = PythUtils.convertToUint(int64(pythPrice.conf), pythPrice.expo, TARGET_DECIMALS);
 
         // Chainlink deviation anchor
@@ -166,8 +169,9 @@ contract PythChainlinkOracle is IOracle, Ownable {
             revert PriceDeviationTooHigh(pythNormalized, chainlinkNormalized);
         }
 
-        price18 = uint128(pythNormalized);
-        conf18 = uint128(confNormalized);
+        // SafeCastLib: the normalized price has no enforced bound, it depends on the feed exponent
+        price18 = SafeCastLib.toUint128(pythNormalized);
+        conf18 = SafeCastLib.toUint128(confNormalized);
 
         // Refund any ETH sent above the fee
         uint256 surplus = msg.value - fee;
@@ -213,6 +217,7 @@ contract PythChainlinkOracle is IOracle, Ownable {
 
         // Chainlink feeds typically use 8 decimals → normalize to 18
         uint8 feedDecimals = AggregatorV3Interface(_feed).decimals();
+        // forge-lint: disable-next-line(unsafe-typecast) safe: the answer is positive here (PythChainlinkOracle.sol:216)
         return uint256(answer) * 10 ** (TARGET_DECIMALS - feedDecimals);
     }
 

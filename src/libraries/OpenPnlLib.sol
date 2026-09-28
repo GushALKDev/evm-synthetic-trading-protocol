@@ -48,8 +48,11 @@ library OpenPnlLib {
      */
     function sidePnl(uint256 _price, uint256 _size, uint256 _quantity, uint256 _collateral, bool _isLong) internal pure returns (int256 pnl) {
         uint256 product = _price * _quantity;
+        // forge-lint: disable-next-line(unsafe-typecast) safe: product / WAD < 2^197 and the side size is an OI below 2^128 (TradingStorage.sol:396)
         if (_isLong) pnl = int256((product + WAD - 1) / WAD) - int256(_size);
+        // forge-lint: disable-next-line(unsafe-typecast) safe: same bound as the line above (TradingStorage.sol:396)
         else pnl = int256(_size) - int256(product / WAD);
+        // forge-lint: disable-next-line(unsafe-typecast) safe: side collateral is a uint128 (TradingStorage.sol:49)
         int256 floor = -int256(_collateral * WAD_PER_USDC);
         if (pnl < floor) pnl = floor;
     }
@@ -74,7 +77,9 @@ library OpenPnlLib {
      * @notice 18-decimal USD to USDC, rounded toward +infinity (overstates trader profit for both signs)
      */
     function toUsdcUp(int256 _wad) internal pure returns (int256) {
+        // forge-lint: disable-next-line(unsafe-typecast) safe: _wad >= 0 here and the quotient is below 2^244
         if (_wad >= 0) return int256((uint256(_wad) + WAD_PER_USDC - 1) / WAD_PER_USDC);
+        // forge-lint: disable-next-line(unsafe-typecast) safe: _wad < 0 here, and pairPnl results are far from type(int256).min
         return -int256(uint256(-_wad) / WAD_PER_USDC);
     }
 }

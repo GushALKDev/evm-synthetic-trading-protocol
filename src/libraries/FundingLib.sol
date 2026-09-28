@@ -64,7 +64,9 @@ library FundingLib {
         // light * receiverDelta <= heavy * payerDelta: receivers are never credited more than payers owe
         uint256 receiverDelta = (payerDelta * heavy) / light;
 
+        // forge-lint: disable-next-line(unsafe-typecast) safe: deltas are capped per hour and scaled by heavy / light OI, both below 2^128 (FundingLib.sol:61)
         if (longsHeavy) return (int256(payerDelta), -int256(receiverDelta));
+        // forge-lint: disable-next-line(unsafe-typecast) safe: same bound as the line above (FundingLib.sol:61)
         return (-int256(receiverDelta), int256(payerDelta));
     }
 
@@ -78,7 +80,9 @@ library FundingLib {
      */
     function calculateFundingOwed(uint256 _positionSizeWad, int256 _currentIndex, int256 _entryIndex) internal pure returns (int256 fundingOwedUsdc) {
         int256 delta = _currentIndex - _entryIndex;
+        // forge-lint: disable-next-line(unsafe-typecast) safe: delta >= 0 here, and size * delta stays below 2^255 for OI below 2^128 (TradingStorage.sol:396)
         if (delta >= 0) return int256(_ceilDiv(_positionSizeWad * uint256(delta), INDEX_TO_USDC));
+        // forge-lint: disable-next-line(unsafe-typecast) safe: delta < 0 here and far from type(int256).min (TradingStorage.sol:396)
         return -int256((_positionSizeWad * uint256(-delta)) / INDEX_TO_USDC);
     }
 

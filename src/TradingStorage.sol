@@ -304,8 +304,10 @@ contract TradingStorage is Ownable {
             isLong: _isLong,
             pairIndex: _pairIndex,
             leverage: _leverage,
+            // Safe cast: timestamps fit uint48 for about 8.9e6 years
             timestamp: uint48(block.timestamp),
             index: tradeId,
+            // Safe cast: a user holds fewer than 2^32 trades because trade IDs are uint32 (TradingStorage.sol:300)
             userIndex: uint32(_userTrades[_user].length),
             collateral: _collateral,
             openPrice: _openPrice,
