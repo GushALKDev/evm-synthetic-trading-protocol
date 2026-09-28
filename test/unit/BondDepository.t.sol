@@ -329,11 +329,12 @@ contract BondDepositoryTest is Test {
         uint256 synthOut = _bond(1000 * 10 ** 6);
 
         vm.warp(block.timestamp + VESTING / 2);
-        assertApproxEqAbs(bond.claimable(alice, 0), synthOut / 2, 1);
+        // vested = synthOut * (VESTING / 2) / VESTING, and VESTING is even, so it floors exactly to synthOut / 2
+        assertEq(bond.claimable(alice, 0), synthOut / 2);
 
         vm.prank(alice);
         uint256 claimed = bond.claim(0);
-        assertApproxEqAbs(claimed, synthOut / 2, 1);
+        assertEq(claimed, synthOut / 2);
         assertEq(synth.balanceOf(alice), claimed);
         assertEq(bond.bondAt(alice, 0).claimedSynth, claimed);
     }

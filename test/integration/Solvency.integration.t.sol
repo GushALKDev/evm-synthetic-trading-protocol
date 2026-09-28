@@ -140,7 +140,8 @@ contract SolvencyIntegrationTest is Test {
         uint256 deficit = d.solvencyManager.deficitToTarget();
         d.solvencyManager.checkAndAct();
 
-        assertApproxEqAbs(d.vault.collateralizationRatio(), WAD, 1e12, "CR not restored to ~100%");
+        // Exact: supply is 1e24 shares (a multiple of 1e12), so injecting supply / 1e12 - assets restores CR to 1e18
+        assertEq(d.vault.collateralizationRatio(), WAD, "CR not restored to 100%");
         assertFalse(d.bondDepository.isActive(), "bonding opened while reserve sufficed");
         assertEq(d.assistantFund.balance(), 50_000 * 10 ** 6 - deficit, "wrong amount drawn from reserve");
     }

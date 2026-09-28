@@ -477,7 +477,8 @@ contract VaultTest is Test {
 
         uint256 assetsAfter = vault.previewRedeem(sharesBefore);
 
-        // Same shares now worth ~2x assets (allow 1 wei rounding)
+        // Tolerance of 1 justified: Solady converts with assets = shares * (totalAssets + 1) / (supply + 1e12).
+        // The virtual +1 asset does not double with the donation, so 2x floors to 2 * 1e9 - 1 here.
         assertApproxEqAbs(assetsAfter, assetsBefore * 2, 1);
     }
 

@@ -163,7 +163,8 @@ contract FundingLibTest is Test {
         int256 owedSingle = FundingLib.calculateFundingOwed(posSize, currentIndex, entryIndex);
         int256 owedDouble = FundingLib.calculateFundingOwed(posSize * 2, currentIndex, entryIndex);
 
-        // Each call rounds once (up for payers, down for receivers), so 2 * single and double differ by at most 1
+        // Tolerance of 1 justified: each call rounds once (up for payers, down for receivers), so doubling the
+        // single result doubles its rounding and can differ from the double-size result by one unit
         assertApproxEqAbs(owedDouble, owedSingle * 2, 1);
     }
 }

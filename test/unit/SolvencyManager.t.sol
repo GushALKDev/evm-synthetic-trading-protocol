@@ -278,10 +278,9 @@ contract SolvencyManagerTest is Test {
         vault.setState(totalAssets, cr);
         uint256 deficit = manager.deficitToTarget();
 
-        // After injecting `deficit`, new totalAssets should reach ~100% nominal liabilities.
-        // nominalLiab = totalAssets * WAD / cr; check (totalAssets + deficit) ~= nominalLiab
+        // After injecting `deficit`, totalAssets reaches the nominal liabilities exactly:
+        // the mock derives deficit = totalAssets * WAD / cr - totalAssets, the same floor division as nominalLiab
         uint256 nominalLiab = (totalAssets * WAD) / cr;
-        // Allow rounding slack of a few wei from integer division
-        assertApproxEqAbs(totalAssets + deficit, nominalLiab, 2);
+        assertEq(totalAssets + deficit, nominalLiab);
     }
 }
