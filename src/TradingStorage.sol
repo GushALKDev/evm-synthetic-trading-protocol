@@ -3,12 +3,18 @@ pragma solidity 0.8.24;
 
 import {Ownable} from "solady/auth/Ownable.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
+import {SafeCastLib} from "solady/utils/SafeCastLib.sol";
+import {OpenPnlLib} from "./libraries/OpenPnlLib.sol";
 
 /**
  * @title TradingStorage
  * @author GushALKDev
  * @notice Custodies trader collateral and stores all trade/pair data for the Synthetic Trading Protocol
- * @dev State and custody layer — only TradingEngine can mutate trade data and move funds
+ * @dev State and custody layer: only TradingEngine can mutate trade data and move funds.
+ *      Keeps O(1) open-position aggregates per pair and side (collateral and quantity = sum of size / openPrice;
+ *      the size is the open interest), updated in storeTrade and deleteTrade, which the Vault reads to value
+ *      open trader PnL. positionsNonce changes on every open and delete so a PnL snapshot can detect that the
+ *      aggregates moved.
  */
 contract TradingStorage is Ownable {
     using SafeTransferLib for address;
@@ -36,6 +42,15 @@ contract TradingStorage is Ownable {
     }
 
     /**
+     * @notice Open collateral and quantity of one side of a pair
+     * @dev quantity = sum over open positions of OpenPnlLib.quantity(size, openPrice, isLong), WAD
+     */
+    struct SideTotals {
+        uint128 collateral; // 16 bytes -┐  Slot 0 (full)
+        uint128 quantity; //   16 bytes -┘
+    }
+
+    /**
      * @notice Configuration for a trading pair
      */
     struct Pair {
@@ -53,6 +68,11 @@ contract TradingStorage is Ownable {
      * @notice Global leverage ceiling; every pair's maxLeverage is capped by it
      */
     uint16 public constant MAX_LEVERAGE = 100;
+
+    /**
+     * @notice Maximum number of pairs; bounds the loop of the Vault's PnL snapshot
+     */
+    uint256 public constant MAX_PAIRS = 20;
 
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
@@ -72,6 +92,16 @@ contract TradingStorage is Ownable {
      * @notice Auto-incrementing trade ID counter
      */
     uint32 private _tradeCounter;
+
+    /**
+     * @notice Number of open trades (packed with tradingEngine and _tradeCounter)
+     */
+    uint32 private _openTradeCount;
+
+    /**
+     * @notice Changes on every storeTrade and deleteTrade; wraps, only compared for equality
+     */
+    uint32 private _positionsNonce;
 
     /**
      * @notice Trade data by ID
@@ -118,6 +148,16 @@ contract TradingStorage is Ownable {
      */
     Pair[] private _pairs;
 
+    /**
+     * @notice Open aggregates of the long side per pair
+     */
+    mapping(uint256 => SideTotals) private _longTotals;
+
+    /**
+     * @notice Open aggregates of the short side per pair
+     */
+    mapping(uint256 => SideTotals) private _shortTotals;
+
     /*//////////////////////////////////////////////////////////////
                                 EVENTS
     //////////////////////////////////////////////////////////////*/
@@ -149,6 +189,7 @@ contract TradingStorage is Ownable {
     error InvalidTp(uint128 tp, uint128 openPrice, bool isLong);
     error InvalidSl(uint128 sl, uint128 openPrice, bool isLong);
     error MaxOpenInterestExceeded(uint256 newOI, uint128 maxOI);
+    error TooManyPairs(uint256 maxPairs);
 
     /*//////////////////////////////////////////////////////////////
                               MODIFIERS
@@ -181,6 +222,25 @@ contract TradingStorage is Ownable {
             _trades[movedId].userIndex = _userIndex;
         }
         userTrades.pop();
+    }
+
+    /**
+     * @dev Add a position's collateral and quantity to its side's aggregates
+     */
+    function _addToTotals(uint256 _pairIndex, bool _isLong, uint64 _collateral, uint16 _leverage, uint128 _openPrice) internal {
+        SideTotals storage totals = _isLong ? _longTotals[_pairIndex] : _shortTotals[_pairIndex];
+        totals.collateral += _collateral;
+        totals.quantity += SafeCastLib.toUint128(OpenPnlLib.quantity(uint256(_collateral) * _leverage * 1e12, _openPrice, _isLong));
+    }
+
+    /**
+     * @dev Subtract exactly what _addToTotals added: the trade's fields do not change while it is open, so the
+     *      recomputed quantity equals the one added
+     */
+    function _removeFromTotals(uint256 _pairIndex, bool _isLong, uint64 _collateral, uint16 _leverage, uint128 _openPrice) internal {
+        SideTotals storage totals = _isLong ? _longTotals[_pairIndex] : _shortTotals[_pairIndex];
+        totals.collateral -= _collateral;
+        totals.quantity -= SafeCastLib.toUint128(OpenPnlLib.quantity(uint256(_collateral) * _leverage * 1e12, _openPrice, _isLong));
     }
 
     /**
@@ -254,6 +314,11 @@ contract TradingStorage is Ownable {
         });
 
         _userTrades[_user].push(tradeId);
+        _addToTotals(_pairIndex, _isLong, _collateral, _leverage, _openPrice);
+        ++_openTradeCount;
+        unchecked {
+            ++_positionsNonce;
+        }
 
         emit TradeStored(tradeId, _user, _pairIndex);
     }
@@ -270,6 +335,11 @@ contract TradingStorage is Ownable {
         address user = trade.user;
 
         _removeFromUserTrades(user, trade.userIndex);
+        _removeFromTotals(trade.pairIndex, trade.isLong, trade.collateral, trade.leverage, trade.openPrice);
+        --_openTradeCount;
+        unchecked {
+            ++_positionsNonce;
+        }
         delete _trades[_tradeId]; // Sets all fields to 0, including user → address(0)
 
         emit TradeDeleted(_tradeId, user);
@@ -487,6 +557,31 @@ contract TradingStorage is Ownable {
     }
 
     /**
+     * @notice Open aggregates of a pair: size (open interest), collateral and quantity per side
+     * @param _pairIndex The pair index
+     * @return totals The pair's open totals
+     */
+    function getPairOpenTotals(uint256 _pairIndex) external view returns (OpenPnlLib.PairTotals memory totals) {
+        SideTotals memory longTotals = _longTotals[_pairIndex];
+        SideTotals memory shortTotals = _shortTotals[_pairIndex];
+        totals = OpenPnlLib.PairTotals({
+            longSize: _openInterestLong[_pairIndex],
+            longCollateral: longTotals.collateral,
+            longQuantity: longTotals.quantity,
+            shortSize: _openInterestShort[_pairIndex],
+            shortCollateral: shortTotals.collateral,
+            shortQuantity: shortTotals.quantity
+        });
+    }
+
+    /**
+     * @notice Number of open trades and the positions nonce, read together by the Vault
+     */
+    function getPositionState() external view returns (uint32 openTradeCount, uint32 positionsNonce) {
+        return (_openTradeCount, _positionsNonce);
+    }
+
+    /**
      * @notice Get the current trade counter (next trade ID)
      * @return The trade counter
      */
@@ -520,6 +615,7 @@ contract TradingStorage is Ownable {
         if (_maxLeverage == 0) revert ZeroMaxLeverage();
         if (_maxLeverage > MAX_LEVERAGE) revert MaxLeverageTooHigh(_maxLeverage, MAX_LEVERAGE);
         if (_maxOI == 0) revert ZeroMaxOI();
+        if (_pairs.length >= MAX_PAIRS) revert TooManyPairs(MAX_PAIRS);
 
         pairIndex = _pairs.length;
         _pairs.push(Pair({name: _name, maxLeverage: _maxLeverage, maxOI: _maxOI, isActive: true}));

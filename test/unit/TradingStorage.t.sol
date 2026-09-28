@@ -3,6 +3,7 @@ pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {TradingStorage} from "../../src/TradingStorage.sol";
+import {OpenPnlLib} from "../../src/libraries/OpenPnlLib.sol";
 import {ERC20} from "solady/tokens/ERC20.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 
@@ -1135,5 +1136,122 @@ contract TradingStorageTest is Test {
 
         assertEq(oiBefore, oiAfter);
         assertEq(oiAfter, 0);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        OPEN POSITION AGGREGATES
+    //////////////////////////////////////////////////////////////*/
+
+    function test_Aggregates_StoreAddsCollateralAndQuantity() public {
+        vm.prank(tradingEngine);
+        _storeTrade(alice);
+
+        OpenPnlLib.PairTotals memory t = tradingStorage.getPairOpenTotals(DEFAULT_PAIR_INDEX);
+        assertEq(t.longCollateral, DEFAULT_COLLATERAL);
+        // 100 USDC x10 = 1,000 USD at 50,000: 0.02 units
+        assertEq(t.longQuantity, 2e16);
+        assertEq(t.shortCollateral, 0);
+        assertEq(t.shortQuantity, 0);
+    }
+
+    function test_Aggregates_DeleteRemovesExactly() public {
+        vm.startPrank(tradingEngine);
+        uint32 id = tradingStorage.storeTrade(alice, false, DEFAULT_PAIR_INDEX, 7, 33 * 10 ** 6, 3e18 + 1, 0, 0);
+        tradingStorage.deleteTrade(id);
+        vm.stopPrank();
+
+        OpenPnlLib.PairTotals memory t = tradingStorage.getPairOpenTotals(DEFAULT_PAIR_INDEX);
+        assertEq(t.shortCollateral, 0);
+        assertEq(t.shortQuantity, 0);
+    }
+
+    function test_PositionState_CountAndNonce() public {
+        (uint32 count, uint32 nonce) = tradingStorage.getPositionState();
+        assertEq(count, 0);
+        assertEq(nonce, 0);
+
+        vm.startPrank(tradingEngine);
+        uint32 a = _storeTrade(alice);
+        _storeTrade(bob);
+        tradingStorage.deleteTrade(a);
+        vm.stopPrank();
+
+        (count, nonce) = tradingStorage.getPositionState();
+        assertEq(count, 1);
+        assertEq(nonce, 3);
+    }
+
+    function test_PositionState_TpSlUpdatesLeaveNonceUnchanged() public {
+        vm.startPrank(tradingEngine);
+        uint32 id = _storeTrade(alice);
+        (, uint32 nonceBefore) = tradingStorage.getPositionState();
+        tradingStorage.updateTradeTp(id, 60_000 * 1e18);
+        tradingStorage.updateTradeSl(id, 40_000 * 1e18);
+        vm.stopPrank();
+        (, uint32 nonceAfter) = tradingStorage.getPositionState();
+        assertEq(nonceAfter, nonceBefore);
+    }
+
+    /**
+     * @notice After many opens and closes in random order, the aggregates equal the sum over open trades, and
+     *         reach zero when every trade is closed
+     */
+    function testFuzz_Aggregates_NoDriftAfterManyOpensAndCloses(uint256 _seed) public {
+        uint256 n = 60;
+        uint32[] memory ids = new uint32[](n);
+        vm.startPrank(tradingEngine);
+        for (uint256 i; i < n; ++i) {
+            uint256 r = uint256(keccak256(abi.encode(_seed, i)));
+            bool isLong = r % 2 == 0;
+            uint64 collateral = uint64(10 * 10 ** 6 + (r >> 8) % (5_000 * 10 ** 6));
+            uint16 leverage = uint16(1 + (r >> 72) % 100);
+            uint128 openPrice = uint128(1e18 + (r >> 96) % (100_000 * 1e18));
+            ids[i] = tradingStorage.storeTrade(alice, isLong, DEFAULT_PAIR_INDEX, leverage, collateral, openPrice, 0, 0);
+        }
+        // Close about two thirds in pseudo-random order
+        for (uint256 k; k < n; ++k) {
+            uint256 i = uint256(keccak256(abi.encode(_seed, "close", k))) % n;
+            if (tradingStorage.getTrade(ids[i]).user != address(0) && k % 3 != 0) tradingStorage.deleteTrade(ids[i]);
+        }
+        _assertAggregatesMatchOpenTrades(ids);
+
+        for (uint256 i; i < n; ++i) {
+            if (tradingStorage.getTrade(ids[i]).user != address(0)) tradingStorage.deleteTrade(ids[i]);
+        }
+        vm.stopPrank();
+        OpenPnlLib.PairTotals memory t = tradingStorage.getPairOpenTotals(DEFAULT_PAIR_INDEX);
+        assertEq(t.longCollateral + t.longQuantity + t.shortCollateral + t.shortQuantity, 0, "aggregates drifted");
+    }
+
+    function _assertAggregatesMatchOpenTrades(uint32[] memory _ids) internal view {
+        uint256[4] memory sums; // long collateral, long quantity, short collateral, short quantity
+        for (uint256 i; i < _ids.length; ++i) {
+            TradingStorage.Trade memory t = tradingStorage.getTrade(_ids[i]);
+            if (t.user == address(0)) continue;
+            uint256 q = OpenPnlLib.quantity(uint256(t.collateral) * t.leverage * 1e12, t.openPrice, t.isLong);
+            if (t.isLong) {
+                sums[0] += t.collateral;
+                sums[1] += q;
+            } else {
+                sums[2] += t.collateral;
+                sums[3] += q;
+            }
+        }
+        OpenPnlLib.PairTotals memory agg = tradingStorage.getPairOpenTotals(DEFAULT_PAIR_INDEX);
+        assertEq(agg.longCollateral, sums[0]);
+        assertEq(agg.longQuantity, sums[1]);
+        assertEq(agg.shortCollateral, sums[2]);
+        assertEq(agg.shortQuantity, sums[3]);
+    }
+
+    function test_AddPair_UpToMaxPairs() public {
+        vm.startPrank(owner);
+        for (uint256 i = tradingStorage.getPairsCount(); i < tradingStorage.MAX_PAIRS(); ++i) {
+            tradingStorage.addPair("PAIR", 100, 1e24);
+        }
+        vm.expectRevert(abi.encodeWithSelector(TradingStorage.TooManyPairs.selector, tradingStorage.MAX_PAIRS()));
+        tradingStorage.addPair("PAIR", 100, 1e24);
+        vm.stopPrank();
+        assertEq(tradingStorage.getPairsCount(), tradingStorage.MAX_PAIRS());
     }
 }
