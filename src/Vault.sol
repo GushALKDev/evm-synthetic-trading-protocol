@@ -264,7 +264,7 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
         (uint32 openTrades,) = TRADING_STORAGE.getPositionState();
         if (openTrades == 0) return 0;
         int256 netPnl = pnlSnapshot.netPnl;
-        // forge-lint: disable-next-line(unsafe-typecast) safe: cast only when netPnl > 0 (Vault.sol:241)
+        // forge-lint: disable-next-line(unsafe-typecast) safe: cast only when netPnl > 0 (Vault.sol:268)
         return netPnl > 0 ? uint256(netPnl) : 0;
     }
 
@@ -316,7 +316,7 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
         DEPLOY_TIMESTAMP = block.timestamp;
         TRADING_STORAGE = TradingStorage(_tradingStorage);
         ORACLE = IOracle(_oracle);
-        // forge-lint: disable-next-line(unsafe-typecast) safe: the constant is 60 (Vault.sol:52)
+        // forge-lint: disable-next-line(unsafe-typecast) safe: the constant is 60 (Vault.sol:56)
         maxPnlSnapshotAge = uint32(DEFAULT_MAX_PNL_SNAPSHOT_AGE);
     }
 
@@ -692,7 +692,7 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
      */
     function setMaxPnlSnapshotAge(uint256 _maxPnlSnapshotAge) external onlyOwner {
         if (_maxPnlSnapshotAge == 0 || _maxPnlSnapshotAge > MAX_PNL_SNAPSHOT_AGE_CEILING) revert InvalidMaxPnlSnapshotAge(_maxPnlSnapshotAge);
-        // forge-lint: disable-next-line(unsafe-typecast) safe: at most MAX_PNL_SNAPSHOT_AGE_CEILING, 3600 (Vault.sol:651)
+        // forge-lint: disable-next-line(unsafe-typecast) safe: at most MAX_PNL_SNAPSHOT_AGE_CEILING, 3600 (Vault.sol:694)
         maxPnlSnapshotAge = uint32(_maxPnlSnapshotAge);
         emit MaxPnlSnapshotAgeUpdated(_maxPnlSnapshotAge);
     }

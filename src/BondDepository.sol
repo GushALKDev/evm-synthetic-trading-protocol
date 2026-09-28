@@ -217,7 +217,7 @@ contract BondDepository is Ownable {
 
         // Safe cast: timestamps fit uint64 for about 5.8e11 years
         uint64 start = uint64(block.timestamp);
-        // forge-lint: disable-next-line(unsafe-typecast) safe: vestingPeriod is at most MAX_VESTING_PERIOD (BondDepository.sol:357)
+        // forge-lint: disable-next-line(unsafe-typecast) safe: vestingPeriod is at most MAX_VESTING_PERIOD (BondDepository.sol:356)
         uint64 end = uint64(block.timestamp + vestingPeriod);
         bondId = _bonds[msg.sender].length;
         // SafeCastLib: with the smallest effective price the setters allow (1), a uint128 overflow needs a round of
@@ -246,7 +246,7 @@ contract BondDepository is Ownable {
         claimed = _vested(pos) - pos.claimedSynth;
         if (claimed == 0) revert NothingToClaim();
 
-        // forge-lint: disable-next-line(unsafe-typecast) safe: claimed is at most totalSynth, a uint128 (BondDepository.sol:156)
+        // forge-lint: disable-next-line(unsafe-typecast) safe: claimed is at most totalSynth, a uint128 (BondDepository.sol:155)
         pos.claimedSynth += uint128(claimed);
         address(SYNTH).safeTransfer(msg.sender, claimed);
         emit Claimed(msg.sender, _bondId, claimed);

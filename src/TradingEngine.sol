@@ -259,13 +259,13 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         if (_isLong) {
             // Floor exitValue → larger loss for the trader → rounding favors the pool
             uint256 exitValue = (uint256(_closePrice) * size) / uint256(_openPrice);
-            // forge-lint: disable-next-line(unsafe-typecast) safe: size < 2^80 and exitValue < 2^208 from the parameter widths (TradingEngine.sol:254)
+            // forge-lint: disable-next-line(unsafe-typecast) safe: size < 2^80 and exitValue < 2^208 from the parameter widths (TradingEngine.sol:255)
             pnlUsdc = int256(exitValue) - int256(size);
         } else {
             // Ceil exitValue → larger loss for the trader → rounding favors the pool (short PnL = size - exitValue)
             uint256 num = uint256(_closePrice) * size;
             uint256 exitValue = (num + uint256(_openPrice) - 1) / uint256(_openPrice);
-            // forge-lint: disable-next-line(unsafe-typecast) safe: size < 2^80 and exitValue < 2^208 from the parameter widths (TradingEngine.sol:254)
+            // forge-lint: disable-next-line(unsafe-typecast) safe: size < 2^80 and exitValue < 2^208 from the parameter widths (TradingEngine.sol:255)
             pnlUsdc = int256(size) - int256(exitValue);
         }
     }
@@ -277,11 +277,11 @@ contract TradingEngine is Ownable, ReentrancyGuard {
      *      the cap in both directions: a capped payer still pays, and a receiver's credit is not truncated.
      */
     function _calculatePayout(uint64 _collateral, int256 _pnlUsdc, int256 _fundingOwedUsdc) internal pure returns (uint256 payoutUsdc) {
-        // Safe casts: collateral is a uint64, so collateral * 8 < 2^67 (TradingEngine.sol:278)
+        // Safe casts: collateral is a uint64, so collateral * 8 < 2^67 (TradingEngine.sol:279)
         int256 maxProfit = int256(uint256(_collateral) * (MAX_PROFIT_MULTIPLIER - 1));
         int256 cappedPnl = _pnlUsdc > maxProfit ? maxProfit : _pnlUsdc;
         int256 net = int256(uint256(_collateral)) + cappedPnl - _fundingOwedUsdc;
-        // forge-lint: disable-next-line(unsafe-typecast) safe: cast only when net > 0 (TradingEngine.sol:284)
+        // forge-lint: disable-next-line(unsafe-typecast) safe: cast only when net > 0 (TradingEngine.sol:285)
         payoutUsdc = net > 0 ? uint256(net) : 0;
     }
 
@@ -375,7 +375,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         // Below the collateral: _validatePair caps leverage at MAX_LEVERAGE (100), so the fee is at most 8% of it
         uint256 fee = _calculateFee(_collateral, _leverage, OPEN_FEE_BPS);
         ASSET.safeTransferFrom(_user, address(TRADING_STORAGE), uint256(_collateral));
-        // forge-lint: disable-next-line(unsafe-typecast) safe: at most _collateral, a uint64 (TradingEngine.sol:375)
+        // forge-lint: disable-next-line(unsafe-typecast) safe: at most _collateral, a uint64 (TradingEngine.sol:376)
         uint64 effectiveCollateral = uint64(uint256(_collateral) - fee);
         _distributeFees(fee);
 
@@ -396,13 +396,13 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         view
     {
         // Cannot underflow: MAX_LEVERAGE caps the open fee at 8% of collateral
-        // forge-lint: disable-next-line(unsafe-typecast) safe: at most _collateral, a uint64 (TradingEngine.sol:399)
+        // forge-lint: disable-next-line(unsafe-typecast) safe: at most _collateral, a uint64 (TradingEngine.sol:400)
         uint64 effectiveCollateral = uint64(uint256(_collateral) - _calculateFee(_collateral, _leverage, OPEN_FEE_BPS));
         uint256 postOpenOI = TRADING_STORAGE.getOpenInterest(_pairIndex) + _positionSizeWad(effectiveCollateral, _leverage);
         uint128 closePrice = _applySpreadAtOI(_oraclePrice, _isLong, false, _pairIndex, postOpenOI);
         int256 instantPnl = _calculatePnl(effectiveCollateral, _leverage, _openPrice, closePrice, _isLong);
         uint256 threshold = (uint256(effectiveCollateral) * LIQUIDATION_THRESHOLD_BPS) / BPS_DENOMINATOR;
-        // forge-lint: disable-next-line(unsafe-typecast) safe: negated only when negative, and |pnl| < 2^208 (TradingEngine.sol:254)
+        // forge-lint: disable-next-line(unsafe-typecast) safe: negated only when negative, and |pnl| < 2^208 (TradingEngine.sol:255)
         uint256 loss = instantPnl < 0 ? uint256(-instantPnl) : 0;
         if (loss >= threshold) revert NotLiquidatable(0, loss, threshold);
     }
@@ -645,7 +645,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
 
         // Position is liquidatable only when the loss reaches the threshold
         uint256 threshold = (uint256(trade.collateral) * LIQUIDATION_THRESHOLD_BPS) / BPS_DENOMINATOR;
-        // forge-lint: disable-next-line(unsafe-typecast) safe: negated only when negative, and |pnl - funding| < 2^255 (TradingEngine.sol:254)
+        // forge-lint: disable-next-line(unsafe-typecast) safe: negated only when negative, and |pnl - funding| < 2^255 (TradingEngine.sol:255)
         uint256 loss = adjustedPnl < 0 ? uint256(-adjustedPnl) : 0;
         if (loss < threshold) revert NotLiquidatable(_tradeId, loss, threshold);
 
@@ -833,7 +833,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
             revert FundingFactorOutOfBounds(_fundingFactor);
         }
         uint256 oldFactor = _activeFundingFactor();
-        // forge-lint: disable-next-line(unsafe-typecast) safe: at most MAX_FUNDING_FACTOR, 1e15 (TradingEngine.sol:828)
+        // forge-lint: disable-next-line(unsafe-typecast) safe: at most MAX_FUNDING_FACTOR, 1e15 (TradingEngine.sol:832)
         fundingFactor = uint64(_fundingFactor);
         emit FundingFactorUpdated(_fundingFactor);
 
