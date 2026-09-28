@@ -6,6 +6,7 @@ import {TradingStorage} from "../../src/TradingStorage.sol";
 import {OpenPnlLib} from "../../src/libraries/OpenPnlLib.sol";
 import {ERC20} from "solady/tokens/ERC20.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
+import {SafeCastLib} from "solady/utils/SafeCastLib.sol";
 
 contract MockUSDC is ERC20 {
     function name() public pure override returns (string memory) {
@@ -1256,6 +1257,24 @@ contract TradingStorageTest is Test {
         assertEq(agg.longQuantity, sums[1]);
         assertEq(agg.shortCollateral, sums[2]);
         assertEq(agg.shortQuantity, sums[3]);
+    }
+
+    /**
+     * @notice The per-side quantity is a uint128: a position whose quantity (size_wad * 1e18 / openPrice) would not
+     *         fit reverts on open instead of wrapping
+     * @dev At an open price of 1 wei (1e-18 USD) the bound is 340.282366 USDC of notional; at 1e-8 USD it is about
+     *      3.4e10 USD, far above any per-pair maxOI the owner would set.
+     */
+    function test_StoreTrade_QuantityAtUint128Bound() public {
+        vm.startPrank(tradingEngine);
+        // 340.282366 USDC at 1x and 1 wei: 3.40282366e38 units, just below type(uint128).max
+        uint32 id = tradingStorage.storeTrade(alice, true, DEFAULT_PAIR_INDEX, 1, 340_282_366, 1, 0, 0);
+        assertEq(tradingStorage.getPairOpenTotals(DEFAULT_PAIR_INDEX).longQuantity, 340_282_366 * 1e30);
+        tradingStorage.deleteTrade(id);
+
+        vm.expectRevert(SafeCastLib.Overflow.selector);
+        tradingStorage.storeTrade(alice, true, DEFAULT_PAIR_INDEX, 1, 340_282_367, 1, 0, 0);
+        vm.stopPrank();
     }
 
     function test_AddPair_UpToMaxPairs() public {

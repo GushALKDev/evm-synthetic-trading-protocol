@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, stdError} from "forge-std/Test.sol";
 import {OpenPnlLib} from "../../src/libraries/OpenPnlLib.sol";
 
 contract OpenPnlLibTest is Test {
@@ -133,6 +133,53 @@ contract OpenPnlLibTest is Test {
         int256 atInside = OpenPnlLib.sidePnl(inside, t.longSize, t.longQuantity, t.longCollateral, true)
             + OpenPnlLib.sidePnl(inside, t.shortSize, t.shortQuantity, t.shortCollateral, false);
         assertGe(chosen + 2, atInside);
+    }
+
+    /**
+     * @notice Extreme prices and sizes: pairPnl does not revert for prices up to 1e36 (1e18 USD per unit) with a
+     *         confidence band within the oracle's 2% cap, and any uint128 size, quantity and collateral (the widths
+     *         TradingStorage stores); the side clamp holds
+     * @dev (price + conf) * quantity <= 1.02e36 * 2^128 < 2^256, and the 18-decimal results fit int256.
+     */
+    function testFuzz_PairPnl_NoOverflowWithinOracleBounds(
+        uint256 _price,
+        uint256 _confBps,
+        uint128 _longSize,
+        uint128 _longQ,
+        uint128 _longColl,
+        uint128 _shortSize,
+        uint128 _shortQ,
+        uint128 _shortColl
+    ) public pure {
+        _price = bound(_price, 1, 1e36);
+        uint256 conf = (_price * bound(_confBps, 0, 200)) / 10_000;
+        OpenPnlLib.PairTotals memory t = _totals(_longSize, _longQ, _longColl, _shortSize, _shortQ, _shortColl);
+        int256 pnl = OpenPnlLib.pairPnl(_price, conf, t);
+        assertGe(pnl, -int256(uint256(_longColl) * 1e12) - int256(uint256(_shortColl) * 1e12));
+        OpenPnlLib.toUsdcUp(pnl);
+    }
+
+    /**
+     * @notice Where the math does overflow: (price + conf) * quantity above 2^256, which needs both near 2^128
+     * @dev With quantities built from real positions, Q <= maxOI * 1e18 / openPrice, so this needs the price to
+     *      move by a factor above about 1e20 from the open price; the refresh would then revert.
+     */
+    function test_PairPnl_OverflowOnlyAboveTwoToThe256() public {
+        OpenPnlLib.PairTotals memory t = _totals(1e18, type(uint128).max, 1e6, 0, 0, 0);
+        vm.expectRevert(stdError.arithmeticError);
+        this.pairPnlExternal(type(uint128).max, type(uint128).max / 50, t);
+    }
+
+    function pairPnlExternal(uint256 _price, uint256 _conf, OpenPnlLib.PairTotals memory _t) external pure returns (int256) {
+        return OpenPnlLib.pairPnl(_price, _conf, _t);
+    }
+
+    /// @notice quantity does not overflow for a size up to TradingStorage's largest (uint64 collateral x 100 x 1e12)
+    function testFuzz_Quantity_NoOverflowAtLargestSize(uint256 _size, uint256 _price, bool _isLong) public pure {
+        _size = bound(_size, 1, uint256(type(uint64).max) * 100 * 1e12);
+        _price = bound(_price, 1, type(uint128).max);
+        uint256 q = OpenPnlLib.quantity(_size, _price, _isLong);
+        assertLe(q, _size * 1e18);
     }
 
     /*//////////////////////////////////////////////////////////////
