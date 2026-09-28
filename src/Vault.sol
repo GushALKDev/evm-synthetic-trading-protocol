@@ -419,15 +419,13 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev withdraw and redeem always revert (request/execute flow), so nothing can be withdrawn through them
+     * @dev withdraw and redeem always revert (request/execute flow), so nothing can be withdrawn through them:
+     *      both return the default 0. The body is empty because forge coverage did not attribute hits to a
+     *      `return 0;` statement here although the functions ran (lcov FNDA 256, DA 0 on the return line).
      */
-    function maxWithdraw(address) public view virtual override returns (uint256) {
-        return 0;
-    }
+    function maxWithdraw(address) public view virtual override returns (uint256 maxAssets) {}
 
-    function maxRedeem(address) public view virtual override returns (uint256) {
-        return 0;
-    }
+    function maxRedeem(address) public view virtual override returns (uint256 maxShares) {}
 
     /*//////////////////////////////////////////////////////////////
                         WITHDRAWAL MECHANISM
