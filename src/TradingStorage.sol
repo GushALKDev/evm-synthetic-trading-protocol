@@ -45,6 +45,15 @@ contract TradingStorage is Ownable {
     }
 
     /*//////////////////////////////////////////////////////////////
+                              CONSTANTS
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice Global leverage ceiling; every pair's maxLeverage is capped by it
+     */
+    uint16 public constant MAX_LEVERAGE = 100;
+
+    /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
@@ -134,6 +143,7 @@ contract TradingStorage is Ownable {
     error InsufficientBalance(uint256 requested, uint256 available);
     error EmptyPairName();
     error ZeroMaxLeverage();
+    error MaxLeverageTooHigh(uint16 maxLeverage, uint16 ceiling);
     error ZeroMaxOI();
     error InvalidTp(uint128 tp, uint128 openPrice, bool isLong);
     error InvalidSl(uint128 sl, uint128 openPrice, bool isLong);
@@ -502,13 +512,14 @@ contract TradingStorage is Ownable {
     /**
      * @notice Add a new trading pair
      * @param _name The pair name (e.g., "BTC/USD")
-     * @param _maxLeverage The maximum leverage allowed
+     * @param _maxLeverage The maximum leverage allowed (1 to MAX_LEVERAGE)
      * @param _maxOI The maximum open interest (18 decimals)
      * @return pairIndex The index of the new pair
      */
     function addPair(string calldata _name, uint16 _maxLeverage, uint128 _maxOI) external onlyOwner returns (uint256 pairIndex) {
         if (bytes(_name).length == 0) revert EmptyPairName();
         if (_maxLeverage == 0) revert ZeroMaxLeverage();
+        if (_maxLeverage > MAX_LEVERAGE) revert MaxLeverageTooHigh(_maxLeverage, MAX_LEVERAGE);
         if (_maxOI == 0) revert ZeroMaxOI();
 
         pairIndex = _pairs.length;
@@ -520,13 +531,14 @@ contract TradingStorage is Ownable {
     /**
      * @notice Update an existing trading pair configuration
      * @param _pairIndex The pair index to update
-     * @param _maxLeverage The new maximum leverage
+     * @param _maxLeverage The new maximum leverage (1 to MAX_LEVERAGE)
      * @param _maxOI The new maximum open interest (18 decimals)
      * @param _isActive Whether the pair is active
      */
     function updatePair(uint256 _pairIndex, uint16 _maxLeverage, uint128 _maxOI, bool _isActive) external onlyOwner {
         if (_pairIndex >= _pairs.length) revert PairNotFound(_pairIndex);
         if (_maxLeverage == 0) revert ZeroMaxLeverage();
+        if (_maxLeverage > MAX_LEVERAGE) revert MaxLeverageTooHigh(_maxLeverage, MAX_LEVERAGE);
         if (_maxOI == 0) revert ZeroMaxOI();
 
         Pair storage pair = _pairs[_pairIndex];

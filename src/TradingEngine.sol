@@ -25,6 +25,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     uint256 public constant MAX_PROFIT_MULTIPLIER = 9;
+    uint16 public constant MAX_LEVERAGE = 100; // global ceiling, also enforced on pair configuration in TradingStorage
     uint256 public constant MIN_COLLATERAL = 10e6; // 10 USDC — floor keeps the liquidator reward above L2 gas
     uint256 public constant BPS_DENOMINATOR = 10_000;
     uint256 public constant OPEN_FEE_BPS = 8; // 0.08% of position size
@@ -391,9 +392,10 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev Validate pair is active and leverage is within bounds.
+     * @dev Validate pair is active and leverage is within the pair limit and the global MAX_LEVERAGE.
      */
     function _validatePair(uint16 _pairIndex, uint16 _leverage) internal view {
+        if (_leverage > MAX_LEVERAGE) revert LeverageExceedsMax(_leverage, MAX_LEVERAGE);
         TradingStorage.Pair memory pair = TRADING_STORAGE.getPair(_pairIndex);
         if (!pair.isActive) revert PairNotActive(_pairIndex);
         if (_leverage > pair.maxLeverage) revert LeverageExceedsMax(_leverage, pair.maxLeverage);
