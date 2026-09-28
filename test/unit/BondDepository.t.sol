@@ -6,6 +6,7 @@ import {ERC20} from "solady/tokens/ERC20.sol";
 import {Ownable} from "solady/auth/Ownable.sol";
 import {BondDepository} from "../../src/BondDepository.sol";
 import {SynthToken} from "../../src/SynthToken.sol";
+import {MockSolvencyVault} from "../mocks/MockSolvencyVault.sol";
 
 contract MockUSDC is ERC20 {
     function name() public pure override returns (string memory) {
@@ -31,7 +32,8 @@ contract BondDepositoryTest is Test {
     MockUSDC usdc;
 
     address owner = makeAddr("owner");
-    address vault = makeAddr("vault");
+    MockSolvencyVault mockVault = new MockSolvencyVault();
+    address vault = address(mockVault);
     address solvencyManager = makeAddr("solvencyManager");
     address alice = makeAddr("alice");
 
@@ -218,6 +220,71 @@ contract BondDepositoryTest is Test {
         vm.prank(alice);
         vm.expectRevert(BondDepository.NoActiveRound.selector);
         bond.bond(1000 * 10 ** 6);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    ROUND CLOSE ON CR RECOVERY
+    //////////////////////////////////////////////////////////////*/
+
+    function test_Bond_ClampedToVaultDeficitAndCloses() public {
+        vm.prank(solvencyManager);
+        bond.activateBonding(10_000 * 10 ** 6);
+        mockVault.setDeficit(4_000 * 10 ** 6);
+
+        vm.expectEmit(false, false, false, false);
+        emit RoundClosed();
+        vm.prank(alice);
+        bond.bond(10_000 * 10 ** 6);
+
+        assertEq(usdc.balanceOf(vault), 4_000 * 10 ** 6, "raised more than the deficit");
+        assertEq(bond.remainingCap(), 0);
+        assertFalse(bond.isActive());
+    }
+
+    function test_Bond_BelowDeficitKeepsRoundOpen() public {
+        vm.prank(solvencyManager);
+        bond.activateBonding(10_000 * 10 ** 6);
+        mockVault.setDeficit(4_000 * 10 ** 6);
+
+        vm.prank(alice);
+        bond.bond(1_000 * 10 ** 6);
+        assertEq(bond.remainingCap(), 9_000 * 10 ** 6);
+        assertTrue(bond.isActive());
+    }
+
+    function test_Bond_RevertWhenVaultRecovered() public {
+        vm.prank(solvencyManager);
+        bond.activateBonding(10_000 * 10 ** 6);
+        mockVault.setDeficit(0);
+
+        vm.prank(alice);
+        vm.expectRevert(BondDepository.NoActiveRound.selector);
+        bond.bond(1_000 * 10 ** 6);
+    }
+
+    function test_CloseBonding() public {
+        vm.prank(solvencyManager);
+        bond.activateBonding(10_000 * 10 ** 6);
+
+        vm.expectEmit(false, false, false, false);
+        emit RoundClosed();
+        vm.prank(solvencyManager);
+        bond.closeBonding();
+        assertFalse(bond.isActive());
+    }
+
+    function test_CloseBonding_OnlySolvencyManager() public {
+        vm.prank(solvencyManager);
+        bond.activateBonding(10_000 * 10 ** 6);
+        vm.prank(alice);
+        vm.expectRevert(BondDepository.CallerNotSolvencyManager.selector);
+        bond.closeBonding();
+    }
+
+    function test_CloseBonding_RevertWithoutRound() public {
+        vm.prank(solvencyManager);
+        vm.expectRevert(BondDepository.NoActiveRound.selector);
+        bond.closeBonding();
     }
 
     function test_Bond_ZeroAmountReverts() public {

@@ -6,6 +6,7 @@ import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {BondDepository} from "../../src/BondDepository.sol";
 import {SynthToken} from "../../src/SynthToken.sol";
 import {BondingHandler} from "./handlers/BondingHandler.sol";
+import {MockSolvencyVault} from "../mocks/MockSolvencyVault.sol";
 import {ERC20} from "solady/tokens/ERC20.sol";
 
 contract MockUSDC is ERC20 {
@@ -42,7 +43,8 @@ contract BondingInvariantTest is StdInvariant, Test {
     BondingHandler handler;
 
     address owner = makeAddr("owner");
-    address vault = makeAddr("vault");
+    MockSolvencyVault mockVault = new MockSolvencyVault();
+    address vault = address(mockVault);
     address solvencyManager = makeAddr("solvencyManager");
 
     uint256 constant DISCOUNT_BPS = 500; // 5%

@@ -31,4 +31,6 @@ interface IBondDepository {
     function isActive() external view returns (bool);
 
     function activateBonding(uint256 neededUsdc) external;
+
+    function closeBonding() external;
 }

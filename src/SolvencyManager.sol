@@ -16,6 +16,7 @@ import {ISolvencyVault, IAssistantFund, IBondDepository} from "./interfaces/ISol
  *      (both are pointed at this contract as their solvencyManager).
  *      Thresholds (WAD): CR >= SAFE_CR healthy, DEFICIT_CR <= CR < SAFE_CR warning (no action),
  *      CRITICAL_CR <= CR < DEFICIT_CR inject reserve, CR < CRITICAL_CR activate bonding.
+ *      At CR >= DEFICIT_CR an open bonding round is closed: the deficit it was opened for is gone.
  */
 contract SolvencyManager is Ownable {
     /*//////////////////////////////////////////////////////////////
@@ -43,6 +44,7 @@ contract SolvencyManager is Ownable {
     event Warning(uint256 cr);
     event ReserveInjected(uint256 cr, uint256 amount);
     event BondingTriggered(uint256 cr, uint256 neededUsdc);
+    event BondingClosed(uint256 cr);
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -77,6 +79,10 @@ contract SolvencyManager is Ownable {
     function checkAndAct() external {
         uint256 cr = VAULT.collateralizationRatio();
 
+        if (cr >= DEFICIT_CR && BOND_DEPOSITORY.isActive()) {
+            BOND_DEPOSITORY.closeBonding();
+            emit BondingClosed(cr);
+        }
         if (cr >= SAFE_CR) {
             emit Healthy(cr);
             return;

@@ -64,6 +64,10 @@ contract MockBondDepository {
         isActive = true;
         lastNeeded = neededUsdc;
     }
+
+    function closeBonding() external {
+        isActive = false;
+    }
 }
 
 contract SolvencyManagerTest is Test {
@@ -232,6 +236,25 @@ contract SolvencyManagerTest is Test {
     /*//////////////////////////////////////////////////////////////
                             DEFICIT VIEW
     //////////////////////////////////////////////////////////////*/
+
+    event BondingClosed(uint256 cr);
+
+    function test_CheckAndAct_ClosesRoundWhenRecovered() public {
+        bondDepo.setActive(true);
+        vault.setState(1_000_000 * 10 ** 6, 100e16);
+
+        vm.expectEmit(false, false, false, true);
+        emit BondingClosed(100e16);
+        manager.checkAndAct();
+        assertFalse(bondDepo.isActive());
+    }
+
+    function test_CheckAndAct_KeepsRoundBelowTarget() public {
+        bondDepo.setActive(true);
+        vault.setState(990_000 * 10 ** 6, 99e16);
+        manager.checkAndAct();
+        assertTrue(bondDepo.isActive());
+    }
 
     function test_DeficitToTarget_ZeroWhenHealthy() public {
         vault.setState(1_100_000 * 10 ** 6, 110e16);

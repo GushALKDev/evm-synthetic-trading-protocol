@@ -4,6 +4,7 @@ pragma solidity 0.8.24;
 import {Ownable} from "solady/auth/Ownable.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 import {ISynthToken} from "./interfaces/ISynthToken.sol";
+import {ISolvencyVault} from "./interfaces/ISolvency.sol";
 
 /**
  * @title BondDepository
@@ -12,9 +13,11 @@ import {ISynthToken} from "./interfaces/ISynthToken.sol";
  *         rounds. The raised USDC is injected straight into the Vault; the discounted $SYNTH is vested
  *         to bonders linearly over a configurable window.
  * @dev A round is opened only by the SolvencyManager via activateBonding(neededUsdc), which sets the
- *      remaining cap for that round. Bonders call bond(usdcAmount) until the cap is exhausted, at which
- *      point the round auto-closes. $SYNTH is priced off a keeper-maintained referencePrice (USDC per
- *      SYNTH, proxy for a TWAP) with a capped discount.
+ *      remaining cap for that round. A bond takes at most min(remaining cap, Vault collateralization
+ *      deficit), so a round never raises more than is needed to bring the Vault back to 100% CR. The round
+ *      closes when that amount is exhausted (the cap is used up or the bond restores CR to 100%), or when
+ *      the SolvencyManager finds CR back at 100% through other inflows and calls closeBonding. $SYNTH is
+ *      priced off an owner-set referencePrice (USDC per SYNTH, a stand-in for a TWAP) with a capped discount.
  *
  *      Vesting rationale (PoC): the sell-side discount makes an instant "bond → dump on market" a
  *      near risk-free arbitrage that pushes the token price down, and — since bonds re-price against
@@ -189,9 +192,10 @@ contract BondDepository is Ownable {
      * @notice Buy discounted $SYNTH by depositing USDC; the USDC is injected into the Vault
      * @dev Permissionless. USDC is pulled from the caller and sent to the Vault; the discounted $SYNTH
      *      is minted to this contract and vested to the caller linearly over vestingPeriod (claimed
-     *      via claim). The deposit is clamped to the remaining round cap; the round closes when the cap
-     *      is exhausted. CEI: state (cap, position) updated before external mint/transfers.
-     * @param _usdcAmount USDC the caller wishes to bond (clamped to remainingCap)
+     *      via claim). The deposit is clamped to min(remainingCap, Vault deficit); the round closes when
+     *      that amount is exhausted. Reverts NoActiveRound when either is zero. CEI: state (cap, position)
+     *      updated before external mint/transfers.
+     * @param _usdcAmount USDC the caller wishes to bond (clamped to min(remainingCap, deficit))
      * @return bondId Index of the created vesting position for msg.sender
      * @return synthOut Amount of $SYNTH vesting to the caller
      */
@@ -199,11 +203,15 @@ contract BondDepository is Ownable {
         if (_usdcAmount == 0) revert ZeroAmount();
         uint256 cap = remainingCap;
         if (cap == 0) revert NoActiveRound();
+        uint256 deficit = ISolvencyVault(VAULT).collateralizationDeficit();
+        uint256 available = deficit < cap ? deficit : cap;
+        if (available == 0) revert NoActiveRound();
 
         // Checks / Effects
-        uint256 usdcIn = _usdcAmount > cap ? cap : _usdcAmount;
+        uint256 usdcIn = _usdcAmount > available ? available : _usdcAmount;
         synthOut = quoteBond(usdcIn);
-        uint256 newCap = cap - usdcIn;
+        // Taking all that is available either uses up the cap or restores the Vault to 100%: close the round
+        uint256 newCap = usdcIn == available ? 0 : cap - usdcIn;
         remainingCap = newCap;
 
         uint64 start = uint64(block.timestamp);
@@ -239,6 +247,16 @@ contract BondDepository is Ownable {
         pos.claimedSynth += uint128(claimed);
         address(SYNTH).safeTransfer(msg.sender, claimed);
         emit Claimed(msg.sender, _bondId, claimed);
+    }
+
+    /**
+     * @notice Close the active round because the Vault is back at 100% CR
+     * @dev Only the SolvencyManager may call; it does so from checkAndAct when CR >= DEFICIT_CR.
+     */
+    function closeBonding() external onlySolvencyManager {
+        if (remainingCap == 0) revert NoActiveRound();
+        remainingCap = 0;
+        emit RoundClosed();
     }
 
     /*//////////////////////////////////////////////////////////////
