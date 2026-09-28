@@ -166,10 +166,13 @@ A bonder can hold several positions (`mapping(address => BondPosition[])`).
 ```solidity
 interface IOracle {
     function getPrice(uint256 pairIndex, bytes[] calldata priceData) external payable returns (uint128 price18, uint128 conf18);
+
+    function checkOpenAllowed() external view;
 }
 ```
 
-`priceData` is opaque update data for pull oracles. The caller pays any fee in `msg.value` and the oracle
+`checkOpenAllowed` reverts when conditions outside the price do not allow new positions; `openTrade` calls it
+(the sequencer grace period in `PythChainlinkOracle`). `priceData` is opaque update data for pull oracles. The caller pays any fee in `msg.value` and the oracle
 refunds the surplus to `msg.sender`. `TradingEngine` stores the oracle as an immutable, so replacing it
 requires a new engine deployment.
 
@@ -178,7 +181,8 @@ requires a new engine deployment.
 Minimal views and calls used by `SolvencyManager` and `BondDepository`: `collateralizationRatio()`,
 `collateralizationDeficit()`, `realisedCollateralizationRatio()`, `realisedCollateralizationDeficit()`,
 `isPnlSnapshotFresh()`, `refreshPnlSnapshot(bytes[])` (payable), `totalAssets()`, `balance()`,
-`injectFunds(uint256)`, `isActive()`, `activateBonding(uint256)`, `closeBonding()`.
+`injectFunds(uint256)`, `isActive()`, `activateBonding(uint256)`, `closeBonding()`. `ISolvencyManager`: `checkAndActBeforeDeposit()` and
+`bondingRoundOpenAfterCheck()`, which the Vault calls on its deposit paths and in `maxDeposit`/`maxMint`.
 
 ### ISynthToken
 

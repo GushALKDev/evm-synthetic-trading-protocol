@@ -80,12 +80,12 @@ never falls back to the Chainlink answer.
 | Step | Check | Error |
 | :--- | :---- | :---- |
 | 1 | Pair feed configured (`active`) | `PairFeedNotSet` |
-| 2 | Sequencer uptime feed (if set): `answer == 0`, `startedAt != 0`, and more than `SEQUENCER_GRACE_PERIOD` (3600 s) since `startedAt` | `SequencerDown`, `SequencerGracePeriodNotOver` |
+| 2 | Sequencer uptime feed (if set): `answer == 0` and `startedAt != 0` | `SequencerDown` |
 | 3 | `msg.value >= PYTH.getUpdateFee(priceData)`, then `PYTH.updatePriceFeeds{value: fee}(priceData)` | `InsufficientFee` |
 | 3b | `PYTH.getPriceUnsafe(feedId)`: `publishTime <= block.timestamp` and `block.timestamp - publishTime <= maxPriceAge` (5 s by default, owner-set up to `MAX_STALENESS` = 30 s) | `PriceFromFuture`, `StalePrice` |
 | 4 | `price > 0` | `ZeroPrice` |
 | 5 | `conf * 10000 <= price * 200` (confidence at most 2% of price) | `ConfidenceTooWide` |
-| 6 | Normalise price and conf to 18 decimals (`PythUtils.convertToUint`) | |
+| 6 | Normalise price and conf to 18 decimals (`PythUtils.convertToUint`); both must fit a uint128 | `SafeCastLib.Overflow` |
 | 7 | Chainlink `latestRoundData`: `block.timestamp - updatedAt <= heartbeat`, `answer > 0`, normalise by `decimals()` | `ChainlinkStalePrice`, `ZeroPrice` |
 | 8 | `abs(pyth - chainlink) * 10000 <= chainlink * 300` (at most 3% apart) | `PriceDeviationTooHigh` |
 | 9 | Refund `msg.value - fee` to the caller | |
@@ -105,11 +105,16 @@ Behaviour to be aware of:
   (`python3 script/analysis/pyth_update_age.py --rpc https://arb1.arbitrum.io/rpc --head 509770836 --window 10000 --step 86400 --count 60`).
   These are updates pushed by bots, not wallet transactions.
 - The sequencer uptime feed is a constructor parameter (`address(0)` disables the check, for chains
-  without one). While the sequencer is down, and for one hour after it comes back, every price read
-  reverts, including liquidations, so positions are not settled before traders could react.
+  without one). While the sequencer is down every price read reverts. For `SEQUENCER_GRACE_PERIOD`
+  (3600 s) after it comes back, `checkOpenAllowed` reverts with `SequencerGracePeriodNotOver`;
+  `TradingEngine.openTrade` calls it, so no new position opens on prices traders could not react to, while
+  closes, TP/SL, liquidations, snapshot refreshes, LP withdrawals and `checkAndAct` keep working. A position
+  cannot be topped up, so a liquidation realises the same loss as a close (only the reward differs), and
+  blocking liquidations would let positions run past 100% loss at the vault's expense
+  (`test/regression/SequencerGraceScopeRegression.t.sol`).
 - Any failed check reverts the whole call. `closeTrade`, `executeLimit`, `liquidate`, `openTrade`, and
   `updateTp`/`updateSl` with a non-zero value all revert while Pyth is stale, its confidence is wide,
-  Chainlink is stale, the two disagree by more than 3%, or the sequencer check fails.
+  Chainlink is stale, the two disagree by more than 3%, or the sequencer is down.
 - Arbitrum One charged no Pyth update fee at the pinned fork block (`test_Fork_UpdateFee_IsZero`), so the
   refund path is only exercised with a non-zero fee by the MockPyth tests.
 
@@ -149,7 +154,7 @@ Holds LP USDC, issues sUSDC at a conservative NAV, keeps the PnL snapshot, pays 
 
 | Function | Access | Description |
 | :------- | :----- | :---------- |
-| `deposit(assets, receiver)` / `mint(shares, receiver)` | Anyone, when not paused | ERC-4626 entry at the NAV; reverts with `StalePnlSnapshot` or `CoverageBelowPar` |
+| `deposit(assets, receiver)` / `mint(shares, receiver)` | Anyone, when not paused | ERC-4626 entry at the NAV after the pending AssistantFund injection; reverts with `StalePnlSnapshot` or `BondingRoundOpen` |
 | `refreshAndDeposit` / `refreshAndMint(..., priceUpdate)` | Anyone, when not paused, payable | Refresh the snapshot, then deposit or mint; refund the ETH surplus |
 | `refreshPnlSnapshot(priceUpdate)` | Anyone, payable | Value every pair with open interest and store `(netPnl, timestamp, nonce)` |
 | `totalAssets()` | View | USDC balance minus the positive net trader PnL of the latest snapshot; never reverts |
@@ -162,10 +167,10 @@ Holds LP USDC, issues sUSDC at a conservative NAV, keeps the PnL snapshot, pays 
 | `collateralizationRatio()` / `collateralizationDeficit()` | View | NAV ratio and deficit (LP principal coverage); injection trigger in `SolvencyManager` |
 | `realisedCollateralizationRatio()` / `realisedCollateralizationDeficit()` | View | Balance-only ratio and deficit; bonding trigger and `bond` clamp |
 | `isPnlSnapshotFresh()` | View | No open trade, or snapshot within `maxPnlSnapshotAge` with no open or close since |
-| `setTradingEngine`, `setMaxPnlSnapshotAge`, `pause`, `unpause` | Owner | |
+| `setTradingEngine`, `setSolvencyManager`, `setMaxPnlSnapshotAge`, `pause`, `unpause` | Owner | |
 
 `maxWithdraw` and `maxRedeem` return 0 because `withdraw` and `redeem` always revert; `maxDeposit` and
-`maxMint` return 0 while the vault is paused, with a stale snapshot or below 100% coverage
+`maxMint` return 0 while the vault is paused, with a stale snapshot or while a bonding round is open or due
 ([Guide 7](./07-vault-ssl.md#erc-4626-max-functions)).
 
 ### 4.2 `TradingEngine.sol`
@@ -398,10 +403,11 @@ close reverts. A pull ("claim") pattern is not used.
 
 ### 6.4 Contract size
 
-`TradingEngine` runtime size is 24,563 bytes, 13 bytes under the 24,576 byte limit
-(`forge build --sizes`, optimizer off). The round 2 fixes added 1,652 bytes (from 22,911). Any further
-logic in the engine needs the optimizer or an extraction (a settlement library or a satellite contract)
-first. No proxy or diamond pattern is used; contracts are not upgradeable.
+`TradingEngine` runtime size is 17,500 bytes, 7,076 bytes under the 24,576 byte limit
+(`forge build --sizes` at commit `2dd5562`, optimizer on with 200 runs, as in `foundry.toml` since round
+2b). Without the optimizer it was 24,563 bytes after round 2, 13 bytes under the limit. CI runs
+`forge build --sizes`, which fails if a contract passes the limit. No proxy or diamond pattern is used;
+contracts are not upgradeable.
 
 ---
 

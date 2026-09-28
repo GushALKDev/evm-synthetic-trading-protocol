@@ -1,5 +1,6 @@
 # Synthetic Trading Protocol
 
+[![Foundry Tests](https://github.com/GushALKDev/evm-synthetic-trading-protocol/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/GushALKDev/evm-synthetic-trading-protocol/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Solidity](https://img.shields.io/badge/Solidity-0.8.24-363636.svg)](https://docs.soliditylang.org/)
 [![Foundry](https://img.shields.io/badge/Built%20with-Foundry-FFDB1C.svg)](https://getfoundry.sh/)
@@ -12,8 +13,9 @@ Chainlink feed, with a spread that grows with open interest and a keeper-supplie
 The architecture follows gTrade by Gains Network (single vault as counterparty, oracle execution,
 separate storage and trading contracts).
 
-**Status:** Proof of concept. Not audited and not deployed. It is an educational project and must not be
-used with real funds.
+**Status:** Proof of concept. The findings of the internal review rounds are fixed or documented (see
+[Review notes](#review-notes)). Not audited by a third party and not deployed. It is an educational project
+and must not be used with real funds.
 
 ---
 
@@ -27,11 +29,11 @@ the row), **Designed only** (described in the docs, no code), **Not found**. Fil
 | :------ | :----- | :------- |
 | ERC-4626 vault, sUSDC shares (18 decimals, `_decimalsOffset() = 12`) | Implemented | `Vault.sol` (Solady `ERC4626`); `test/unit/Vault.t.sol` |
 | 3-epoch withdrawal lock (1 epoch = 1 day) with escrow and a 1-epoch execution window | Implemented | `Vault.requestWithdrawal` escrows the shares in the vault; `executeWithdrawal` works only in the epoch after unlock, then reverts `WithdrawalExpired`; `cancelWithdrawal` returns the shares. `test/regression/WithdrawalRegression.t.sol`, `Vault.t.sol` |
-| ERC-4626 `max*` functions | Implemented | `maxWithdraw` and `maxRedeem` return 0 (the actions always revert); `maxDeposit` and `maxMint` return 0 while paused, with a stale PnL snapshot or below 100% coverage. Each is tested against its action in `Vault.t.sol`, `VaultNav.t.sol` and the regression tests |
+| ERC-4626 conformity and `max*` functions | Implemented | `maxWithdraw` and `maxRedeem` return 0 (the actions always revert); `maxDeposit` and `maxMint` return 0 while paused, with a stale PnL snapshot, or while a bonding round is open or due. Previews, rounding direction, non-reverting views and escrowed shares in `test/unit/VaultErc4626.t.sol`; `max*` against their actions in `Vault.t.sol` and `test/unit/VaultDepositRule.t.sol` |
 | Share price at a conservative NAV with open trader PnL | Implemented | `Vault.totalAssets` = USDC balance minus the positive net unrealised trader PnL of the latest snapshot. Per pair and side aggregates in `TradingStorage` (`getPairOpenTotals`), math in `libraries/OpenPnlLib.sol`, snapshot in `Vault.refreshPnlSnapshot` (at most `MAX_PAIRS` = 20 pairs). `deposit`, `mint` and `executeWithdrawal` need a snapshot at most `maxPnlSnapshotAge` old (60 s by default) with no open or close since; `refreshAndDeposit`, `refreshAndMint`, `refreshAndExecuteWithdrawal` refresh in the same call. `test/unit/VaultNav.t.sol`, `test/regression/OpenPnlNavRegression.t.sol` |
-| Deposits blocked below 100% LP principal coverage | Implemented | `Vault.deposit`/`mint` revert with `CoverageBelowPar`; `test/regression/DepositCoverageRegression.t.sol` |
-| Pyth pull integration: update data, caller-paid fee with refund, 5 s price age (owner-set up to 30 s), 2% confidence cap | Implemented | `PythChainlinkOracle.getPrice`; `test/unit/PythChainlinkOracle.t.sol` (MockPyth); fork suite on Arbitrum One at a pinned block, 19 tests |
-| L2 sequencer uptime check (Chainlink feed, 1 hour grace period) | Implemented | `PythChainlinkOracle` constructor parameter, `address(0)` disables it; `test/regression/SequencerRegression.t.sol` and the fork suite |
+| Deposit rule: pending AssistantFund injection first, no deposits while bonding is open or due | Implemented | Every deposit path calls `SolvencyManager.checkAndActBeforeDeposit` before minting and reverts with `BondingRoundOpen` when a round is open afterwards; below 100% coverage a deposit is otherwise allowed at the NAV. `test/regression/DepositRuleRegression.t.sol`, `test/unit/VaultDepositRule.t.sol` |
+| Pyth pull integration: update data, caller-paid fee with refund, 5 s price age (owner-set up to 30 s), 2% confidence cap | Implemented | `PythChainlinkOracle.getPrice`; `test/unit/PythChainlinkOracle.t.sol` (MockPyth); fork suite on Arbitrum One at a pinned block, 21 tests |
+| L2 sequencer uptime check (Chainlink feed, 1 hour grace period for openings) | Implemented | `PythChainlinkOracle` constructor parameter, `address(0)` disables it. While the sequencer is down every price read reverts; for one hour after it comes back only `openTrade` reverts (`IOracle.checkOpenAllowed`). `test/regression/SequencerRegression.t.sol`, `test/regression/SequencerGraceScopeRegression.t.sol` and the fork suite |
 | Chainlink deviation anchor (3%) and Chainlink heartbeat check | Implemented | `PythChainlinkOracle.getPrice`, `_getChainlinkPrice18`. On disagreement above 3% or a stale Chainlink answer the call reverts; there is no fallback price |
 | Dynamic spread: base + OI term + volatility term, capped | Implemented | `SpreadManager.getSpreadBps`; volatility is set by a keeper (`updateVolatility`); `test/unit/SpreadManager.t.sol` |
 | Funding between traders | Implemented | `FundingLib`, `TradingEngine._updateFundingIndex`: rate proportional to the relative skew, capped at 0.01% of the heavier side's notional per hour; the lighter side receives what the heavier side pays, through per-side indexes; the vault only carries the bad-debt residual described below |
@@ -42,7 +44,7 @@ the row), **Designed only** (described in the docs, no code), **Not found**. Fil
 | Profit cap | Implemented | `TradingEngine._calculatePayout`: collateral plus price PnL capped at 9x collateral (maximum price profit 8x); funding is settled after the cap in both directions |
 | Max leverage | Implemented | Global `MAX_LEVERAGE = 100`, checked in `addPair`/`updatePair` and on open; per-pair limits below it |
 | Opening guard | Implemented | `_validateNotPreLiquidatable` rejects a position `liquidate` would accept in the same block at an unchanged price (close spread at the post-open OI, collateral net of the open fee) |
-| Asset classes (crypto, forex, commodities) | Partial | Any pair with a Pyth feed ID and a Chainlink feed can be configured. No per-class logic (no market hours, no weekend handling). Tests use BTC and ETH only |
+| Asset classes (crypto, forex, commodities) | Partial | Any pair with a Pyth feed ID and a Chainlink feed can be configured. No per-class logic (no market hours, no weekend handling). The fork suite uses BTC and ETH; the mock invariant suites run three pairs |
 | Fee split: 0.08% open and close fee on notional, 80% vault / 20% treasury | Implemented | `TradingEngine._distributeFees`; `script/Deploy.s.sol` sets the treasury to the `AssistantFund` |
 | `SolvencyManager.checkAndAct`: inject reserve below a 100% NAV ratio, open a bonding round below a 95% realised ratio, close it at 100% realised | Implemented | `SolvencyManager.sol`. The injection needs a fresh PnL snapshot (`refreshAndCheckAndAct` takes one); bonding uses the USDC balance per share, so an unrealised move does not sell discounted $SYNTH. `test/regression/SolvencySplitRegression.t.sol` |
 | `AssistantFund.injectFunds` and permissionless `skim` | Implemented | `AssistantFund.sol`; `test/unit/AssistantFund.t.sol` |
@@ -156,6 +158,9 @@ can:
 
 - Point `Vault.tradingEngine` and `TradingStorage.tradingEngine` at any address. That address can then
   move all vault USDC (`sendPayout`) and all trader collateral (`sendCollateral`).
+- Point `Vault.solvencyManager` at any address; every deposit path calls it before minting. Until it is set
+  (`DeployLib.wire` sets it), deposits skip the rescue step: they neither run a pending injection first nor
+  stop for bonding.
 - Pause `TradingEngine` (blocks `openTrade`, `closeTrade`, `executeLimit`, `updateTp`, `updateSl`) while
   `liquidate` keeps working, and pause the vault (blocks `deposit`, `mint`, their refresh-and-act variants
   and `requestWithdrawal`; `executeWithdrawal`, `cancelWithdrawal` and `refreshPnlSnapshot` stay available).
@@ -175,8 +180,10 @@ spread volatility input depends on one keeper address. `checkAndAct` and `skim` 
 
 **Oracle assumptions.** Prices depend on Pyth publishers, Wormhole-signed updates and Chainlink. If the
 Pyth price is too old, its confidence band is too wide, the Chainlink answer is stale, the two disagree
-by more than 3%, or the sequencer check fails, every price-consuming call reverts, including
-`closeTrade`, `executeLimit` and `liquidate`. Fetching Pyth updates from Hermes requires an API key since
+by more than 3%, or the L2 sequencer is down, every price-consuming call reverts, including
+`closeTrade`, `executeLimit` and `liquidate`. For one hour after the sequencer comes back, only `openTrade`
+reverts: a position cannot be topped up, so a liquidation realises the same loss as a close (only the reward
+differs), and blocking liquidations would let positions run past 100% loss at the vault's expense. Fetching Pyth updates from Hermes requires an API key since
 the Pyth Core upgrade of 2026-08-26.
 
 **LP risk.** LPs are the counterparty to trader PnL and can lose part of their deposit.
@@ -197,11 +204,12 @@ or a new request returns the shares.
 - **Oracle latency window.** Within `maxPriceAge` (5 s) the caller still chooses which Pyth update to
   submit, so a trader can open on a price up to 5 seconds old and close on the current one. The round trip
   costs about 26 BPS of notional with the deploy parameters.
-- **Deposits have no lock.** Deposits are priced at the NAV and revert below 100% coverage, so a new LP can
-  no longer enter ahead of a reserve injection or at a price that ignores open trader profit. Because the
-  NAV does not add net trader losses, a new LP can still enter while traders are net losing and share in
-  those losses when they settle: a deposit `D` into a NAV `A` takes `D x L / (A + D)` of a later realised
-  loss `L`, from the LPs already in.
+- **Deposits have no lock.** A deposit first runs the pending AssistantFund injection and mints at the NAV,
+  so a new LP cannot take part of an injection pending when it deposits, or enter at a price that ignores
+  open trader profit. Two effects remain. The NAV does not add net trader losses, so a new LP can enter
+  while traders are net losing and share in those losses when they settle: a deposit `D` into a NAV `A` takes
+  `D x L / (A + D)` of a later realised loss `L`, from the LPs already in. And below 100% coverage with the
+  AssistantFund empty, a new LP also shares in injections that fees fund later.
 - **NAV biases.** The NAV ignores the 9x payout cap (it overstates trader profit by
   `sum max(0, pnl_i - 8 x collateral_i)`, conservative) and clamps losses per pair side, not per position:
   a position past 100% loss that is not yet liquidated offsets winners on its side, understating the
@@ -213,15 +221,29 @@ or a new request returns the shares.
   Within that window an LP can act on the stored snapshot or refresh first with a Pyth update of their
   choice (within the oracle's `maxPriceAge`); the difference is the price move since the snapshot times the
   open quantity. `totalAssets` and the previews use the latest snapshot even when it is stale.
-- **Deposits can stay blocked for a long time.** While the NAV ratio is below 100% deposits revert. With the
-  AssistantFund empty, the realised ratio at or above 95% (so no bonding), profitable positions kept open
-  and a static price, nothing moves the ratio and the block has no time limit. It ends with a price move
-  against the open profit, fee income (a NAV deficit `D` needs about `D x 10,000 / 8` of traded notional at
-  the 0.08% open and close fees when nothing else changes), or a bonding round if the realised ratio falls
-  below 95% (sized on the realised deficit, so it can end with the NAV ratio still below 100%). Closing the
-  profitable positions only adds back what the NAV overstated (the close fee, profit above the 9x cap, the
-  confidence edge and the close spread). Withdrawals keep working at the NAV. There is no owner override
+- **Deposits are refused while bonding is open or due.** A deposit reverts with `BondingRoundOpen` while a
+  round is open, or when the realised ratio is below 95% and the AssistantFund cannot cover the realised
+  deficit (the check would open a round). A round that finds no bonders (for example with an unattractive
+  `referencePrice`) keeps deposits closed until the realised ratio recovers through fees or trader losses, or
+  the round fills. Withdrawals keep working at the NAV. There is no owner override
   ([Guide 7](./docs/07-vault-ssl.md#known-biases-and-the-deposit-freeze)).
+- **Pausing blocks exits.** Pausing the engine blocks `closeTrade`, `executeLimit`, `updateTp` and `updateSl`
+  while `liquidate` keeps working, so traders cannot close or have a stop executed but can still be
+  liquidated. Pausing the vault blocks `requestWithdrawal`, so LPs cannot start a withdrawal, and a pause
+  longer than the one-epoch execution window lets pending requests expire; the engine keeps paying winning
+  traders from the vault meanwhile ([Guide 8, section 5](./docs/08-security.md#5-pause-and-emergency-handling)).
+- **Thin-side funding.** When one side of a pair is small, each unit on that side receives the heavier side's
+  rate times `OI_heavy / OI_light` per hour; the total credited to the light side is at most what the heavy
+  side pays ([Guide 2](./docs/02-mathematics.md#thin-side-funding)).
+- **ERC-4626 integrators.** `deposit`, `mint` and `executeWithdrawal` need a fresh PnL snapshot while trades
+  are open, and any open or close invalidates it, so a plain call usually reverts with `StalePnlSnapshot`.
+  Integrators should use `refreshAndDeposit`, `refreshAndMint` and `refreshAndExecuteWithdrawal`, which
+  refresh and act in one transaction.
+- **Aggregate scale.** A position whose quantity (size / open price, 18 decimals) does not fit a uint128
+  reverts on open (at a 1 wei price the bound is 340.282366 USDC of notional,
+  `test_StoreTrade_QuantityAtUint128Bound`); the snapshot math overflows only when (price + conf) times a
+  side's quantity exceeds 2^256, which needs the price to move by a factor above about 1e20 from the open
+  price (`test_PairPnl_OverflowOnlyAboveTwoToThe256`).
 - **A winning close can revert.** `closeTrade` and `executeLimit` revert with `InsufficientVaultBalance`
   when the vault holds less USDC than the profit owed, until the vault is refilled.
 
@@ -229,82 +251,98 @@ or a new request returns the shares.
 
 ## Testing
 
-Measured on 2026-09-28 at commit `2e390d7` (branch `fix/open-pnl-nav`) with forge 1.7.1 and solc 0.8.24
+Measured on 2026-09-29 at commit `2dd5562` (branch `hardening/final`) with forge 1.7.1 and solc 0.8.24
 (fixed by the pragma in every source file; `foundry.toml` does not pin `solc`), after `npm ci`. Later
-commits only change documentation. Details: [docs/tests/README.md](./docs/tests/README.md).
+commits change only documentation and code comments, with the same line count in every code file. Details, including the invariant call distributions
+and the static analysis triage: [docs/tests/README.md](./docs/tests/README.md).
 
 | Command | Result |
 | :------ | :----- |
 | `forge build` | Compiles (optimizer on, 200 runs). It fails before `npm ci` because the Pyth SDK is an npm dependency |
-| `forge build --sizes` | Exits 0. `TradingEngine` runtime 17,311 bytes (7,265 under the 24,576 byte limit), `Vault` 13,013, `TradingStorage` 10,276 |
-| `FORK_RPC_URL= forge test` | 714 tests: 695 passed, 0 failed, 19 skipped (the fork suite) |
-| `forge test --list --json 2>/dev/null \| jq '[.[][][]] \| length'` | 714: unit 599, regression 50, integration 17 plus 8 invariant functions, invariant suites 21, fork 19 |
-| `forge test --list --json 2>/dev/null \| jq '[.[][][] \| select(startswith("testFuzz_"))] \| length'` | 45 functions named `testFuzz_*` (256 fuzz runs each, Foundry default) |
-| `forge test --list --json 2>/dev/null \| jq '[.[][][] \| select(startswith("invariant_"))] \| length'` | 29 stateful invariant functions (256 runs x 500 calls, Foundry default); call summaries are in `afterInvariant` hooks |
-| `FORK_RPC_URL=<arbitrum-one-archive-rpc> forge test --match-path "test/fork/*"` | 19 passed at the pinned block 504,522,171 |
-| `FOUNDRY_PROFILE=gas forge test` | 14 gas benchmarks passed, written to `snapshots/*.json`; not part of the 714 |
+| `forge build --sizes` | Exits 0. Runtime bytes: `TradingEngine` 17,500 (7,076 under the 24,576 byte limit), `Vault` 13,443, `TradingStorage` 10,286, `BondDepository` 5,251, `PythChainlinkOracle` 5,120, `SolvencyManager` 4,759, `SynthToken` 3,561, `SpreadManager` 2,660, `AssistantFund` 2,090 |
+| `FORK_RPC_URL= forge test` | 793 tests: 772 passed, 0 failed, 21 skipped (the fork suite) |
+| `forge test --list --json 2>/dev/null \| jq '[.[][][]] \| length'` | 793: unit 645, regression 65, integration 17 plus 8 invariant functions, invariant suites 37, fork 21 |
+| `forge test --list --json 2>/dev/null \| jq '[.[][][] \| select(startswith("testFuzz_"))] \| length'` | 54 functions named `testFuzz_*` (256 runs each, Foundry default): 13,824 fuzz cases per full run |
+| `forge test --list --json 2>/dev/null \| jq '[.[][][] \| select(startswith("invariant_"))] \| length'` | 45 stateful invariant functions (256 runs x 500 calls each, Foundry default): 5,760,000 invariant calls per full run |
+| `FORK_RPC_URL=<arbitrum-one-archive-rpc> forge test --match-path "test/fork/*"` | 21 passed at the pinned block 504,522,171 |
+| `FOUNDRY_PROFILE=gas forge test` | 14 gas benchmarks passed, written to `snapshots/*.json`; not part of the 793 |
 | `forge fmt --check` | Exits 0 |
+| `forge lint src` | 8 `block-timestamp` warnings, all intentional comparisons with `block.timestamp`; no other lint |
 | `FORK_RPC_URL= FOUNDRY_PROFILE=coverage forge coverage --report summary` | Per contract below. The `coverage` profile only lifts the contract size limit, since coverage builds run without the optimizer |
 
 | Contract | Lines | Statements | Branches | Functions |
 | :------- | :---- | :--------- | :------- | :-------- |
 | AssistantFund | 100% (33/33) | 100% (37/37) | 100% (6/6) | 100% (9/9) |
 | BondDepository | 100% (93/93) | 94.92% (112/118) | 75.00% (18/24) | 100% (18/18) |
-| PythChainlinkOracle | 100% (53/53) | 100% (85/85) | 100% (16/16) | 100% (7/7) |
-| SolvencyManager | 100% (44/44) | 100% (57/57) | 100% (10/10) | 100% (6/6) |
+| PythChainlinkOracle | 100% (56/56) | 100% (89/89) | 100% (16/16) | 100% (8/8) |
+| SolvencyManager | 100% (57/57) | 100% (82/82) | 100% (13/13) | 100% (9/9) |
 | SpreadManager | 100% (54/54) | 100% (58/58) | 100% (13/13) | 100% (12/12) |
 | SynthToken | 100% (23/23) | 100% (18/18) | 100% (4/4) | 100% (9/9) |
-| TradingEngine | 100% (280/280) | 99.24% (392/395) | 95.65% (66/69) | 100% (41/41) |
+| TradingEngine | 100% (281/281) | 99.49% (394/396) | 97.06% (66/68) | 100% (41/41) |
 | TradingStorage | 100% (153/153) | 100% (159/159) | 100% (34/34) | 100% (34/34) |
-| Vault | 98.99% (196/198) | 99.17% (240/242) | 100% (27/27) | 100% (50/50) |
+| Vault | 100% (203/203) | 99.59% (245/246) | 96.67% (29/30) | 100% (51/51) |
 | FundingLib | 100% (16/16) | 100% (28/28) | 100% (4/4) | 100% (3/3) |
 | OpenPnlLib | 100% (21/21) | 100% (32/32) | 100% (5/5) | 100% (4/4) |
 
-The protocol invariant suite runs the whole system (engine, vault, AssistantFund, SolvencyManager,
-bonding) with `MockOracle`. It models every settlement and LP or solvency flow and checks the vault and
-reserve balances against the model, that funding credits never exceed charges, that the vault's funding
-exposure stays within the tracked bad debt, that storage holds exactly the open collateral, that escrowed
-shares match pending requests, that an injection never lifts the NAV ratio above 100% and a bond never lifts
-the realised ratio above 100%, that `totalAssets` is the balance minus the snapshot liability, that the open
-PnL aggregates equal the open positions per side, that every snapshot equals a brute-force valuation and
-stays within the excess-loss bound, that no deposit goes through below 100% coverage or on a stale snapshot,
-and that no bonding round opens at a realised ratio of 95% or more. The suite has one pair.
+The branches never taken are untested reverts, listed in [docs/tests/README.md](./docs/tests/README.md#coverage).
+
+The protocol invariant suites run the whole system (engine, vault, AssistantFund, SolvencyManager wired as
+the vault's deposit check, bonding) with `MockOracle` on three pairs with a nonzero confidence band. They
+model every settlement and LP or solvency flow and check the vault and reserve balances against the model,
+that funding credits never exceed charges, that the vault's funding exposure stays within the tracked bad
+debt, that storage holds exactly the open collateral, that escrowed shares match pending requests, that an
+injection never lifts the NAV ratio above 100% and a bond never lifts the realised ratio above 100%, that
+`totalAssets` is the balance minus the snapshot liability, that the open PnL aggregates equal the open
+positions per pair and side, that every snapshot equals a brute-force valuation and stays within the
+excess-loss bound, that deposits follow the rescue rule, and that no bonding round opens at a realised
+ratio of 95% or more. The keeper latency suite runs the same invariants with liquidations one day late; in
+the last run of every one of its 16 campaigns between 8 and 22 of 32 snapshot refreshes had positions past
+100% loss (excess loss `E > 0`, largest `E` between 6,588 and 24,766 USD), from
+`FOUNDRY_INVARIANT_SHOW_METRICS=true forge test --match-contract "^ProtocolKeeperLatencyInvariantTest$" -vv`.
 
 Gas of one call per entry point, from `FOUNDRY_PROFILE=gas forge test` (`snapshots/*.json`), with the real
-`PythChainlinkOracle` on `MockPyth` (no Wormhole signature verification) and the real `SpreadManager`:
+`PythChainlinkOracle` on `MockPyth` (no Wormhole signature verification) and the real `SpreadManager`. CI
+runs the benchmarks as a pass/fail job and does not compare gas values.
 
 | Function | Gas |
 | :------- | --: |
-| `TradingEngine.openTrade` (with TP and SL) | 298,003 |
-| `TradingEngine.closeTrade` (profit) | 129,571 |
-| `TradingEngine.liquidate` | 126,939 |
-| `TradingEngine.executeLimit` (TP) | 158,702 |
-| `Vault.deposit` (fresh snapshot) | 49,605 |
-| `Vault.refreshAndDeposit` | 171,080 |
-| `Vault.requestWithdrawal` | 61,840 |
-| `Vault.executeWithdrawal` (fresh snapshot) | 33,076 |
-| `Vault.refreshAndExecuteWithdrawal` | 156,588 |
-| `Vault.refreshPnlSnapshot`, 1 pair | 126,621 |
-| `Vault.refreshPnlSnapshot`, 20 pairs (`MAX_PAIRS`), a long and a short on each | 640,239 |
-| `SolvencyManager.checkAndAct` (injects the reserve, opens a bonding round) | 66,562 |
-| `SolvencyManager.refreshAndCheckAndAct` (same path) | 199,194 |
-| `BondDepository.bond` | 137,962 |
+| `TradingEngine.openTrade` (with TP and SL) | 300,311 |
+| `TradingEngine.closeTrade` (profit) | 129,691 |
+| `TradingEngine.liquidate` | 127,133 |
+| `TradingEngine.executeLimit` (TP) | 158,896 |
+| `Vault.deposit` (fresh snapshot, runs `checkAndActBeforeDeposit`) | 65,737 |
+| `Vault.refreshAndDeposit` | 187,346 |
+| `Vault.requestWithdrawal` | 61,818 |
+| `Vault.executeWithdrawal` (fresh snapshot) | 33,073 |
+| `Vault.refreshAndExecuteWithdrawal` | 156,611 |
+| `Vault.refreshPnlSnapshot`, 1 pair | 126,647 |
+| `Vault.refreshPnlSnapshot`, 20 pairs (`MAX_PAIRS`), a long and a short on each | 640,759 |
+| `SolvencyManager.checkAndAct` (injects the reserve, opens a bonding round) | 66,606 |
+| `SolvencyManager.refreshAndCheckAndAct` (same path) | 199,375 |
+| `BondDepository.bond` | 137,037 |
 
 **Fork tests.** `test/fork/PythChainlinkOracle.fork.t.sol` runs against Arbitrum One at
 `FORK_BLOCK_NUMBER` (default 504,522,171), a block right after an on-chain Pyth update of BTC/USD and
 ETH/USD, so the stored prices are fresh and no Hermes call or `ffi` is needed (`ffi = false`). It checks
 that every address has code, that the Pyth proxy runs the implementation installed by the Pyth Core
-upgrade, the update fee (0 wei), a recorded signed update, the sequencer uptime feed, and an open and
-close through `TradingEngine`.
+upgrade, the update fee (0 wei), a recorded signed update, the sequencer uptime feed and its grace period
+(openings refused, closes allowed), an open and close through `TradingEngine`, and a snapshot refresh and
+`refreshAndDeposit` on the vault.
+
+**Static analysis.** Slither 0.11.6 and Aderyn 0.6.8 at commit `2dd5562` (commands in
+[docs/tests/README.md](./docs/tests/README.md#static-analysis)). Slither: 196 results, of which 14 are false
+positives and 182 accepted by design; 2 results of the start-of-round run were fixed. Aderyn: 68 instances
+(3 High issues, 8 Low), of which 3 are false positives and 65 accepted by design; 4 instances were fixed.
+Every result has a verdict and a reason in the [triage table](./docs/tests/README.md#triage).
 
 ---
 
 ## Review notes
 
 Findings from the round 1 review, fixed in round 2 on branch `fix/review-findings` (entries 1 to 14) and in
-round 2b on branch `fix/open-pnl-nav` (entries 15 and 16). The tests named `test_Regression_*` (and
-`testFuzz_Regression_*`) failed against the code before their fix; the other tests in the same files pass
-before and after.
+round 2b on branch `fix/open-pnl-nav` (entries 15 and 16), and the round 3 hardening on branch
+`hardening/final` (entries 17 to 25). The tests named `test_Regression_*` (and `testFuzz_Regression_*`)
+failed against the code before their fix; the other tests in the same files pass before and after.
 
 1. **Funding paid by the vault, not normalised (High).** Cause: the index moved by the absolute USD
    imbalance (a 1,000 USD imbalance gave 3.6% of notional per hour) and settled against the vault, so a
@@ -329,31 +367,37 @@ before and after.
    Arbitrum One at a pinned block without Hermes, `ffi = false`. Tests:
    `test/regression/SequencerRegression.t.sol`, `test/fork/PythChainlinkOracle.fork.t.sol`. Commits
    `b657eb9`, `2aa12c2`.
-5. **No global leverage cap.** Fix: `MAX_LEVERAGE = 100` in pair configuration and on open. Tests:
+5. **No global leverage cap.** Cause: leverage was limited only by each pair's owner-set `maxLeverage`. Fix: `MAX_LEVERAGE = 100` in pair configuration and on open. Tests:
    `test/regression/LeverageRegression.t.sol`. Commit `c7e702f`.
 6. **Opening guard (Low).** Cause: the guard used the open spread and the gross collateral, so with a
    50 BPS spread a 100x position could be liquidated in the block it opened. Fix: close spread at the
    post-open OI and collateral net of the open fee. Tests: `test/regression/OpenGuardRegression.t.sol`,
    and `test_OpenTrade_RevertWhenPreLiquidatable`, which reverted on slippage instead of the guard. Commit
    `dc027f8`.
-7. **Zero liquidator reward past 100% loss (Medium).** Fix: reward `max(10% of remaining, 0.5% of
+7. **Zero liquidator reward past 100% loss (Medium).** Cause: the reward was 10% of the collateral left
+   after the loss, which is zero once the loss reaches the collateral, so nobody was paid to liquidate
+   positions past 100% loss. Fix: reward `max(10% of remaining, 0.5% of
    collateral)`, paid from the position's collateral. Tests:
    `test/regression/LiquidationRewardRegression.t.sol`. Commit `977ba1e`.
-8. **Linear `deleteTrade` (Low).** Fix: swap and pop with the position stored in `Trade.userIndex`. Tests:
+8. **Linear `deleteTrade` (Low).** Cause: `deleteTrade` searched the user's trade list, so a user with
+   many open trades made each of its liquidations more expensive. Fix: swap and pop with the position stored in `Trade.userIndex`. Tests:
    `test/regression/DeleteTradeRegression.t.sol`. Commit `7475469`.
-9. **Force-sent ETH paid to the next caller (Low).** Fix: refund `msg.value` minus the fee actually paid,
+9. **Force-sent ETH paid to the next caller (Low).** Cause: the engine refunded its whole ETH balance, so
+   ETH sent to it outside a call went to the next caller. Fix: refund `msg.value` minus the fee actually paid,
    with the entry balance kept in transient storage. Tests: `test/regression/EthRefundRegression.t.sol`.
    Commit `52aa4ee`.
-10. **`updateTp`/`updateSl` without `nonReentrant` (Low).** Fix: guard added. Tests:
+10. **`updateTp`/`updateSl` without `nonReentrant` (Low).** Cause: both call the oracle and refund ETH
+    without the guard the other entry points have. Fix: guard added. Tests:
     `test/regression/ReentrancyRegression.t.sol`. Commit `a236103`.
-11. **Bonding round not closed when CR recovers (Low).** Fix: a bond takes at most the current deficit and
+11. **Bonding round not closed when CR recovers (Low).** Cause: a round closed only when its cap was used
+    up, so after the vault recovered by other means bonders could keep buying discounted $SYNTH. Fix: a bond takes at most the current deficit and
     closes the round when it covers it; `checkAndAct` closes the round at CR >= 100%. Tests:
     `test/regression/BondingRoundRegression.t.sol`. Commit `6668365`.
-12. **Stale NatSpec and unused error (Info).** `TradingEngine` header (fixed spread), `IOracle` (custom
+12. **Stale NatSpec and unused error (Info).** Cause: comments described earlier designs. Fix: `TradingEngine` header (fixed spread), `IOracle` (custom
     DON example), `BondDepository` header (keeper-maintained price); `ZeroFeeRecipient` removed. Commits
     `e42bd1b`, `6668365`, `8726c55`.
-13. **A winning close reverts when the vault is short of USDC (Info).** No code change; documented under
-    Known limitations.
+13. **A winning close reverts when the vault is short of USDC (Info).** Cause: `sendPayout` needs the USDC
+    in the vault. No code change; documented under Known limitations.
 14. **Test suite (Info).** Weak or tautological invariants replaced, call summaries moved to
     `afterInvariant`, tolerances tightened, `test_CloseTrade_UsesSpreadOnClose` given an assertion,
     compiler warnings removed. Commits `37119cf`, `7a51384`, `857580a`, `0577333`, `aaceb08`.
@@ -370,29 +414,73 @@ before and after.
     aggregate tests in `test/unit/TradingStorage.t.sol`. Commits `c359a1b`, `e225c14`.
 16. **LP timing, the ratio: deposits below 100% and solvency triggers on the balance.** Cause: the
     collateralization ratio ignored open PnL, a deposit below 1.0 took part of the next injection (in
-    `test_Regression_DepositRevertsBelowFullCoverage_ThenInjectionRestoresPar`, run against commit
+    `test_Regression_DepositBelowPar_InjectionSettledFirst`, run against commit
     `e225c14`, a 1,000,000 USDC deposit at a 90% ratio was worth 1,052,631.578947 USDC after a 100,000 USDC
     injection), and once the ratio included open PnL, an unrealised move could have opened a discounted
     $SYNTH round. Fix: the ratio (LP
-    principal coverage ratio) uses the NAV; deposits and mints revert below 100% (`CoverageBelowPar`) and
-    `maxDeposit`/`maxMint` return 0; the injection follows the NAV ratio with a fresh snapshot; bonding
+    principal coverage ratio) uses the NAV; deposits and mints reverted below 100% (`CoverageBelowPar`,
+    replaced in round 3 by entry 18); the injection follows the NAV ratio with a fresh snapshot; bonding
     opens, sizes, clamps and closes on the realised ratio. Tests:
     `test/regression/DepositCoverageRegression.t.sol`, `test/regression/SolvencySplitRegression.t.sol`,
     `test/unit/SolvencyManager.t.sol`. Commits `1ccbe10`, `d83c52b`.
+17. **The sequencer grace period blocked closes and liquidations (Medium).** Cause: for one hour after the
+    L2 sequencer came back, `getPrice` reverted for every caller, so closes, TP/SL execution, liquidations,
+    snapshot refreshes, LP withdrawals and `checkAndAct` were blocked; a position cannot be topped up, so a
+    blocked liquidation could let it run past 100% loss at the vault's expense. Fix: `getPrice` reverts only
+    while the sequencer is down; `IOracle.checkOpenAllowed`, called by `openTrade` only, reverts during the
+    grace period. Tests: `test/regression/SequencerGraceScopeRegression.t.sol` (six tests failed before with
+    `SequencerGracePeriodNotOver`), `test_Fork_TradingEngine_GracePeriodClosesButDoesNotOpen` (failed before
+    on the fork). Commit `16baf19`.
+18. **Deposits frozen below 100% coverage with no rescue left (Medium).** Cause: round 2b reverted every
+    deposit and mint below a 100% coverage ratio; with the AssistantFund empty and no bonding round due,
+    nothing lifted the ratio, so deposits stayed closed with no time limit. Fix: every deposit path first calls
+    `SolvencyManager.checkAndActBeforeDeposit`, so the pending AssistantFund injection lands and shares are
+    minted at the post-injection NAV; the deposit reverts with `BondingRoundOpen` only while a bonding round is
+    open or due; `maxDeposit` and `maxMint` follow a view mirror of that check. Tests:
+    `test/regression/DepositRuleRegression.t.sol` (six tests failed before with `CoverageBelowPar`),
+    `test/regression/DepositCoverageRegression.t.sol` (rewritten; five failed before),
+    `test/unit/VaultDepositRule.t.sol`, invariant `DepositsFollowRescueRule`. Commit `21d9361`.
+19. **`setFundingFactor` wrote state after external calls (Slither `reentrancy-no-eth`, Aderyn H-2).**
+    Cause: it accrued every pair through `TradingStorage` and then wrote the factor. Fix: it writes the factor
+    first and accrues at the old factor passed as a parameter; no behaviour change,
+    `test_SetFundingFactor_AccruesElapsedTimeAtOldFactor` passes before and after and neither tool reports it.
+    Commit `52d7c2b`.
+20. **Unreachable `FeeExceedsCollateral` check (Info).** Cause: the open fee rate is a constant and leverage
+    above 100 reverts before the fee is computed, so the fee is at most 8% of the collateral. Fix: check and
+    error removed. Test: `testFuzz_OpenFee_BelowCollateralForEveryAcceptedLeverage`. Commit `0dcdd6c`.
+21. **Entry funding index left after a delete (Info).** Cause: `deleteTrade` kept `_tradeFundingIndex`;
+    trade IDs are never reused, so no trade could read another's value. Fix: cleared on delete. Test:
+    `test_DeleteTrade_ClearsTradeFundingIndex` (failed before: `42000000000000000000 != 0`). Commit
+    `6d99400`.
+22. **Downcasts that truncated (Low).** Cause: three casts truncated instead of reverting: the oracle's
+    normalized price for a feed with a positive exponent, a bond's $SYNTH above 2^128, and the open-direction
+    spread price near 2^128. Fix: `SafeCastLib` for those three; every other downcast or signed cast carries
+    a one-line comment with its bound and the `file:line` that enforces it. Tests:
+    `test/unit/TypecastBounds.t.sol` (three tests failed before). Commit `4145744`.
+23. **`msg.value` inside the snapshot refresh loop (Slither `msg-value-loop`, 4 results).** Cause: flagged
+    because `msg.value` appears in a loop. Checked: it is sent to the first priced pair only. No code change.
+    Test: `test/unit/VaultRefreshFee.t.sol`. Commit `2d88c2d`.
+24. **`maxWithdraw` and `maxRedeem` reported as not covered (Info).** Cause: forge coverage attributed no
+    hits to their `return 0;` lines although the functions ran. Fix: empty bodies returning the default 0.
+    Commit `120adca`.
+25. **`collateralizationRatio` public without internal use (Aderyn L-9, Info).** Fix: `external`. Commit
+    `2dd5562`.
 
 ---
 
 ## Getting started
 
-Requirements: [Foundry](https://getfoundry.sh/), Node.js with npm, Git. For the fork tests, an Arbitrum
-One RPC URL that serves historical state (archive).
+Requirements: [Foundry](https://getfoundry.sh/) (CI uses the `stable` toolchain; this review used forge
+1.7.1), Node.js 22.14 or later with npm (the Pyth SDK declares `engines: node >=22.14.0`; CI uses Node 22),
+Git. For the fork tests, an Arbitrum One RPC URL that serves historical state (archive).
 
 ```bash
 git clone --recursive https://github.com/GushALKDev/evm-synthetic-trading-protocol
 cd evm-synthetic-trading-protocol
-npm ci          # required: installs @pythnetwork/pyth-sdk-solidity, remapped from node_modules/
+npm ci                  # required: installs @pythnetwork/pyth-sdk-solidity, remapped from node_modules/
 forge build
-forge test      # mock mode: fork tests skip when FORK_RPC_URL is unset or empty
+FORK_RPC_URL= forge test   # mock mode: the fork tests skip
+FORK_RPC_URL=<arbitrum-one-archive-rpc> forge test --match-path "test/fork/*"   # fork mode
 ```
 
 Forge loads a `.env` file from the project root automatically. Mock mode therefore needs
@@ -401,12 +489,14 @@ Forge loads a `.env` file from the project root automatically. Mock mode therefo
 Other commands:
 
 ```bash
-forge test --match-path "test/regression/*"    # round 2 regression tests
+forge test --match-path "test/regression/*"    # regression tests for the review findings
 forge test --match-path "test/invariant/*"     # invariant suites
 forge test --match-path "test/integration/*"   # full wired system
-FOUNDRY_PROFILE=coverage forge coverage --report summary   # coverage profile lifts the size limit
+FORK_RPC_URL= FOUNDRY_PROFILE=coverage forge coverage --report summary   # coverage profile lifts the size limit
 FOUNDRY_PROFILE=gas forge test                 # gas benchmarks, written to snapshots/
-FORK_RPC_URL=<arbitrum-one-rpc> forge test --match-path "test/fork/*"
+FORGE_SNAPSHOT_CHECK=true FOUNDRY_PROFILE=gas forge test   # fails if a value differs from snapshots/
+forge fmt --check
+forge lint src
 ```
 
 | Variable | Used by | Required |

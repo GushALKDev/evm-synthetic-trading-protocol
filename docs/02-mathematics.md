@@ -283,8 +283,19 @@ Each pair keeps one cumulative index per side (WAD per unit of notional, positiv
 $$\Delta index_{heavy} = \left\lceil \frac{rate_{hour} \times dt}{3600} \right\rceil, \qquad \Delta index_{light} = -\left\lfloor \frac{\Delta index_{heavy} \times OI_{heavy}}{OI_{light}} \right\rfloor$$
 
 so `OI_light x |Δindex_light| <= OI_heavy x Δindex_heavy`: the light side is credited at most what the
-heavy side is charged. The per-unit rate on the light side is `rate_hour x OI_heavy / OI_light`, which is
-large when the light side is small, but its total is bounded by what the heavy side pays.
+heavy side is charged (`testFuzz_IndexDeltas_CreditsNeverExceedCharges` in `test/unit/FundingLib.t.sol`).
+
+### Thin-side funding
+
+The per-unit rate on the light side is
+
+$$rate_{light} = rate_{hour} \times \frac{OI_{heavy}}{OI_{light}}$$
+
+When the light side is small it is large: with the ceiling of 0.01% per hour (`MAX_FUNDING_RATE_PER_HOUR`)
+and the heavy side 100 times the light side, each unit of the light side receives 1% of its notional per
+hour. The total credited to the light side is still at most what the heavy side pays, `rate_hour x
+OI_heavy` per hour, so the property moves value between traders and does not draw on the vault. A trader who
+holds both sides nets its own funding (`test_Regression_Funding_CannotDrainVaultWithOffsettingPositions`).
 
 ### Amount owed by a position
 
@@ -361,7 +372,10 @@ $$CR_{realised} = \left\lfloor \frac{balance \times 10^{12} \times 10^{18}}{tota
 Since `totalAssets <= balance`, `CR_realised >= CR` and `deficit_realised <= deficit`
 (`testFuzz_Ratios_RealisedAtLeastNav` in `test/unit/VaultNav.t.sol`).
 
-Deposits and mints revert with `CoverageBelowPar` while `CR < 100%`, and `maxDeposit`/`maxMint` return 0.
+Deposits and mints first run `SolvencyManager.checkAndActBeforeDeposit`, so a pending injection lands before
+shares are minted at the post-injection NAV, and they revert with `BondingRoundOpen` while a bonding round is
+open or due; otherwise they are allowed at any `CR`. `maxDeposit` and `maxMint` return 0 in the same cases
+(`SolvencyManager.bondingRoundOpenAfterCheck`).
 
 `SolvencyManager.checkAndAct()`:
 

@@ -112,7 +112,8 @@ exceed the vault balance.
 - **Snapshot age window.** Deposits and withdrawals can use a snapshot up to `maxPnlSnapshotAge` old (60 s by
   default, owner-set up to 3,600 s) if no position opened or closed since.
 - **Deposits have no lock.** A new LP can enter while traders are net losing and share in those losses.
-  Deposits revert below 100% coverage, which can last indefinitely
+  Deposits run the pending AssistantFund injection first and revert only while a bonding round is open or
+  due, which lasts until the round fills or the realised ratio recovers
   ([Guide 7](./07-vault-ssl.md#known-biases-and-the-deposit-freeze)).
 - **Winning closes can revert.** If the vault holds less USDC than the profit owed, `closeTrade` and
   `executeLimit` revert with `InsufficientVaultBalance` until the vault is refilled. No code change in
@@ -180,7 +181,9 @@ The oracle design and the dropped custom oracle network are described in
   oracle outage or a sustained Pyth/Chainlink disagreement freezes all positions. Funding keeps accruing
   and is settled when prices return.
 - There is no price circuit breaker, volume limit or automatic pause.
-- The sequencer grace period also blocks closes and liquidations for one hour after an outage.
+- While the L2 sequencer is down every price read reverts. During the one-hour grace period after it comes
+  back only openings are blocked; closes, TP/SL and liquidations work, so positions can be closed or
+  liquidated before they run past 100% loss.
 - The 3% deviation band is wide compared to the spread and fees, and the caller chooses the update within
   the `maxPriceAge` window.
 

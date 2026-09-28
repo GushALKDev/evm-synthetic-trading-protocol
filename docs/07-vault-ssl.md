@@ -36,19 +36,36 @@ conservative NAV (section 2). They revert:
 
 - while the vault is paused (`EnforcedPause`);
 - with a stale PnL snapshot (`StalePnlSnapshot`), section 2;
-- while the LP principal coverage ratio is below 100% (`CoverageBelowPar`), so a new LP cannot buy shares
-  below 1.0 and take part of the next reserve injection or bond proceeds.
+- while a bonding round is open or due (`BondingRoundOpen`).
+
+Before minting, every deposit path calls `SolvencyManager.checkAndActBeforeDeposit`: the pending AssistantFund
+injection lands first, so the depositor buys at the post-injection NAV and does not take part of it, and a
+round that is open, or that the check had to open because bonding is due, makes the deposit revert (the
+revert also unwinds that activation). Bond proceeds are not instantaneous, which is why a due round blocks
+deposits instead of being settled in the same call. Below 100% coverage a deposit is otherwise allowed at the
+conservative NAV, so deposits do not freeze once no rescue is left. Plain `deposit` and `mint` run the same
+step as the refresh-and-act variants: they already need a fresh snapshot, so the pending injection is
+defined, and reverting instead would keep deposits closed until someone called `checkAndAct`. With no
+SolvencyManager set on the vault the step is skipped.
 
 `refreshAndDeposit(assets, receiver, priceUpdate)` and `refreshAndMint(shares, receiver, priceUpdate)` are
 payable: they refresh the snapshot with the caller's Pyth update and then deposit or mint in the same
 transaction, and refund the ETH the call added beyond the oracle fee. Deposits have no lock.
+
+**Note for ERC-4626 integrators.** While trades are open, `deposit`, `mint` and `executeWithdrawal` need a PnL
+snapshot at most `maxPnlSnapshotAge` old with no open or close since, and any trade invalidates it, so a
+plain call usually reverts with `StalePnlSnapshot`. Use the refresh-and-act entry points
+(`refreshAndDeposit`, `refreshAndMint`, `refreshAndExecuteWithdrawal`), which refresh and act in one
+transaction; a trade between a separate refresh and a separate action makes that action revert
+(`test_TradeBetweenRefreshAndDeposit` in `test/unit/EdgeCases.t.sol`). `maxDeposit` and `maxMint` return 0
+whenever the plain call would revert.
 
 ```mermaid
 sequenceDiagram
     participant LP
     participant Vault as Vault.sol
     LP->>Vault: refreshAndDeposit(1000 USDC, receiver, priceUpdate)
-    Note over Vault: refresh the PnL snapshot, then check coverage >= 100%
+    Note over Vault: refresh the PnL snapshot, run the pending injection, revert if a bonding round is open
     Note over Vault: shares = previewDeposit(1000 USDC) at the NAV, rounded down
     Vault-->>LP: sUSDC minted to receiver, ETH surplus refunded
 ```
@@ -115,7 +132,7 @@ function _executeWithdrawal() internal {
 
 | Function | Returns | Why |
 |:---|:---|:---|
-| `maxDeposit`, `maxMint` | 0 while paused, with a stale snapshot or below 100% coverage; otherwise Solady's default (`type(uint256).max`) | `deposit` and `mint` revert in those states |
+| `maxDeposit`, `maxMint` | 0 while paused, with a stale snapshot, or while a bonding round is open or due (`SolvencyManager.bondingRoundOpenAfterCheck`); otherwise Solady's default (`type(uint256).max`) | `deposit` and `mint` revert in those states (`test/unit/VaultDepositRule.t.sol` checks each against its action over those states) |
 | `maxWithdraw`, `maxRedeem` | 0 | `withdraw` and `redeem` always revert |
 
 `test/unit/Vault.t.sol` checks each of them against its action (`test_MaxDeposit_MatchesDeposit`,
@@ -133,8 +150,8 @@ The lock is meant to stop LPs from exiting just before a known trader payout. As
 - Requested shares are escrowed and cannot be moved to another address while the request is pending.
 - Withdrawals and deposits are priced at the conservative NAV, which subtracts unrealised trader profit, so
   an LP cannot exit ahead of a known trader profit at a price that ignores it.
-- Deposits are blocked below 100% coverage, so a new LP cannot enter ahead of a reserve injection or bond
-  proceeds.
+- A deposit runs the pending reserve injection before it mints and is refused while bonding is open or due,
+  so a new LP cannot take part of a rescue that is pending when it deposits.
 - Current limitation: deposits have no lock and the NAV does not add net trader losses, so a new LP can still
   enter while traders are net losing and share in those losses when they are realised (section 2).
 
@@ -164,8 +181,8 @@ trade count and the positions nonce packed into the slot of `tradingEngine` and 
 `IOracle.getPrice` with the same checks as a trade (age, confidence, Chainlink deviation and heartbeat,
 sequencer). The update data and `msg.value` go to the first priced pair; one Pyth update can carry every
 feed, and the later pairs read the prices it stored. Only `msg.value` minus the fee paid is refunded. Gas
-at the bound, 20 pairs each with a long and a short: 640,239 (`refreshPnlSnapshot_20pairs` in
-`snapshots/Vault.json`, `FOUNDRY_PROFILE=gas forge test`); one pair: 126,621 (`refreshPnlSnapshot_1pair`).
+at the bound, 20 pairs each with a long and a short: 640,759 (`refreshPnlSnapshot_20pairs` in
+`snapshots/Vault.json`, `FOUNDRY_PROFILE=gas forge test`, commit `2dd5562`); one pair: 126,647 (`refreshPnlSnapshot_1pair`).
 
 **Freshness.** `deposit`, `mint` and `executeWithdrawal` revert with `StalePnlSnapshot` unless no trade is
 open, or the snapshot is at most `maxPnlSnapshotAge` old and no position was opened or closed since it was
@@ -229,22 +246,24 @@ until they are liquidated (optimistic, bounded by the excess loss `E`), and does
 (new LPs share in them). Formulas and a worked example are in
 [Guide 2, section 8.2](./02-mathematics.md#82-known-biases-of-the-nav).
 
-Deposits stay blocked for as long as the coverage ratio is below 100%. That state can last indefinitely:
-with the AssistantFund empty, the realised ratio at or above 95% (no bonding round), profitable positions
-left open and a static price, nothing moves the ratio. It ends when:
+Deposits are refused only while a bonding round is open or due: a round is open, or the realised ratio is
+below 95% and the AssistantFund cannot cover the realised deficit. Below 100% coverage with no rescue left
+(reserve empty, no bonding due) deposits go through at the NAV, which is what ended the round 2b freeze
+(`test_Regression_DepositRule_BelowParWithoutRescueAllowed`). The refusal can still last as long as a round
+stays open: it ends when
 
-- the price moves against the open profit. Closing the profitable positions only adds back what the NAV
-  overstated: the payout is at most what the snapshot counted, less the close fee, the profit above the 9x
-  cap, the confidence edge and the close spread;
-- fees come in: 80% of each open and close fee goes to the vault and 20% to the AssistantFund, which
-  `checkAndAct` injects up to the NAV deficit. At 0.08% of notional per open and per close
-  (`OPEN_FEE_BPS`, `CLOSE_FEE_BPS`), a NAV deficit `D` needs about `D x 10,000 / 8` of traded notional
-  when nothing else changes;
-- the realised ratio falls below 95% and a bonding round raises USDC. A round is sized on the realised
-  deficit, so it can end with the realised ratio at 100% and the NAV ratio still below it; a round that is
-  open but finds no bonders (for example with an unattractive `referencePrice`) raises nothing.
+- the round fills, or the realised ratio returns to 100% through fees or trader losses and `checkAndAct`
+  closes the round;
+- a round that finds no bonders (for example with an unattractive `referencePrice`) raises nothing, so the
+  refusal lasts until one of the above happens.
 
-Withdrawals keep working in that state and pay the NAV. There is no owner override for the deposit rule.
+The NAV coverage ratio itself can stay below 100% with profitable positions open at a static price; closing
+those positions only adds back what the NAV overstated (the close fee, profit above the 9x cap, the confidence
+edge and the close spread), and fee income lifts it by about `D x 10,000 / 8` of traded notional for a
+deficit `D` at the 0.08% open and close fees (`OPEN_FEE_BPS`, `CLOSE_FEE_BPS`). That no longer blocks deposits.
+
+Withdrawals keep working while deposits are refused and pay the NAV. There is no owner override for the deposit
+rule.
 
 ---
 
@@ -308,9 +327,9 @@ function injectFunds(uint256 _amount) external onlySolvencyManager {
 }
 ```
 
-An injection raises the share price for everyone holding shares at that moment. Injections only happen
-below 100% coverage, where deposits revert, so no LP can enter just before one at a price below 1.0
-(`test_Regression_DepositRevertsBelowFullCoverage_ThenInjectionRestoresPar`).
+An injection raises the share price for everyone holding shares at that moment. A deposit runs the pending
+injection before it mints, so no LP can buy just before one and take part of it
+(`test_Regression_DepositBelowPar_InjectionSettledFirst`, `test_Regression_DepositRule_InjectionSettledBeforeDeposit`).
 
 ### Layer 3: BondDepository and $SYNTH
 
@@ -389,6 +408,11 @@ uint256 public constant CRITICAL_CR = 95e16; // 95%
 - With a stale snapshot the injection is skipped and bonding still runs; `refreshAndCheckAndAct(priceUpdate)`
   refreshes first and forwards the ETH surplus refund to the caller.
 - At a realised ratio of 100% or more an open bonding round is closed before the healthy and warning checks.
+- Deposits call `checkAndActBeforeDeposit`, which runs the same logic and reports whether a round is open
+  afterwards; `bondingRoundOpenAfterCheck` predicts that result without acting and backs `maxDeposit` and
+  `maxMint`. The call runs inside the vault's `nonReentrant` deposit functions and reaches only vault views,
+  `AssistantFund.injectFunds` and the BondDepository round functions. Every deposit therefore emits
+  `Healthy`, `Warning` or the rescue events of that check.
 - There is no buyback above 110% and no "growth phase" ordering that prefers bonding over the reserve;
   both were described in earlier designs.
 
