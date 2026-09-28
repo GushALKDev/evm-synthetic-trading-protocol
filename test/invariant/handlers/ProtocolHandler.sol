@@ -7,6 +7,7 @@ import {TradingEngine} from "../../../src/TradingEngine.sol";
 import {TradingStorage} from "../../../src/TradingStorage.sol";
 import {Vault} from "../../../src/Vault.sol";
 import {FundingLib} from "../../../src/libraries/FundingLib.sol";
+import {OpenPnlLib} from "../../../src/libraries/OpenPnlLib.sol";
 import {MockOracle} from "../../mocks/MockOracle.sol";
 import {ERC20} from "solady/tokens/ERC20.sol";
 import {IMintableUSDC} from "./IMintableUSDC.sol";
@@ -15,7 +16,8 @@ import {IMintableUSDC} from "./IMintableUSDC.sol";
  * @title ProtocolHandler
  * @author GushALKDev
  * @notice Trading side of the protocol invariant suite: opens, closes, liquidations, TP/SL execution and
- *         TP/SL updates, with an independent model of every settlement.
+ *         TP/SL updates, with an independent model of every settlement, and refreshes of the Vault's PnL
+ *         snapshot checked against a brute-force valuation of every open position.
  * @dev The model recomputes each settlement from the documented formulas (spread, PnL rounding, 9x cap on
  *      price PnL, funding after the cap, close fee, executor reward, liquidator reward) and the funding the
  *      engine reports for the position, then records the Vault's side of it in ghost variables. The suite
@@ -89,6 +91,14 @@ contract ProtocolHandler is CommonBase, StdUtils {
     uint256 public ghostFundingCollected;
     uint256 public ghostFundingCredited;
     uint256 public ghostFundingBadDebt;
+
+    uint256 public ghostRefreshes;
+    /// @notice Refreshes whose snapshot differs from the brute-force aggregate valuation
+    uint256 public ghostSnapshotMismatches;
+    /// @notice Refreshes where snapshot + excess loss is below the exact per-position clamped PnL
+    uint256 public ghostSnapshotNotConservative;
+    /// @notice Largest excess loss (losses beyond each position's collateral, 18 decimals) seen at a refresh
+    uint256 public ghostMaxExcessLoss;
 
     /// @dev A settlement action that settles nothing reverts, so in the forge metrics table calls - reverts = settlements
     error NotSettled();
@@ -229,6 +239,41 @@ contract ProtocolHandler is CommonBase, StdUtils {
         uint128 sl = _limitPrice(trade.isLong, false, ORACLE.peekPrice(PAIR_INDEX), trade.openPrice, _slSeed);
         vm.prank(trade.user);
         ENGINE.updateSl(tradeId, sl, EMPTY_UPDATE);
+    }
+
+    /**
+     * @notice Anyone refreshes the Vault's PnL snapshot; the result is checked against the open positions
+     * @dev Two checks at the oracle price (MockOracle conf is 0):
+     *      1. snapshot == toUsdcUp(pairPnl(totals built position by position)), exactly;
+     *      2. snapshot * 1e12 + E >= sum over positions of max(pnl_i, -collateral_i), with pnl_i rounded against
+     *         the trader and E the excess loss sum of max(0, -pnl_i - collateral_i). The side clamp lets
+     *         positions past 100% loss offset winners; E bounds that. Tolerance 0.
+     */
+    function refreshSnapshot() external countCall("refreshSnapshot") {
+        VAULT.refreshPnlSnapshot(EMPTY_UPDATE);
+        ghostRefreshes++;
+        (int128 netPnl,,) = VAULT.pnlSnapshot();
+        uint128 price = ORACLE.peekPrice(PAIR_INDEX);
+        if (int256(netPnl) != OpenPnlLib.toUsdcUp(OpenPnlLib.pairPnl(price, 0, bruteForceTotals()))) ghostSnapshotMismatches++;
+
+        (int256 exact, uint256 excess) = _exactClampedPnl(price);
+        if (int256(netPnl) * 1e12 + int256(excess) < exact) ghostSnapshotNotConservative++;
+        if (excess > ghostMaxExcessLoss) ghostMaxExcessLoss = excess;
+    }
+
+    /// @dev Per-position PnL at _price rounded against the trader, clamped at -collateral; excess is what the clamp cut
+    function _exactClampedPnl(uint128 _price) internal view returns (int256 exact, uint256 excess) {
+        uint256 len = openTradeIds.length;
+        for (uint256 i; i < len; ++i) {
+            TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(openTradeIds[i]);
+            int256 pnl = _pnl(uint256(trade.collateral) * trade.leverage * 1e12, trade.openPrice, _price, trade.isLong);
+            int256 floor = -int256(uint256(trade.collateral) * 1e12);
+            if (pnl < floor) {
+                excess += uint256(floor - pnl);
+                pnl = floor;
+            }
+            exact += pnl;
+        }
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -372,6 +417,25 @@ contract ProtocolHandler is CommonBase, StdUtils {
 
     function openTradeCount() external view returns (uint256) {
         return openTradeIds.length;
+    }
+
+    /// @notice Open totals of the pair rebuilt position by position (sizes, collateral, quantities per side)
+    function bruteForceTotals() public view returns (OpenPnlLib.PairTotals memory t) {
+        uint256 len = openTradeIds.length;
+        for (uint256 i; i < len; ++i) {
+            TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(openTradeIds[i]);
+            uint256 sizeWad = uint256(trade.collateral) * trade.leverage * 1e12;
+            uint256 q = OpenPnlLib.quantity(sizeWad, trade.openPrice, trade.isLong);
+            if (trade.isLong) {
+                t.longSize += sizeWad;
+                t.longCollateral += trade.collateral;
+                t.longQuantity += q;
+            } else {
+                t.shortSize += sizeWad;
+                t.shortCollateral += trade.collateral;
+                t.shortQuantity += q;
+            }
+        }
     }
 
     /// @notice Funding accrued by open positions at the stored side indexes (payer +, receiver -)

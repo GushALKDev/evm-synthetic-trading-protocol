@@ -14,6 +14,7 @@ import {MockOracle} from "../mocks/MockOracle.sol";
 import {MockSpreadManager} from "../mocks/MockSpreadManager.sol";
 import {ProtocolHandler} from "./handlers/ProtocolHandler.sol";
 import {LiquidityHandler} from "./handlers/LiquidityHandler.sol";
+import {OpenPnlLib} from "../../src/libraries/OpenPnlLib.sol";
 import {ERC20} from "solady/tokens/ERC20.sol";
 
 contract MockUSDC is ERC20 {
@@ -39,9 +40,10 @@ contract MockUSDC is ERC20 {
  * @author GushALKDev
  * @notice Stateful invariants over the whole protocol with MockOracle and MockSpreadManager: trading,
  *         LP deposits and withdrawals, the AssistantFund as treasury, the SolvencyManager and bonding.
- * @dev Two handlers drive the system: ProtocolHandler (trading, with a settlement model) and
- *      LiquidityHandler (LP flows, time, price, pause, solvency actions). The Vault starts with 1,000,000
- *      USDC from an LP that never withdraws.
+ * @dev Two handlers drive the system: ProtocolHandler (trading, with a settlement model, and PnL snapshot
+ *      refreshes checked against a brute-force valuation) and LiquidityHandler (LP flows with and without a
+ *      snapshot refresh, time, price moves in both directions, pause, solvency actions). The Vault starts with
+ *      1,000,000 USDC from an LP that never withdraws.
  */
 contract ProtocolInvariantTest is StdInvariant, Test {
     TradingEngine engine;
@@ -203,12 +205,56 @@ contract ProtocolInvariantTest is StdInvariant, Test {
     }
 
     /**
-     * @notice A rescue (injection or bond) never lifts CR above 100%
-     * @dev Both are sized off collateralizationDeficit = totalSupply / 1e12 - totalAssets, so the resulting
-     *      CR is floor(totalSupply / 1e12) * 1e30 / totalSupply <= 1e18. Tolerance 0.
+     * @notice A rescue never lifts its own ratio above 100%: an injection the NAV ratio, a bond the realised ratio
+     * @dev The injection is sized off collateralizationDeficit = totalSupply / 1e12 - totalAssets (NAV), a bond
+     *      off realisedCollateralizationDeficit = totalSupply / 1e12 - balance, so the resulting ratio is
+     *      floor(totalSupply / 1e12) * 1e30 / totalSupply <= 1e18. Tolerance 0.
      */
     function invariant_RescueNeverOvershootsTarget() public view {
-        assertLe(liquidity.ghostMaxCrAfterRescue(), 1e18, "rescue lifted CR above 100%");
+        assertLe(liquidity.ghostMaxNavCrAfterInjection(), 1e18, "injection lifted the NAV ratio above 100%");
+        assertLe(liquidity.ghostMaxRealisedCrAfterBond(), 1e18, "bond lifted the realised ratio above 100%");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                          OPEN PNL AND NAV
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice The open position aggregates equal the open positions rebuilt one by one, per side, exactly
+     * @dev Sizes, collateral and quantities (quantity rounded up for longs, down for shorts per position).
+     *      The suite has one pair.
+     */
+    function invariant_OpenTotalsMatchPositions() public view {
+        OpenPnlLib.PairTotals memory agg = tradingStorage.getPairOpenTotals(0);
+        OpenPnlLib.PairTotals memory brute = handler.bruteForceTotals();
+        assertEq(agg.longSize, brute.longSize, "long size");
+        assertEq(agg.longCollateral, brute.longCollateral, "long collateral");
+        assertEq(agg.longQuantity, brute.longQuantity, "long quantity");
+        assertEq(agg.shortSize, brute.shortSize, "short size");
+        assertEq(agg.shortCollateral, brute.shortCollateral, "short collateral");
+        assertEq(agg.shortQuantity, brute.shortQuantity, "short quantity");
+        (uint32 openTrades,) = tradingStorage.getPositionState();
+        assertEq(openTrades, handler.openTradeCount(), "open trade count");
+    }
+
+    /**
+     * @notice Every refresh stored the brute-force valuation, and snapshot + excess loss was never below the
+     *         exact per-position clamped PnL (checked in ProtocolHandler.refreshSnapshot at each refresh)
+     */
+    function invariant_SnapshotMatchesBruteForceAndIsConservative() public view {
+        assertEq(handler.ghostSnapshotMismatches(), 0, "snapshot differs from the brute-force valuation");
+        assertEq(handler.ghostSnapshotNotConservative(), 0, "snapshot + excess loss below exact trader PnL");
+    }
+
+    /// @notice No deposit succeeded with a coverage ratio below 100%, and no deposit or withdrawal on a stale snapshot
+    function invariant_NoDepositBelowParOrStaleAction() public view {
+        assertEq(liquidity.ghostDepositsBelowPar(), 0, "deposit below 100% coverage");
+        assertEq(liquidity.ghostStaleActions(), 0, "deposit or withdrawal on a stale snapshot");
+    }
+
+    /// @notice checkAndAct never opened a bonding round with the realised ratio at or above 95%
+    function invariant_BondingNeverStartsAboveCriticalRealisedRatio() public view {
+        assertEq(liquidity.ghostBondingAboveCritical(), 0, "bonding opened at a realised ratio >= 95%");
     }
 
     /// @notice Share price is strictly positive while shares are outstanding
@@ -237,5 +283,7 @@ contract ProtocolInvariantTest is StdInvariant, Test {
         console.log("opened / settled / liquidated:", handler.ghostOpened(), handler.ghostSettled(), handler.ghostLiquidated());
         console.log("open positions left:", handler.openTradeCount());
         console.log("funding bad debt (USDC units):", handler.ghostFundingBadDebt());
+        console.log("refreshes / max excess loss (18 dec):", handler.ghostRefreshes(), handler.ghostMaxExcessLoss());
+        console.log("deposits / withdrawals executed:", liquidity.ghostDepositCount(), liquidity.ghostWithdrawalCount());
     }
 }

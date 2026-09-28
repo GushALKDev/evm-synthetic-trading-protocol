@@ -138,6 +138,28 @@ contract VaultNavTest is Test {
         assertEq(vault.previewDeposit(1_000 * 10 ** 6), vault.convertToShares(1_000 * 10 ** 6));
     }
 
+    /**
+     * @notice Documented optimistic bias: a position past 100% loss offsets a winner on the same side
+     * @dev Long A: 1,000 USDC at 100x from 50,000 (2 units). Long B: 10,000 USDC at 1x from 40,000 (0.25 units).
+     *      At 48,000: A is -4,000 (3,000 beyond its collateral, not yet liquidated), B is +2,000.
+     *      Per-position clamped: -1,000 + 2,000 = +1,000 owed to traders. Side aggregate: 2.25 * 48,000 -
+     *      110,000 = -2,000, so the snapshot shows no liability. The gap (1,000) is at most the excess loss
+     *      E = 3,000, and it lasts until A is liquidated.
+     */
+    function test_TotalAssets_UnderwaterPositionOffsetsWinnerWithinSide() public {
+        _open(PAIR, true, 1_000 * 10 ** 6, 100, PRICE);
+        _open(PAIR, true, 10_000 * 10 ** 6, 1, 40_000 * 1e18);
+        mockOracle.setPrice(PAIR, 48_000 * 1e18);
+        vault.refreshPnlSnapshot(EMPTY);
+
+        (int128 netPnl,,) = vault.pnlSnapshot();
+        assertEq(netPnl, -2_000 * 10 ** 6);
+        assertEq(vault.totalAssets(), _balance(), "no liability recorded");
+        int256 perPositionClamped = 1_000 * 10 ** 6;
+        int256 excessLoss = 3_000 * 10 ** 6;
+        assertGe(int256(netPnl) + excessLoss, perPositionClamped);
+    }
+
     /// @notice The snapshot stops counting once no trade is open, even before the next refresh
     function test_TotalAssets_IgnoresSnapshotWhenNoTradeOpen() public {
         uint32 tradeId = _open(PAIR, true, 1_000 * 10 ** 6, 10, PRICE);

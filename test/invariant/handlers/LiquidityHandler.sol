@@ -20,6 +20,12 @@ import {IMintableUSDC} from "./IMintableUSDC.sol";
  *         solvency actions (checkAndAct, bond, skim).
  * @dev Each flow into or out of the Vault is modelled before the call from the documented rules and recorded
  *      in a ghost variable; the measured amount is compared with the model (ghostMismatches).
+ *      deposit, executeWithdrawal and checkAndAct take a mode seed: 0 acts on the current snapshot (possibly
+ *      stale), 1 refreshes the snapshot first, 2 goes through the refresh-and-act entry point. Deposits and
+ *      executions are wrapped in try/catch so the handler can count what succeeded against the rules: an
+ *      unexpected revert is a mismatch; an expected one (paused, stale snapshot, ratio below 100%, nothing to
+ *      execute) ends the call with NotExecuted, so in the forge metrics table calls - reverts is the number of
+ *      deposits and executions that went through.
  */
 contract LiquidityHandler is CommonBase, StdUtils {
     TradingEngine public immutable ENGINE;
@@ -34,6 +40,9 @@ contract LiquidityHandler is CommonBase, StdUtils {
     uint16 internal constant PAIR_INDEX = 0;
     uint128 public constant INITIAL_PRICE = 50_000 * 1e18;
     uint256 internal constant DEFICIT_CR = 1e18;
+    uint256 internal constant CRITICAL_CR = 95e16;
+
+    bytes[] internal EMPTY_UPDATE;
 
     address[] public actors;
 
@@ -45,8 +54,22 @@ contract LiquidityHandler is CommonBase, StdUtils {
     uint256 public ghostSkims;
     uint256 public ghostBondProceeds;
     uint256 public ghostMismatches;
-    /// @notice Highest CR observed right after a rescue action (checkAndAct or bond) that raised the CR
-    uint256 public ghostMaxCrAfterRescue;
+    /// @notice Highest NAV ratio right after a checkAndAct that raised it (an injection)
+    uint256 public ghostMaxNavCrAfterInjection;
+    /// @notice Highest realised ratio right after a bond that raised it
+    uint256 public ghostMaxRealisedCrAfterBond;
+
+    uint256 public ghostDepositCount;
+    uint256 public ghostWithdrawalCount;
+    /// @notice Deposits that succeeded with the coverage ratio below 100%
+    uint256 public ghostDepositsBelowPar;
+    /// @notice Deposits or withdrawal executions that succeeded on a stale snapshot
+    uint256 public ghostStaleActions;
+    /// @notice Bonding rounds opened while the realised ratio was at or above CRITICAL_CR
+    uint256 public ghostBondingAboveCritical;
+
+    /// @dev The action was rejected for a documented reason or had nothing to do
+    error NotExecuted();
 
     modifier countCall(bytes32 _key) {
         calls[_key]++;
@@ -79,16 +102,41 @@ contract LiquidityHandler is CommonBase, StdUtils {
                               LP ACTIONS
     //////////////////////////////////////////////////////////////*/
 
-    function deposit(uint256 _actorSeed, uint256 _assets) external countCall("deposit") {
-        if (VAULT.paused()) return;
+    /// @notice An LP deposits; succeeds only with a fresh snapshot and a coverage ratio of at least 100%
+    function deposit(uint256 _actorSeed, uint256 _assets, uint256 _mode) external countCall("deposit") {
+        if (VAULT.paused()) revert NotExecuted();
         address lp = _actor(_actorSeed);
         uint256 assets = bound(_assets, 1 * 10 ** 6, 100_000 * 10 ** 6);
+        _mode %= 3;
+        if (_mode != 0) VAULT.refreshPnlSnapshot(EMPTY_UPDATE);
+        bool fresh = VAULT.isPnlSnapshotFresh();
+        uint256 ratio = VAULT.collateralizationRatio();
         IMintableUSDC(address(USDC)).mint(lp, assets);
         vm.prank(lp);
         USDC.approve(address(VAULT), assets);
+
+        bool ok;
         vm.prank(lp);
-        VAULT.deposit(assets, lp);
+        if (_mode == 2) {
+            try VAULT.refreshAndDeposit(assets, lp, EMPTY_UPDATE) {
+                ok = true;
+            } catch {}
+        } else {
+            try VAULT.deposit(assets, lp) {
+                ok = true;
+            } catch {}
+        }
+        if (!ok) {
+            if (fresh && ratio >= DEFICIT_CR) {
+                ghostMismatches++;
+                return;
+            }
+            revert NotExecuted();
+        }
+        if (!fresh) ghostStaleActions++;
+        if (ratio < DEFICIT_CR) ghostDepositsBelowPar++;
         ghostDeposits += assets;
+        ghostDepositCount++;
     }
 
     /// @notice Request a withdrawal of a fraction of the LP's shares (replaces any pending request)
@@ -102,17 +150,40 @@ contract LiquidityHandler is CommonBase, StdUtils {
         VAULT.requestWithdrawal(shares);
     }
 
-    function executeWithdrawal(uint256 _actorSeed) external countCall("executeWithdrawal") {
+    /// @notice An LP executes an unlocked request; succeeds only with a fresh snapshot, paid at the NAV
+    function executeWithdrawal(uint256 _actorSeed, uint256 _mode) external countCall("executeWithdrawal") {
         address lp = _actor(_actorSeed);
-        if (!VAULT.canExecuteWithdrawal(lp)) return;
+        if (!VAULT.canExecuteWithdrawal(lp)) revert NotExecuted();
+        _mode %= 3;
+        if (_mode != 0) VAULT.refreshPnlSnapshot(EMPTY_UPDATE);
+        bool fresh = VAULT.isPnlSnapshotFresh();
         (uint256 shares,) = VAULT.withdrawalRequests(lp);
         uint256 expected = VAULT.previewRedeem(shares);
         uint256 before = USDC.balanceOf(lp);
+
+        bool ok;
         vm.prank(lp);
-        VAULT.executeWithdrawal();
+        if (_mode == 2) {
+            try VAULT.refreshAndExecuteWithdrawal(EMPTY_UPDATE) {
+                ok = true;
+            } catch {}
+        } else {
+            try VAULT.executeWithdrawal() {
+                ok = true;
+            } catch {}
+        }
+        if (!ok) {
+            if (fresh) {
+                ghostMismatches++;
+                return;
+            }
+            revert NotExecuted();
+        }
+        if (!fresh) ghostStaleActions++;
         uint256 received = USDC.balanceOf(lp) - before;
         if (received != expected) ghostMismatches++;
         ghostWithdrawals += received;
+        ghostWithdrawalCount++;
     }
 
     function cancelWithdrawal(uint256 _actorSeed) external countCall("cancelWithdrawal") {
@@ -173,8 +244,12 @@ contract LiquidityHandler is CommonBase, StdUtils {
 
     /// @notice Anyone runs the solvency check: reserve injection below a 100% NAV ratio with a fresh snapshot,
     ///         bonding below a 95% realised ratio
-    function checkAndAct() external countCall("checkAndAct") {
+    function checkAndAct(uint256 _mode) external countCall("checkAndAct") {
+        _mode %= 3;
+        if (_mode != 0) VAULT.refreshPnlSnapshot(EMPTY_UPDATE);
         uint256 crBefore = VAULT.collateralizationRatio();
+        uint256 realisedBefore = VAULT.realisedCollateralizationRatio();
+        bool activeBefore = BOND_DEPOSITORY.isActive();
         uint256 expectedInjection;
         if (crBefore < DEFICIT_CR && VAULT.isPnlSnapshotFresh()) {
             uint256 deficit = VAULT.collateralizationDeficit();
@@ -183,11 +258,14 @@ contract LiquidityHandler is CommonBase, StdUtils {
         }
         uint256 vaultBefore = USDC.balanceOf(address(VAULT));
 
-        SOLVENCY_MANAGER.checkAndAct();
+        if (_mode == 2) SOLVENCY_MANAGER.refreshAndCheckAndAct(EMPTY_UPDATE);
+        else SOLVENCY_MANAGER.checkAndAct();
 
         if (USDC.balanceOf(address(VAULT)) - vaultBefore != expectedInjection) ghostMismatches++;
+        if (!activeBefore && BOND_DEPOSITORY.isActive() && realisedBefore >= CRITICAL_CR) ghostBondingAboveCritical++;
         ghostInjections += expectedInjection;
-        _trackRescue(crBefore);
+        uint256 crAfter = VAULT.collateralizationRatio();
+        if (crAfter > crBefore && crAfter > ghostMaxNavCrAfterInjection) ghostMaxNavCrAfterInjection = crAfter;
     }
 
     /// @notice A bonder buys into the open round, never above the remaining cap or the Vault realised deficit
@@ -200,7 +278,7 @@ contract LiquidityHandler is CommonBase, StdUtils {
         address bonder = _actor(_actorSeed);
         uint256 amount = bound(_amount, 1 * 10 ** 6, 200_000 * 10 ** 6);
         uint256 expected = amount < available ? amount : available;
-        uint256 crBefore = VAULT.collateralizationRatio();
+        uint256 realisedBefore = VAULT.realisedCollateralizationRatio();
         uint256 vaultBefore = USDC.balanceOf(address(VAULT));
 
         IMintableUSDC(address(USDC)).mint(bonder, amount);
@@ -211,7 +289,8 @@ contract LiquidityHandler is CommonBase, StdUtils {
 
         if (USDC.balanceOf(address(VAULT)) - vaultBefore != expected) ghostMismatches++;
         ghostBondProceeds += expected;
-        _trackRescue(crBefore);
+        uint256 realisedAfter = VAULT.realisedCollateralizationRatio();
+        if (realisedAfter > realisedBefore && realisedAfter > ghostMaxRealisedCrAfterBond) ghostMaxRealisedCrAfterBond = realisedAfter;
     }
 
     /// @notice Anyone sends the reserve above the target cap to the Vault
@@ -231,11 +310,6 @@ contract LiquidityHandler is CommonBase, StdUtils {
 
     function _actor(uint256 _seed) internal view returns (address) {
         return actors[bound(_seed, 0, actors.length - 1)];
-    }
-
-    function _trackRescue(uint256 _crBefore) internal {
-        uint256 crAfter = VAULT.collateralizationRatio();
-        if (crAfter > _crBefore && crAfter > ghostMaxCrAfterRescue) ghostMaxCrAfterRescue = crAfter;
     }
 
     function actorsLength() external view returns (uint256) {
