@@ -53,7 +53,7 @@ Counted with `awk '/^## Phase/{p=$3} /^- \[x\] \*\*[0-9]+\.[0-9]+\*\*/{c[p]++} E
 - [x] **0.2** Configure dependencies (Solady)
 - [x] **0.3** Folder structure (`src/`, `test/`, `script/`)
 - [x] **0.4** Configure CI/CD (GitHub Actions for tests)
-- [x] **0.5** Setup linters and formatter (Solhint; formatter later switched from Prettier to `forge fmt`). The Solhint config (`extends: solhint:default`) fails to load with the installed Solhint 6
+- [x] **0.5** Setup linters and formatter (formatter switched from Prettier to `forge fmt`; `forge lint` is the linter. Solhint was removed in the final hardening round)
 - [x] **0.6** Initial documentation (README; there is no CONTRIBUTING file)
 
 **Deliverables:**

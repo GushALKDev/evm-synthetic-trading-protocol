@@ -407,7 +407,6 @@ forge test --match-path "test/integration/*"   # full wired system
 FOUNDRY_PROFILE=coverage forge coverage --report summary   # coverage profile lifts the size limit
 FOUNDRY_PROFILE=gas forge test                 # gas benchmarks, written to snapshots/
 FORK_RPC_URL=<arbitrum-one-rpc> forge test --match-path "test/fork/*"
-npx solhint 'src/**/*.sol'
 ```
 
 | Variable | Used by | Required |

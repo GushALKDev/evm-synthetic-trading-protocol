@@ -375,7 +375,6 @@ is a test file, outside the analysed paths (`src/` for Aderyn, `test` filtered o
 | :--- | :------ | :----- |
 | Slither 0.11.6 | `slither . --filter-paths "lib\|node_modules\|test" --json <file>` | 197 results: 4 High, 16 Medium, 43 Low, 134 Informational |
 | Aderyn 0.6.8 | `aderyn --src src` | 3 High (14 instances), 6 Low (53 instances) |
-| Solhint 6.0.3 | `npx solhint 'src/**/*.sol'` | 592 warnings, 0 errors |
 
 Slither by detector (counted from the JSON with `jq -r '.results.detectors[] | "\(.impact) \(.check)"' <file> | sort | uniq -c`):
 High `msg-value-loop` 4; Medium `incorrect-equality` 6, `unused-return` 5, `uninitialized-local` 3,

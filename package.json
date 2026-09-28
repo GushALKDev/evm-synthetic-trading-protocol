@@ -15,9 +15,6 @@
   "author": "Gustavo Martín (GushALKDev)",
   "license": "MIT",
   "type": "commonjs",
-  "devDependencies": {
-    "solhint": "^6.0.3"
-  },
   "dependencies": {
     "@pythnetwork/pyth-sdk-solidity": "^4.3.1"
   }
