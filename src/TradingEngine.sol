@@ -35,6 +35,8 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     uint256 public constant LIQUIDATOR_REWARD_BPS = 1000; // 10% of remaining collateral to liquidator
     uint256 public constant LIQUIDATOR_MIN_REWARD_BPS = 50; // floor: 0.5% of collateral, paid even past 100% loss
     uint256 public constant EXEC_REWARD_BPS = 10; // 0.1% of position size to the TP/SL executor
+    /// @dev Transient slot holding the engine's ETH balance before the current call's msg.value
+    bytes32 private constant _ETH_BASELINE_SLOT = keccak256("TradingEngine.ethBaseline");
 
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
@@ -127,6 +129,16 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         _;
     }
 
+    /**
+     * @dev Refund, at the end of the call, only the ETH this call added: msg.value minus the oracle fee paid.
+     *      The baseline lives in transient storage so it adds no stack slot to the wrapped functions.
+     */
+    modifier refundsEthSurplus() {
+        _recordEthBaseline();
+        _;
+        _refundEth();
+    }
+
     /*//////////////////////////////////////////////////////////////
                           INTERNAL HELPERS
     //////////////////////////////////////////////////////////////*/
@@ -140,18 +152,34 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev Sweep any ETH left on the contract back to the caller. The oracle refunds the fee
-     *      surplus here; this returns it to the trader/liquidator. The engine never holds ETH.
+     * @dev Store the balance the engine held before this call's msg.value arrived (e.g. force-sent ETH).
+     */
+    function _recordEthBaseline() internal {
+        uint256 baseline = address(this).balance - msg.value;
+        bytes32 slot = _ETH_BASELINE_SLOT;
+        assembly {
+            tstore(slot, baseline)
+        }
+    }
+
+    /**
+     * @dev Return to the caller what this call added to the engine's balance: msg.value minus the oracle fee
+     *      (the oracle refunds its surplus here). ETH that was on the contract before the call is not paid out.
      */
     function _refundEth() internal {
-        uint256 balance = address(this).balance;
-        if (balance > 0) msg.sender.safeTransferETH(balance);
+        uint256 baseline;
+        bytes32 slot = _ETH_BASELINE_SLOT;
+        assembly {
+            baseline := tload(slot)
+        }
+        uint256 surplus = address(this).balance - baseline;
+        if (surplus > 0) msg.sender.safeTransferETH(surplus);
     }
 
     /**
      * @dev Get oracle-validated price via the IOracle interface. Confidence band is discarded.
      *      Forwards msg.value to fund the oracle fee; the oracle refunds any surplus to this contract,
-     *      which is swept back to the trader by _refundEth.
+     *      which refundsEthSurplus returns to the caller at the end of the call.
      */
     function _getOraclePrice(uint256 _pairIndex, bytes[] calldata _priceUpdate) internal returns (uint128 price18) {
         (price18,) = ORACLE.getPrice{value: msg.value}(_pairIndex, _priceUpdate);
@@ -447,7 +475,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev Accept ETH refunds from the oracle. Any residual is swept back to the caller via _refundEth.
+     * @dev Accept ETH refunds from the oracle. The refund is passed back to the caller by refundsEthSurplus.
      */
     receive() external payable {}
 
@@ -480,7 +508,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         uint128 _tp,
         uint128 _sl,
         bytes[] calldata priceUpdate
-    ) external payable nonReentrant whenNotPaused returns (uint32 tradeId) {
+    ) external payable nonReentrant whenNotPaused refundsEthSurplus returns (uint32 tradeId) {
         // --- CHECKS ---
         if (_collateral < MIN_COLLATERAL) revert BelowMinCollateral(_collateral);
         if (_leverage == 0) revert ZeroLeverage();
@@ -497,8 +525,6 @@ contract TradingEngine is Ownable, ReentrancyGuard {
 
         // --- INTERACTIONS ---
         tradeId = _executeOpen(msg.sender, _pairIndex, _isLong, _collateral, _leverage, oraclePrice, _tp, _sl);
-
-        _refundEth();
     }
 
     /**
@@ -517,6 +543,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         payable
         nonReentrant
         whenNotPaused
+        refundsEthSurplus
     {
         TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(_tradeId);
         if (trade.user == address(0)) revert TradeNotFound(_tradeId);
@@ -570,8 +597,6 @@ contract TradingEngine is Ownable, ReentrancyGuard {
             uint256 profitFromVault = payoutUsdc - storageToTrader;
             VAULT.sendPayout(msg.sender, profitFromVault);
         }
-
-        _refundEth();
     }
 
     /**
@@ -589,7 +614,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
      * @param _tradeId The trade ID to liquidate
      * @param priceUpdate Pyth price update data
      */
-    function liquidate(uint256 _tradeId, bytes[] calldata priceUpdate) external payable nonReentrant {
+    function liquidate(uint256 _tradeId, bytes[] calldata priceUpdate) external payable nonReentrant refundsEthSurplus {
         TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(_tradeId);
         if (trade.user == address(0)) revert TradeNotFound(_tradeId);
 
@@ -612,8 +637,6 @@ contract TradingEngine is Ownable, ReentrancyGuard {
 
         uint256 liquidatorReward = _computeLiquidatorReward(trade.collateral, loss);
         _executeLiquidation(trade, _tradeId, positionSize, executionPrice, pnlUsdc, fundingOwedUsdc, liquidatorReward);
-
-        _refundEth();
     }
 
     /**
@@ -655,7 +678,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
      * @param _tradeId The trade ID to execute
      * @param priceUpdate Pyth price update data
      */
-    function executeLimit(uint256 _tradeId, bytes[] calldata priceUpdate) external payable nonReentrant whenNotPaused {
+    function executeLimit(uint256 _tradeId, bytes[] calldata priceUpdate) external payable nonReentrant whenNotPaused refundsEthSurplus {
         TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(_tradeId);
         if (trade.user == address(0)) revert TradeNotFound(_tradeId);
         if (trade.tp == 0 && trade.sl == 0) revert NoLimitSet(_tradeId);
@@ -669,8 +692,6 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         _updateFundingIndex(trade.pairIndex);
 
         _executeLimit(trade, _tradeId, executionPrice, isTp);
-
-        _refundEth();
     }
 
     /**
@@ -739,7 +760,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
      * @param _newTp The new take profit price (0 to clear)
      * @param priceUpdate Pyth price update data
      */
-    function updateTp(uint256 _tradeId, uint128 _newTp, bytes[] calldata priceUpdate) external payable whenNotPaused {
+    function updateTp(uint256 _tradeId, uint128 _newTp, bytes[] calldata priceUpdate) external payable whenNotPaused refundsEthSurplus {
         TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(_tradeId);
         if (trade.user == address(0)) revert TradeNotFound(_tradeId);
         if (trade.user != msg.sender) revert NotTradeOwner(msg.sender, trade.user);
@@ -752,8 +773,6 @@ contract TradingEngine is Ownable, ReentrancyGuard {
 
         TRADING_STORAGE.updateTradeTp(_tradeId, _newTp);
         emit TpUpdated(_tradeId, _newTp);
-
-        _refundEth();
     }
 
     /**
@@ -762,7 +781,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
      * @param _newSl The new stop loss price (0 to clear)
      * @param priceUpdate Pyth price update data
      */
-    function updateSl(uint256 _tradeId, uint128 _newSl, bytes[] calldata priceUpdate) external payable whenNotPaused {
+    function updateSl(uint256 _tradeId, uint128 _newSl, bytes[] calldata priceUpdate) external payable whenNotPaused refundsEthSurplus {
         TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(_tradeId);
         if (trade.user == address(0)) revert TradeNotFound(_tradeId);
         if (trade.user != msg.sender) revert NotTradeOwner(msg.sender, trade.user);
@@ -775,8 +794,6 @@ contract TradingEngine is Ownable, ReentrancyGuard {
 
         TRADING_STORAGE.updateTradeSl(_tradeId, _newSl);
         emit SlUpdated(_tradeId, _newSl);
-
-        _refundEth();
     }
 
     /*//////////////////////////////////////////////////////////////
