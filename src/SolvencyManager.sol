@@ -133,8 +133,8 @@ contract SolvencyManager is Ownable {
      *      realised ratio is back at 100%. Without one, a round opens when the realised ratio is below
      *      CRITICAL_CR and the realised deficit exceeds the pending injection: realised < 95% implies NAV < 95%,
      *      so no early return skips the injection, and the injection lowers the realised deficit by its amount.
-     *      Not mirrored: activateBonding reverts when the BondDepository reference price is unset, which makes
-     *      checkAndAct and the deposit revert while this view reports an open round.
+     *      activateBonding's ReferencePriceUnset check is not mirrored: referencePrice starts at 2 USDC and
+     *      setReferencePrice rejects 0, so that revert cannot happen.
      */
     function bondingRoundOpenAfterCheck() external view returns (bool) {
         uint256 realisedCr = VAULT.realisedCollateralizationRatio();
