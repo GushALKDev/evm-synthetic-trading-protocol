@@ -61,8 +61,12 @@ contract LiquidityHandler is CommonBase, StdUtils {
 
     uint256 public ghostDepositCount;
     uint256 public ghostWithdrawalCount;
-    /// @notice Deposits that succeeded with the coverage ratio below 100%
-    uint256 public ghostDepositsBelowPar;
+    /// @notice Deposits that went through while a bonding round was open afterwards
+    uint256 public ghostDepositsDuringBonding;
+    /// @notice Deposits that did not inject exactly the AssistantFund injection pending before the call
+    uint256 public ghostDepositsWithPendingInjection;
+    /// @notice Deposits whose minted shares were worth more than the assets paid in
+    uint256 public ghostDepositsOverValued;
     /// @notice Deposits or withdrawal executions that succeeded on a stale snapshot
     uint256 public ghostStaleActions;
     /// @notice Bonding rounds opened while the realised ratio was at or above CRITICAL_CR
@@ -102,7 +106,11 @@ contract LiquidityHandler is CommonBase, StdUtils {
                               LP ACTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice An LP deposits; succeeds only with a fresh snapshot and a coverage ratio of at least 100%
+    /**
+     * @notice An LP deposits. The Vault runs the pending AssistantFund injection first and refuses on a stale
+     *         snapshot or while a bonding round is open or due; the outcome must match maxDeposit
+     * @dev The injection made inside the deposit is recorded like one from checkAndAct.
+     */
     function deposit(uint256 _actorSeed, uint256 _assets, uint256 _mode) external countCall("deposit") {
         if (VAULT.paused()) revert NotExecuted();
         address lp = _actor(_actorSeed);
@@ -110,7 +118,10 @@ contract LiquidityHandler is CommonBase, StdUtils {
         _mode %= 3;
         if (_mode != 0) VAULT.refreshPnlSnapshot(EMPTY_UPDATE);
         bool fresh = VAULT.isPnlSnapshotFresh();
-        uint256 ratio = VAULT.collateralizationRatio();
+        bool expected = VAULT.maxDeposit(lp) != 0;
+        uint256 reserveBefore = ASSISTANT_FUND.balance();
+        uint256 pending = _pendingInjection(fresh);
+        uint256 sharesBefore = VAULT.balanceOf(lp);
         IMintableUSDC(address(USDC)).mint(lp, assets);
         vm.prank(lp);
         USDC.approve(address(VAULT), assets);
@@ -127,14 +138,18 @@ contract LiquidityHandler is CommonBase, StdUtils {
             } catch {}
         }
         if (!ok) {
-            if (fresh && ratio >= DEFICIT_CR) {
+            if (expected) {
                 ghostMismatches++;
                 return;
             }
             revert NotExecuted();
         }
+        if (!expected) ghostMismatches++;
         if (!fresh) ghostStaleActions++;
-        if (ratio < DEFICIT_CR) ghostDepositsBelowPar++;
+        if (BOND_DEPOSITORY.isActive()) ghostDepositsDuringBonding++;
+        if (reserveBefore - ASSISTANT_FUND.balance() != pending) ghostDepositsWithPendingInjection++;
+        if (VAULT.convertToAssets(VAULT.balanceOf(lp) - sharesBefore) > assets) ghostDepositsOverValued++;
+        ghostInjections += reserveBefore - ASSISTANT_FUND.balance();
         ghostDeposits += assets;
         ghostDepositCount++;
     }
@@ -307,6 +322,14 @@ contract LiquidityHandler is CommonBase, StdUtils {
     /*//////////////////////////////////////////////////////////////
                                HELPERS
     //////////////////////////////////////////////////////////////*/
+
+    /// @dev Injection checkAndAct would make now: min(reserve, NAV deficit) below a 100% NAV ratio with a fresh snapshot
+    function _pendingInjection(bool _fresh) internal view returns (uint256) {
+        if (!_fresh || VAULT.collateralizationRatio() >= DEFICIT_CR) return 0;
+        uint256 deficit = VAULT.collateralizationDeficit();
+        uint256 reserve = ASSISTANT_FUND.balance();
+        return reserve < deficit ? reserve : deficit;
+    }
 
     function _actor(uint256 _seed) internal view returns (address) {
         return actors[bound(_seed, 0, actors.length - 1)];

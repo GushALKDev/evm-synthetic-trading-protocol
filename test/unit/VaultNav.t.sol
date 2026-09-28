@@ -342,25 +342,23 @@ contract VaultNavTest is Test {
         assertEq(empty.balanceOf(lp), 1_000 * 1e18);
     }
 
-    /// @notice Unrealised trader profit alone can push the ratio below 100% and close deposits
-    function test_Deposit_RevertsWhenOpenProfitPushesRatioBelowPar() public {
+    /**
+     * @notice With open trader profit pushing the ratio below 100% and no SolvencyManager set (no rescue to
+     *         capture), deposits go through at the conservative NAV
+     */
+    function test_Deposit_AllowedBelowParAtNavWithoutSolvencyManager() public {
         _open(PAIR, true, 1_000 * 10 ** 6, 10, PRICE);
         mockOracle.setPrice(PAIR, 55_000 * 1e18);
         vault.refreshPnlSnapshot(EMPTY);
-        uint256 ratio = vault.collateralizationRatio();
-        assertEq(ratio, 0.99e18);
-        assertEq(vault.realisedCollateralizationRatio(), 1e18);
-        assertEq(vault.maxDeposit(lp), 0);
-        assertEq(vault.maxMint(lp), 0);
+        assertEq(vault.collateralizationRatio(), 0.99e18);
+        assertEq(address(vault.solvencyManager()), address(0));
+        assertEq(vault.maxDeposit(lp), type(uint256).max);
+        assertEq(vault.maxMint(lp), type(uint256).max);
 
-        vm.startPrank(lp);
-        vm.expectRevert(abi.encodeWithSelector(Vault.CoverageBelowPar.selector, ratio));
-        vault.deposit(1_000 * 10 ** 6, lp);
-        vm.expectRevert(abi.encodeWithSelector(Vault.CoverageBelowPar.selector, ratio));
-        vault.mint(1_000 * 1e18, lp);
-        vm.expectRevert(abi.encodeWithSelector(Vault.CoverageBelowPar.selector, ratio));
-        vault.refreshAndDeposit(1_000 * 10 ** 6, lp, EMPTY);
-        vm.stopPrank();
+        uint256 supply = vault.totalSupply();
+        uint256 expected = (1_000 * 10 ** 6 * (supply + 1e12)) / (_balance() - 1_000 * 10 ** 6 + 1);
+        vm.prank(lp);
+        assertEq(vault.deposit(1_000 * 10 ** 6, lp), expected, "shares not minted at the NAV");
     }
 
     /// @notice Withdrawals are not blocked below 100%: they pay the NAV, which already carries the loss

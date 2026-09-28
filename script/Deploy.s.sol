@@ -85,11 +85,13 @@ library DeployLib {
     /**
      * @notice Grant every cross-contract permission the protocol needs to operate
      * @dev Must be called by the owner. Without this the system is deployed but inert: the engine
-     *      cannot touch storage or the Vault, bonding cannot mint, and solvency cannot recapitalize.
+     *      cannot touch storage or the Vault, bonding cannot mint, solvency cannot recapitalize, and Vault
+     *      deposits skip the rescue step (they would neither run the pending injection nor stop for bonding).
      */
     function wire(Deployed memory _d) internal {
         _d.tradingStorage.setTradingEngine(address(_d.engine));
         _d.vault.setTradingEngine(address(_d.engine));
+        _d.vault.setSolvencyManager(address(_d.solvencyManager));
         _d.synth.setMinter(address(_d.bondDepository));
         _d.assistantFund.setSolvencyManager(address(_d.solvencyManager));
         _d.bondDepository.setSolvencyManager(address(_d.solvencyManager));

@@ -82,6 +82,7 @@ contract ProtocolInvariantTest is StdInvariant, Test {
         solvencyManager = new SolvencyManager(address(vault), address(assistantFund), address(bondDepository), owner);
         tradingStorage.setTradingEngine(address(engine));
         vault.setTradingEngine(address(engine));
+        vault.setSolvencyManager(address(solvencyManager));
         synth.setMinter(address(bondDepository));
         assistantFund.setSolvencyManager(address(solvencyManager));
         bondDepository.setSolvencyManager(address(solvencyManager));
@@ -259,10 +260,18 @@ contract ProtocolInvariantTest is StdInvariant, Test {
         assertEq(handler.ghostSnapshotNotConservative(), 0, "snapshot + excess loss below exact trader PnL");
     }
 
-    /// @notice No deposit succeeded with a coverage ratio below 100%, and no deposit or withdrawal on a stale snapshot
-    function invariant_NoDepositBelowParOrStaleAction() public view {
-        assertEq(liquidity.ghostDepositsBelowPar(), 0, "deposit below 100% coverage");
+    /**
+     * @notice Deposits follow the round 3 rule (replaces NoDepositBelowParOrStaleAction): none on a stale snapshot,
+     *         none while a bonding round is open after the check, each deposit injects exactly the AssistantFund
+     *         injection pending before it (so the depositor buys after it), minted shares worth at most the assets paid in,
+     *         and no withdrawal execution on a stale snapshot. The outcome of each deposit also matches maxDeposit
+     *         (counted in the handler's mismatches, invariant_FlowsMatchModel).
+     */
+    function invariant_DepositsFollowRescueRule() public view {
         assertEq(liquidity.ghostStaleActions(), 0, "deposit or withdrawal on a stale snapshot");
+        assertEq(liquidity.ghostDepositsDuringBonding(), 0, "deposit while a bonding round was open");
+        assertEq(liquidity.ghostDepositsWithPendingInjection(), 0, "deposit did not settle the pending injection first");
+        assertEq(liquidity.ghostDepositsOverValued(), 0, "minted shares worth more than the assets paid in");
     }
 
     /// @notice checkAndAct never opened a bonding round with the realised ratio at or above 95%

@@ -92,6 +92,7 @@ contract SolvencyIntegrationTest is Test {
         assertEq(d.synth.minter(), address(d.bondDepository), "synth minter");
         assertEq(d.assistantFund.solvencyManager(), address(d.solvencyManager), "fund manager");
         assertEq(d.bondDepository.solvencyManager(), address(d.solvencyManager), "bond manager");
+        assertEq(address(d.vault.solvencyManager()), address(d.solvencyManager), "vault deposit gate");
     }
 
     /// @dev The fee split only funds the reserve if treasury points at the AssistantFund

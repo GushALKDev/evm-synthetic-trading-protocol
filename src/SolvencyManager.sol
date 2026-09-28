@@ -26,6 +26,10 @@ import {ISolvencyVault, IAssistantFund, IBondDepository} from "./interfaces/ISol
  *      round is closed: bond() is clamped to the realised deficit, so the round has nothing left to raise.
  *      checkAndAct and refreshAndCheckAndAct are permissionless. The manager holds no funds; it routes calls
  *      to the AssistantFund and BondDepository, which enforce their own access control.
+ *      Vault deposits call checkAndActBeforeDeposit from inside the Vault's nonReentrant functions. That path
+ *      reaches only Vault views (not guarded), AssistantFund.injectFunds (USDC to the Vault, no callback) and
+ *      the BondDepository round functions (no Vault call); refreshAndCheckAndAct, which calls a guarded Vault
+ *      function, is not on it.
  */
 contract SolvencyManager is Ownable {
     /*//////////////////////////////////////////////////////////////
@@ -107,9 +111,37 @@ contract SolvencyManager is Ownable {
         if (surplus > 0) SafeTransferLib.safeTransferETH(msg.sender, surplus);
     }
 
+    /**
+     * @notice Run checkAndAct and report whether a bonding round is open afterwards
+     * @dev Called by the Vault before it mints deposit shares: the pending injection lands first, so the depositor
+     *      buys at the post-injection NAV; a round that is open or was just opened makes the Vault revert, which
+     *      also unwinds that activation. Permissionless, like checkAndAct.
+     * @return bondingRoundOpen Whether BondDepository has an open round after the check
+     */
+    function checkAndActBeforeDeposit() external returns (bool bondingRoundOpen) {
+        _checkAndAct();
+        return BOND_DEPOSITORY.isActive();
+    }
+
     /*//////////////////////////////////////////////////////////////
                             VIEW FUNCTIONS
     //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice Whether a bonding round would be open after checkAndAct runs at the current state
+     * @dev Mirror of _checkAndAct used by Vault.maxDeposit and maxMint. An open round stays open unless the
+     *      realised ratio is back at 100%. Without one, a round opens when the realised ratio is below
+     *      CRITICAL_CR and the realised deficit exceeds the pending injection: realised < 95% implies NAV < 95%,
+     *      so no early return skips the injection, and the injection lowers the realised deficit by its amount.
+     *      Not mirrored: activateBonding reverts when the BondDepository reference price is unset, which makes
+     *      checkAndAct and the deposit revert while this view reports an open round.
+     */
+    function bondingRoundOpenAfterCheck() external view returns (bool) {
+        uint256 realisedCr = VAULT.realisedCollateralizationRatio();
+        if (BOND_DEPOSITORY.isActive()) return realisedCr < DEFICIT_CR;
+        if (realisedCr >= CRITICAL_CR) return false;
+        return VAULT.realisedCollateralizationDeficit() > _pendingInjection();
+    }
 
     /**
      * @notice USDC needed to restore the Vault from its current NAV ratio back to DEFICIT_CR (100%)
@@ -173,5 +205,16 @@ contract SolvencyManager is Ownable {
      */
     function _deficitToTarget() internal view returns (uint256) {
         return VAULT.collateralizationDeficit();
+    }
+
+    /**
+     * @dev USDC _checkAndAct would inject now: min(reserve, NAV deficit) below a 100% NAV ratio with a fresh
+     *      snapshot, else 0
+     */
+    function _pendingInjection() internal view returns (uint256) {
+        if (VAULT.collateralizationRatio() >= DEFICIT_CR || !VAULT.isPnlSnapshotFresh()) return 0;
+        uint256 deficit = _deficitToTarget();
+        uint256 reserve = ASSISTANT_FUND.balance();
+        return reserve < deficit ? reserve : deficit;
     }
 }

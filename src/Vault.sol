@@ -8,6 +8,7 @@ import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 import {SafeCastLib} from "solady/utils/SafeCastLib.sol";
 import {TradingStorage} from "./TradingStorage.sol";
 import {IOracle} from "./interfaces/IOracle.sol";
+import {ISolvencyManager} from "./interfaces/ISolvency.sol";
 import {OpenPnlLib} from "./libraries/OpenPnlLib.sol";
 
 /// @title Vault
@@ -20,6 +21,8 @@ import {OpenPnlLib} from "./libraries/OpenPnlLib.sol";
 ///      latest snapshot (refreshPnlSnapshot). Net trader losses are not added. deposit, mint and
 ///      executeWithdrawal need a fresh snapshot: no open trade, or taken within maxPnlSnapshotAge with no position
 ///      opened or closed since. The refreshAnd* entry points refresh and act in one transaction.
+///      Before minting deposit shares the Vault asks the SolvencyManager to run the pending AssistantFund injection,
+///      and reverts while a bonding round is open or due. With no SolvencyManager set, deposits skip that step.
 contract Vault is ERC4626, Ownable, ReentrancyGuard {
     using SafeTransferLib for address;
 
@@ -93,6 +96,11 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
     uint32 public maxPnlSnapshotAge;
 
     /**
+     * @notice SolvencyManager run before deposits (address(0): no rescue step)
+     */
+    ISolvencyManager public solvencyManager;
+
+    /**
      * @notice Net unrealised trader PnL of all open positions, valued at refresh time
      * @dev netPnl is USDC (6 decimals), positive when traders are in profit, rounded to overstate trader profit.
      *      nonce is TradingStorage's positions nonce at refresh time; any open or close changes it.
@@ -134,6 +142,7 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
     event Unpaused(address account);
     event PnlSnapshotRefreshed(int256 netPnl, uint256 timestamp);
     event MaxPnlSnapshotAgeUpdated(uint256 maxPnlSnapshotAge);
+    event SolvencyManagerUpdated(address indexed newSolvencyManager);
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -151,7 +160,7 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
     error ZeroAddress();
     error StalePnlSnapshot(uint256 snapshotTimestamp);
     error InvalidMaxPnlSnapshotAge(uint256 maxPnlSnapshotAge);
-    error CoverageBelowPar(uint256 ratio);
+    error BondingRoundOpen();
 
     /*//////////////////////////////////////////////////////////////
                               MODIFIERS
@@ -193,12 +202,14 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev Below 100% a new deposit would buy shares under 1.0 and take part of the next injection or bond
-     *      proceeds meant for the LPs who carried the loss
+     * @dev Run the pending AssistantFund injection before shares are minted, so the depositor buys at the
+     *      post-injection NAV and does not take part of it. Revert while a bonding round is open or was opened by
+     *      this check: bond proceeds are not instantaneous, and the revert unwinds that activation.
      */
-    function _requireCoverageAtPar() internal view {
-        uint256 ratio = collateralizationRatio();
-        if (ratio < WAD) revert CoverageBelowPar(ratio);
+    function _settleRescueBeforeDeposit() internal {
+        ISolvencyManager manager = solvencyManager;
+        if (address(manager) == address(0)) return;
+        if (manager.checkAndActBeforeDeposit()) revert BondingRoundOpen();
     }
 
     function _recordEthBaseline() internal {
@@ -328,20 +339,21 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev Needs a fresh PnL snapshot (see isPnlSnapshotFresh) and a coverage ratio of at least 100%
+     * @dev Needs a fresh PnL snapshot (see isPnlSnapshotFresh); runs the pending rescue first and reverts while a
+     *      bonding round is open or due. The fresh snapshot is what makes the pending injection well defined.
      */
     function deposit(uint256 assets, address receiver) public virtual override nonReentrant whenNotPaused returns (uint256 shares) {
         _requireFreshPnlSnapshot();
-        _requireCoverageAtPar();
+        _settleRescueBeforeDeposit();
         return super.deposit(assets, receiver);
     }
 
     /**
-     * @dev Needs a fresh PnL snapshot (see isPnlSnapshotFresh) and a coverage ratio of at least 100%
+     * @dev Same rule as deposit
      */
     function mint(uint256 shares, address receiver) public virtual override nonReentrant whenNotPaused returns (uint256 assets) {
         _requireFreshPnlSnapshot();
-        _requireCoverageAtPar();
+        _settleRescueBeforeDeposit();
         return super.mint(shares, receiver);
     }
 
@@ -357,7 +369,7 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
         returns (uint256 shares)
     {
         _refreshPnlSnapshot(priceUpdate);
-        _requireCoverageAtPar();
+        _settleRescueBeforeDeposit();
         shares = super.deposit(assets, receiver);
     }
 
@@ -373,7 +385,7 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
         returns (uint256 assets)
     {
         _refreshPnlSnapshot(priceUpdate);
-        _requireCoverageAtPar();
+        _settleRescueBeforeDeposit();
         assets = super.mint(shares, receiver);
     }
 
@@ -390,7 +402,7 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
 
     /**
      * @dev ERC-4626 requires max* to report what the action accepts: deposit and mint revert while paused, with a
-     *      stale PnL snapshot, or with a coverage ratio below 100%
+     *      stale PnL snapshot, or while a bonding round is open or due (SolvencyManager.bondingRoundOpenAfterCheck)
      */
     function maxDeposit(address to) public view virtual override returns (uint256) {
         return _depositsOpen() ? super.maxDeposit(to) : 0;
@@ -401,7 +413,9 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
     }
 
     function _depositsOpen() internal view returns (bool) {
-        return !_paused && isPnlSnapshotFresh() && collateralizationRatio() >= WAD;
+        if (_paused || !isPnlSnapshotFresh()) return false;
+        ISolvencyManager manager = solvencyManager;
+        return address(manager) == address(0) || !manager.bondingRoundOpenAfterCheck();
     }
 
     /**
@@ -636,6 +650,15 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
         if (_maxPnlSnapshotAge == 0 || _maxPnlSnapshotAge > MAX_PNL_SNAPSHOT_AGE_CEILING) revert InvalidMaxPnlSnapshotAge(_maxPnlSnapshotAge);
         maxPnlSnapshotAge = uint32(_maxPnlSnapshotAge);
         emit MaxPnlSnapshotAgeUpdated(_maxPnlSnapshotAge);
+    }
+
+    /**
+     * @notice Set the SolvencyManager the deposit paths run before minting shares
+     */
+    function setSolvencyManager(address _solvencyManager) external onlyOwner {
+        if (_solvencyManager == address(0)) revert ZeroAddress();
+        solvencyManager = ISolvencyManager(_solvencyManager);
+        emit SolvencyManagerUpdated(_solvencyManager);
     }
 
     function setTradingEngine(address _tradingEngine) external onlyOwner {

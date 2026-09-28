@@ -401,6 +401,57 @@ contract SolvencyManagerTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
+                        DEPOSIT GATE
+    //////////////////////////////////////////////////////////////*/
+
+    function test_CheckAndActBeforeDeposit_RunsCheckAndReportsRound() public {
+        vault.setState(850_000 * 10 ** 6, 85e16);
+        vault.setRealised(90e16, 100_000 * 10 ** 6);
+        fund.setBalance(40_000 * 10 ** 6);
+
+        assertTrue(manager.checkAndActBeforeDeposit(), "round not reported");
+        assertEq(fund.totalInjected(), 40_000 * 10 ** 6, "injection not run");
+        assertTrue(bondDepo.isActive());
+    }
+
+    function test_CheckAndActBeforeDeposit_NoRoundWhenHealthy() public {
+        vault.setState(1_100_000 * 10 ** 6, 111e16);
+        assertFalse(manager.checkAndActBeforeDeposit());
+    }
+
+    function test_BondingRoundOpenAfterCheck_OpenRoundStaysOpenBelowTarget() public {
+        bondDepo.setActive(true);
+        vault.setState(990_000 * 10 ** 6, 99e16);
+        assertTrue(manager.bondingRoundOpenAfterCheck());
+    }
+
+    function test_BondingRoundOpenAfterCheck_OpenRoundClosesAtTarget() public {
+        bondDepo.setActive(true);
+        vault.setState(970_000 * 10 ** 6, 97e16);
+        vault.setRealised(100e16, 0);
+        assertFalse(manager.bondingRoundOpenAfterCheck());
+    }
+
+    function test_BondingRoundOpenAfterCheck_NoRoundAboveCritical() public {
+        vault.setState(960_000 * 10 ** 6, 96e16);
+        assertFalse(manager.bondingRoundOpenAfterCheck());
+    }
+
+    /// @notice Below 95% realised, a round is due only for the realised deficit the pending injection leaves
+    function test_BondingRoundOpenAfterCheck_ComparesDeficitWithPendingInjection() public {
+        vault.setState(900_000 * 10 ** 6, 90e16);
+        uint256 deficit = vault.realisedCollateralizationDeficit();
+
+        fund.setBalance(deficit - 1);
+        assertTrue(manager.bondingRoundOpenAfterCheck(), "reserve short by 1");
+        fund.setBalance(deficit);
+        assertFalse(manager.bondingRoundOpenAfterCheck(), "reserve covers the deficit");
+
+        vault.setFresh(false);
+        assertTrue(manager.bondingRoundOpenAfterCheck(), "stale snapshot: no injection, round due");
+    }
+
+    /*//////////////////////////////////////////////////////////////
                         REFRESH AND CHECK AND ACT
     //////////////////////////////////////////////////////////////*/
 

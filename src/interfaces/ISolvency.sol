@@ -44,3 +44,15 @@ interface IBondDepository {
 
     function closeBonding() external;
 }
+
+/**
+ * @title ISolvencyManager
+ * @notice SolvencyManager functions the Vault calls on its deposit paths
+ * @dev The Vault runs the pending rescue before minting shares, so a depositor does not take part of an
+ *      AssistantFund injection, and refuses deposits while a bonding round is open or due.
+ */
+interface ISolvencyManager {
+    function checkAndActBeforeDeposit() external returns (bool bondingRoundOpen);
+
+    function bondingRoundOpenAfterCheck() external view returns (bool);
+}

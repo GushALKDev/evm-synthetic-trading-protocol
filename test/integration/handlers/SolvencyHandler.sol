@@ -65,16 +65,29 @@ contract SolvencyHandler is CommonBase, StdCheats, StdUtils {
                                ACTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice An LP deposits into the Vault
+    /**
+     * @notice An LP deposits into the Vault
+     * @dev The Vault runs the pending AssistantFund injection first and refuses while a bonding round is open or
+     *      due; the outcome must match maxDeposit, and the injection is recorded like one from checkAndAct.
+     */
     function deposit(uint256 _actorSeed, uint256 _assets) external countCall("deposit") {
         currentActor = actors[bound(_actorSeed, 0, actors.length - 1)];
         uint256 assets = bound(_assets, 1 * 10 ** 6, 200_000 * 10 ** 6);
+        bool expected = d.vault.maxDeposit(currentActor) != 0;
+        uint256 reserveBefore = d.assistantFund.balance();
 
         deal(address(USDC), currentActor, assets);
         vm.startPrank(currentActor);
         USDC.approve(address(d.vault), assets);
-        d.vault.deposit(assets, currentActor);
+        bool ok;
+        try d.vault.deposit(assets, currentActor) {
+            ok = true;
+        } catch {}
         vm.stopPrank();
+
+        if (ok != expected) ghostMismatches++;
+        if (!ok) return;
+        ghostInjections += reserveBefore - d.assistantFund.balance();
         ghostDeposits += assets;
     }
 

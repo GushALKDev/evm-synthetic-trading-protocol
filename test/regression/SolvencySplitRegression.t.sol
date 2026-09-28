@@ -61,6 +61,7 @@ contract SolvencySplitRegressionTest is Test {
         solvencyManager = new SolvencyManager(address(vault), address(assistantFund), address(bondDepository), owner);
         tradingStorage.setTradingEngine(address(engine));
         vault.setTradingEngine(address(engine));
+        vault.setSolvencyManager(address(solvencyManager));
         synth.setMinter(address(bondDepository));
         assistantFund.setSolvencyManager(address(solvencyManager));
         bondDepository.setSolvencyManager(address(solvencyManager));
