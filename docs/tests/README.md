@@ -462,8 +462,8 @@ below are unchanged.
 
 Slither counts by detector come from
 `jq -r '.results.detectors[] | "\(.impact) \(.check)"' <file> | sort | uniq -c`; Aderyn counts from the
-"Found Instances" line of each issue in the report. At the start of round 3 (commit `c3d552a`) the same
-commands gave Slither 197 results (4 High, 16 Medium, 43 Low, 134 Informational) and Aderyn 3 High issues
+"Found Instances" line of each issue in the report. At the start of round 3 (commit `c3d552a`; `src/` is the
+same at the branch point `defb06d`, `git diff --stat c3d552a defb06d -- src` is empty) the same commands gave Slither 197 results (4 High, 16 Medium, 43 Low, 134 Informational) and Aderyn 3 High issues
 (14 instances) and 6 Low issues (53 instances).
 
 ### Triage
