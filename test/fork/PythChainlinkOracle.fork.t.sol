@@ -338,5 +338,30 @@ contract PythChainlinkOracleForkTest is Test {
         engine.openTrade(uint16(PAIR_BTC), true, 100 * 10 ** 6, 10, oraclePrice, 100, 0, 0, _empty());
     }
 
+    /**
+     * @notice With a position open, refresh the Vault's PnL snapshot on the real Arbitrum Pyth and deposit through
+     *         refreshAndDeposit
+     * @dev At the pinned block the stored BTC price is fresh, so empty update data costs no fee.
+     */
+    function test_Fork_Vault_RefreshSnapshotAndDeposit() public skipIfNoFork {
+        _deployEngineStack();
+        (uint128 oraclePrice,) = oracle.getPrice(PAIR_BTC, _empty());
+        engine.openTrade(uint16(PAIR_BTC), true, 100 * 10 ** 6, 10, oraclePrice, 100, 0, 0, _empty());
+        assertFalse(vault.isPnlSnapshotFresh(), "fresh before a refresh");
+
+        vault.refreshPnlSnapshot(_empty());
+        (int128 netPnl, uint48 timestamp,) = vault.pnlSnapshot();
+        assertTrue(vault.isPnlSnapshotFresh(), "not fresh after the refresh");
+        assertEq(timestamp, block.timestamp);
+        // 1,000 USD of notional just opened: the spread and the confidence edge keep |PnL| far below 10 USDC
+        assertLt(netPnl < 0 ? -netPnl : netPnl, 10 * 10 ** 6, "snapshot PnL out of range");
+
+        usdc.mint(address(this), 50 * 10 ** 6);
+        uint256 balanceBefore = usdc.balanceOf(address(this));
+        uint256 shares = vault.refreshAndDeposit(50 * 10 ** 6, address(this), _empty());
+        assertGt(shares, 0, "no shares minted");
+        assertEq(balanceBefore - usdc.balanceOf(address(this)), 50 * 10 ** 6);
+    }
+
     receive() external payable {}
 }
