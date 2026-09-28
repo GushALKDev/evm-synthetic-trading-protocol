@@ -98,9 +98,9 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
      *      nonce is TradingStorage's positions nonce at refresh time; any open or close changes it.
      */
     struct PnlSnapshot {
-        int128 netPnl; //    16 bytes -┐
-        uint48 timestamp; //  6 bytes  │  Slot 0 (26/32)
-        uint32 nonce; //      4 bytes -┘
+        int128 netPnl; //   16 bytes -┐
+        uint48 timestamp; // 6 bytes  │  Slot 0 (26/32)
+        uint32 nonce; //     4 bytes -┘
     }
 
     /**
