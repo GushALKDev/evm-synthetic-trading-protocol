@@ -123,6 +123,14 @@ contract BondDepositoryTest is Test {
         bond.activateBonding(100_000 * 10 ** 6);
     }
 
+    function test_ActivateBonding_RevertWhenSolvencyManagerNotSet() public {
+        vm.prank(owner);
+        BondDepository unwired = new BondDepository(address(usdc), vault, address(synth), DISCOUNT_BPS, owner);
+        vm.prank(solvencyManager);
+        vm.expectRevert(BondDepository.SolvencyManagerNotSet.selector);
+        unwired.activateBonding(1_000 * 10 ** 6);
+    }
+
     function test_ActivateBonding_ZeroAmountReverts() public {
         vm.prank(solvencyManager);
         vm.expectRevert(BondDepository.ZeroAmount.selector);
@@ -600,5 +608,35 @@ contract BondDepositoryTest is Test {
         bond.activateBonding(usdcIn);
         vm.prank(alice);
         (, synthOut) = bond.bond(usdcIn);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        INVALID INPUT REVERTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_BondAt_InvalidIdReverts() public {
+        vm.expectRevert(abi.encodeWithSelector(BondDepository.InvalidBondId.selector, uint256(0)));
+        bond.bondAt(alice, 0);
+    }
+
+    function test_Claimable_InvalidIdReverts() public {
+        vm.expectRevert(abi.encodeWithSelector(BondDepository.InvalidBondId.selector, uint256(3)));
+        bond.claimable(alice, 3);
+    }
+
+    function test_SetSolvencyManager_ZeroAddressReverts() public {
+        vm.prank(owner);
+        vm.expectRevert(BondDepository.ZeroAddress.selector);
+        bond.setSolvencyManager(address(0));
+    }
+
+    /// @notice A discount that floors the effective price to 0 is rejected, as a reference price that does
+    function test_SetDiscountBps_EffectivePriceZeroReverts() public {
+        vm.startPrank(owner);
+        bond.setDiscountBps(0);
+        bond.setReferencePrice(1);
+        vm.expectRevert(abi.encodeWithSelector(BondDepository.EffectivePriceZero.selector, uint256(1), uint256(1)));
+        bond.setDiscountBps(1);
+        vm.stopPrank();
     }
 }

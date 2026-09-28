@@ -589,6 +589,12 @@ contract VaultTest is Test {
         assertEq(vault.PAUSE_WITHDRAW(), PAUSE_WITHDRAW);
     }
 
+    function test_SetSolvencyManager_ZeroAddressReverts() public {
+        vm.prank(owner);
+        vm.expectRevert(Vault.ZeroAddress.selector);
+        vault.setSolvencyManager(address(0));
+    }
+
     function test_SetPauseFlags_EmitsEvent() public {
         vm.expectEmit(false, false, false, true);
         emit PauseFlagsUpdated(3);

@@ -827,6 +827,20 @@ contract TradingEngineTest is Test {
         assertEq(tradingStorage.getTrade(tradeId).tp, 60_000 * 1e18);
     }
 
+    function test_UpdateTp_RevertWhenAlreadyTriggeredForShort() public {
+        uint32 tradeId = _openSmallShort(alice);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.TpAlreadyTriggered.selector, DEFAULT_ORACLE_PRICE, DEFAULT_ORACLE_PRICE));
+        engine.updateTp(tradeId, DEFAULT_ORACLE_PRICE, EMPTY_UPDATE);
+    }
+
+    function test_UpdateSl_RevertWhenAlreadyTriggeredForShort() public {
+        uint32 tradeId = _openSmallShort(alice);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.SlAlreadyTriggered.selector, DEFAULT_ORACLE_PRICE, DEFAULT_ORACLE_PRICE));
+        engine.updateSl(tradeId, DEFAULT_ORACLE_PRICE, EMPTY_UPDATE);
+    }
+
     function test_UpdateTp_RevertOnInvalidTpForLong() public {
         uint32 tradeId = _openDefaultTrade(alice);
 
