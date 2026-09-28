@@ -37,6 +37,9 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     uint256 public constant LIQUIDATOR_REWARD_BPS = 1000; // 10% of remaining collateral to liquidator
     uint256 public constant LIQUIDATOR_MIN_REWARD_BPS = 50; // floor: 0.5% of collateral, paid even past 100% loss
     uint256 public constant EXEC_REWARD_BPS = 10; // 0.1% of position size to the TP/SL executor
+    /// @notice Pause flag bits: PAUSE_OPEN blocks openTrade; PAUSE_SETTLE blocks closeTrade, executeLimit and liquidate
+    uint8 public constant PAUSE_OPEN = 1;
+    uint8 public constant PAUSE_SETTLE = 2;
     /// @dev Transient slot holding the engine's ETH balance before the current call's msg.value
     bytes32 private constant _ETH_BASELINE_SLOT = keccak256("TradingEngine.ethBaseline");
 
@@ -50,7 +53,8 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     address public immutable ASSET;
     SpreadManager public immutable SPREAD_MANAGER;
 
-    bool private _paused;
+    /// @notice Active pause flags (PAUSE_OPEN, PAUSE_SETTLE), packed with treasury and fundingFactor
+    uint8 public pauseFlags;
     address public treasury;
     /// @notice Funding rate per hour at 100% skew (WAD), bounded by FundingLib.MIN/MAX_FUNDING_FACTOR
     uint64 public fundingFactor;
@@ -91,15 +95,14 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     );
     event TreasuryUpdated(address indexed newTreasury);
     event FundingFactorUpdated(uint256 newFundingFactor);
-    event Paused(address account);
-    event Unpaused(address account);
+    event PauseFlagsUpdated(uint8 flags);
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
 
-    error EnforcedPause();
-    error ExpectedPause();
+    error EnforcedPause(uint8 flag);
+    error InvalidPauseFlags(uint8 flags);
     error ZeroAddress();
     error BelowMinCollateral(uint64 collateral);
     error ZeroLeverage();
@@ -119,13 +122,8 @@ contract TradingEngine is Ownable, ReentrancyGuard {
                               MODIFIERS
     //////////////////////////////////////////////////////////////*/
 
-    modifier whenNotPaused() {
-        _requireNotPaused();
-        _;
-    }
-
-    modifier whenPaused() {
-        _requirePaused();
+    modifier whenNotPaused(uint8 _flag) {
+        _requireNotPaused(_flag);
         _;
     }
 
@@ -143,12 +141,15 @@ contract TradingEngine is Ownable, ReentrancyGuard {
                           INTERNAL HELPERS
     //////////////////////////////////////////////////////////////*/
 
-    function _requireNotPaused() internal view {
-        if (_paused) revert EnforcedPause();
+    function _requireNotPaused(uint8 _flag) internal view {
+        if (pauseFlags & _flag != 0) revert EnforcedPause(_flag);
     }
 
-    function _requirePaused() internal view {
-        if (!_paused) revert ExpectedPause();
+    /**
+     * @dev Funding factor for accrual: 0 while PAUSE_SETTLE is set, so no funding accrues while traders cannot close
+     */
+    function _activeFundingFactor() internal view returns (uint256) {
+        return pauseFlags & PAUSE_SETTLE != 0 ? 0 : fundingFactor;
     }
 
     /**
@@ -519,7 +520,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         uint128 _tp,
         uint128 _sl,
         bytes[] calldata priceUpdate
-    ) external payable nonReentrant whenNotPaused refundsEthSurplus returns (uint32 tradeId) {
+    ) external payable nonReentrant whenNotPaused(PAUSE_OPEN) refundsEthSurplus returns (uint32 tradeId) {
         // --- CHECKS ---
         if (_collateral < MIN_COLLATERAL) revert BelowMinCollateral(_collateral);
         if (_leverage == 0) revert ZeroLeverage();
@@ -533,7 +534,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         oraclePrice = _computeOpenPrice(_pairIndex, _isLong, _collateral, _leverage, oraclePrice, _expectedPrice, _slippageBps);
 
         // --- EFFECTS ---
-        _updateFundingIndex(_pairIndex, fundingFactor);
+        _updateFundingIndex(_pairIndex, _activeFundingFactor());
 
         // --- INTERACTIONS ---
         tradeId = _executeOpen(msg.sender, _pairIndex, _isLong, _collateral, _leverage, oraclePrice, _tp, _sl);
@@ -554,7 +555,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         external
         payable
         nonReentrant
-        whenNotPaused
+        whenNotPaused(PAUSE_SETTLE)
         refundsEthSurplus
     {
         TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(_tradeId);
@@ -566,7 +567,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         _validateSlippage(executionPrice, _expectedPrice, _slippageBps);
 
         // Update funding index before computing funding owed
-        _updateFundingIndex(trade.pairIndex, fundingFactor);
+        _updateFundingIndex(trade.pairIndex, _activeFundingFactor());
 
         int256 pnlUsdc = _calculatePnl(trade.collateral, trade.leverage, trade.openPrice, executionPrice, trade.isLong);
         uint256 positionSize = _positionSizeWad(trade.collateral, trade.leverage);
@@ -620,13 +621,13 @@ contract TradingEngine is Ownable, ReentrancyGuard {
      *      loss portion included, goes to the Vault. No close fee is charged on liquidation.
      *      Collateral flow: TradingStorage → Vault (rest) + TradingStorage → liquidator (reward).
      *
-     *      Not gated by whenNotPaused: liquidation is the protocol's solvency valve and must stay live
-     *      even while trading is paused. During a Pyth outage the oracle reverts (stale/deviation), so
-     *      liquidation is unavailable by design; see docs/03-architecture.md for the accepted risk.
+     *      Blocked by PAUSE_SETTLE together with closeTrade and executeLimit, so no position is liquidated while
+     *      its owner cannot close it. During a Pyth outage the oracle reverts (stale/deviation), so liquidation
+     *      is unavailable by design; see docs/03-architecture.md for the accepted risk.
      * @param _tradeId The trade ID to liquidate
      * @param priceUpdate Pyth price update data
      */
-    function liquidate(uint256 _tradeId, bytes[] calldata priceUpdate) external payable nonReentrant refundsEthSurplus {
+    function liquidate(uint256 _tradeId, bytes[] calldata priceUpdate) external payable nonReentrant whenNotPaused(PAUSE_SETTLE) refundsEthSurplus {
         TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(_tradeId);
         if (trade.user == address(0)) revert TradeNotFound(_tradeId);
 
@@ -635,7 +636,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         uint128 conservativePrice = _getConservativeLiqPrice(trade.pairIndex, priceUpdate, trade.isLong);
         uint128 executionPrice = _applySpread(conservativePrice, trade.isLong, false, trade.pairIndex);
 
-        _updateFundingIndex(trade.pairIndex, fundingFactor);
+        _updateFundingIndex(trade.pairIndex, _activeFundingFactor());
 
         int256 pnlUsdc = _calculatePnl(trade.collateral, trade.leverage, trade.openPrice, executionPrice, trade.isLong);
         uint256 positionSize = _positionSizeWad(trade.collateral, trade.leverage);
@@ -687,11 +688,11 @@ contract TradingEngine is Ownable, ReentrancyGuard {
      *      so the trader is never pushed negative: on a full-loss stop the executor simply earns 0.
      *      Reverts NoLimitSet if neither TP nor SL is set, LimitNotTriggered if not yet crossed.
      *      Collateral flow: same as closeTrade, plus payout split (trader gets payout - reward, executor
-     *      gets reward). Gated by whenNotPaused like closeTrade.
+     *      gets reward). Blocked by PAUSE_SETTLE like closeTrade.
      * @param _tradeId The trade ID to execute
      * @param priceUpdate Pyth price update data
      */
-    function executeLimit(uint256 _tradeId, bytes[] calldata priceUpdate) external payable nonReentrant whenNotPaused refundsEthSurplus {
+    function executeLimit(uint256 _tradeId, bytes[] calldata priceUpdate) external payable nonReentrant whenNotPaused(PAUSE_SETTLE) refundsEthSurplus {
         TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(_tradeId);
         if (trade.user == address(0)) revert TradeNotFound(_tradeId);
         if (trade.tp == 0 && trade.sl == 0) revert NoLimitSet(_tradeId);
@@ -702,7 +703,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
 
         uint128 executionPrice = _applySpread(oraclePrice, trade.isLong, false, trade.pairIndex);
 
-        _updateFundingIndex(trade.pairIndex, fundingFactor);
+        _updateFundingIndex(trade.pairIndex, _activeFundingFactor());
 
         _executeLimit(trade, _tradeId, executionPrice, isTp);
     }
@@ -769,11 +770,12 @@ contract TradingEngine is Ownable, ReentrancyGuard {
 
     /**
      * @notice Update the take profit price of a trade
+     * @dev Not paused by any flag: changing a level adds no risk, and its execution is blocked by PAUSE_SETTLE
      * @param _tradeId The trade ID
      * @param _newTp The new take profit price (0 to clear)
      * @param priceUpdate Pyth price update data
      */
-    function updateTp(uint256 _tradeId, uint128 _newTp, bytes[] calldata priceUpdate) external payable nonReentrant whenNotPaused refundsEthSurplus {
+    function updateTp(uint256 _tradeId, uint128 _newTp, bytes[] calldata priceUpdate) external payable nonReentrant refundsEthSurplus {
         TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(_tradeId);
         if (trade.user == address(0)) revert TradeNotFound(_tradeId);
         if (trade.user != msg.sender) revert NotTradeOwner(msg.sender, trade.user);
@@ -790,11 +792,12 @@ contract TradingEngine is Ownable, ReentrancyGuard {
 
     /**
      * @notice Update the stop loss price of a trade
+     * @dev Not paused by any flag, like updateTp
      * @param _tradeId The trade ID
      * @param _newSl The new stop loss price (0 to clear)
      * @param priceUpdate Pyth price update data
      */
-    function updateSl(uint256 _tradeId, uint128 _newSl, bytes[] calldata priceUpdate) external payable nonReentrant whenNotPaused refundsEthSurplus {
+    function updateSl(uint256 _tradeId, uint128 _newSl, bytes[] calldata priceUpdate) external payable nonReentrant refundsEthSurplus {
         TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(_tradeId);
         if (trade.user == address(0)) revert TradeNotFound(_tradeId);
         if (trade.user != msg.sender) revert NotTradeOwner(msg.sender, trade.user);
@@ -823,12 +826,13 @@ contract TradingEngine is Ownable, ReentrancyGuard {
      * @notice Set the funding rate per hour at 100% skew (WAD)
      * @dev Writes the new factor first, then accrues every pair at the old factor passed as a parameter, so the
      *      new factor never applies to time already elapsed and no state is written after the external calls.
+     *      While PAUSE_SETTLE is set the accrual factor is 0, as everywhere else.
      */
     function setFundingFactor(uint256 _fundingFactor) external onlyOwner {
         if (_fundingFactor < FundingLib.MIN_FUNDING_FACTOR || _fundingFactor > FundingLib.MAX_FUNDING_FACTOR) {
             revert FundingFactorOutOfBounds(_fundingFactor);
         }
-        uint256 oldFactor = fundingFactor;
+        uint256 oldFactor = _activeFundingFactor();
         // forge-lint: disable-next-line(unsafe-typecast) safe: at most MAX_FUNDING_FACTOR, 1e15 (TradingEngine.sol:828)
         fundingFactor = uint64(_fundingFactor);
         emit FundingFactorUpdated(_fundingFactor);
@@ -839,17 +843,24 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         }
     }
 
-    function pause() external onlyOwner whenNotPaused {
-        _paused = true;
-        emit Paused(msg.sender);
-    }
+    /**
+     * @notice Set the pause flags (PAUSE_OPEN, PAUSE_SETTLE); each bit is independent
+     * @dev When PAUSE_SETTLE changes, every pair is brought up to date at the factor that applied before the change:
+     *      setting it accrues funding up to now, clearing it moves each pair's timestamp to now without accruing,
+     *      so the paused interval never accrues. Flags are written before the calls to TradingStorage.
+     * @param _flags New flag bits, a combination of PAUSE_OPEN and PAUSE_SETTLE
+     */
+    function setPauseFlags(uint8 _flags) external onlyOwner {
+        if (_flags & ~(PAUSE_OPEN | PAUSE_SETTLE) != 0) revert InvalidPauseFlags(_flags);
+        uint256 oldFactor = _activeFundingFactor();
+        bool settleChanged = (pauseFlags ^ _flags) & PAUSE_SETTLE != 0;
+        pauseFlags = _flags;
+        emit PauseFlagsUpdated(_flags);
 
-    function unpause() external onlyOwner whenPaused {
-        _paused = false;
-        emit Unpaused(msg.sender);
-    }
-
-    function paused() external view returns (bool) {
-        return _paused;
+        if (!settleChanged) return;
+        uint256 pairsCount = TRADING_STORAGE.getPairsCount();
+        for (uint256 i; i < pairsCount; ++i) {
+            _updateFundingIndex(i, oldFactor);
+        }
     }
 }

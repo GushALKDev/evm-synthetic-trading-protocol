@@ -30,6 +30,8 @@ contract MockUSDC is ERC20 {
 }
 
 contract TradingEngineTest is Test {
+    uint8 constant PAUSE_OPEN = 1; // TradingEngine.PAUSE_OPEN
+    uint8 constant PAUSE_SETTLE = 2; // TradingEngine.PAUSE_SETTLE
     using SafeTransferLib for address;
 
     TradingEngine engine;
@@ -77,8 +79,7 @@ contract TradingEngineTest is Test {
     event TpUpdated(uint256 indexed tradeId, uint128 newTp);
     event SlUpdated(uint256 indexed tradeId, uint128 newSl);
     event TreasuryUpdated(address indexed newTreasury);
-    event Paused(address account);
-    event Unpaused(address account);
+    event PauseFlagsUpdated(uint8 flags);
 
     function setUp() public {
         EMPTY_UPDATE = new bytes[](0);
@@ -418,10 +419,10 @@ contract TradingEngineTest is Test {
 
     function test_OpenTrade_RevertWhenPaused() public {
         vm.prank(owner);
-        engine.pause();
+        engine.setPauseFlags(PAUSE_OPEN);
 
         vm.prank(alice);
-        vm.expectRevert(TradingEngine.EnforcedPause.selector);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.EnforcedPause.selector, PAUSE_OPEN));
         engine.openTrade(DEFAULT_PAIR_INDEX, true, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE);
     }
 
@@ -757,10 +758,10 @@ contract TradingEngineTest is Test {
         uint32 tradeId = _openDefaultTrade(alice);
 
         vm.prank(owner);
-        engine.pause();
+        engine.setPauseFlags(PAUSE_SETTLE);
 
         vm.prank(alice);
-        vm.expectRevert(TradingEngine.EnforcedPause.selector);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.EnforcedPause.selector, PAUSE_SETTLE));
         engine.closeTrade(tradeId, _longClosePrice(DEFAULT_ORACLE_PRICE), DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
     }
 
@@ -814,15 +815,16 @@ contract TradingEngineTest is Test {
         engine.updateTp(tradeId, 60_000 * 1e18, EMPTY_UPDATE);
     }
 
-    function test_UpdateTp_RevertWhenPaused() public {
+    /// @notice updateTp is not paused by any flag
+    function test_UpdateTp_WorksWithAllFlagsSet() public {
         uint32 tradeId = _openDefaultTrade(alice);
 
         vm.prank(owner);
-        engine.pause();
+        engine.setPauseFlags(PAUSE_OPEN | PAUSE_SETTLE);
 
         vm.prank(alice);
-        vm.expectRevert(TradingEngine.EnforcedPause.selector);
         engine.updateTp(tradeId, 60_000 * 1e18, EMPTY_UPDATE);
+        assertEq(tradingStorage.getTrade(tradeId).tp, 60_000 * 1e18);
     }
 
     function test_UpdateTp_RevertOnInvalidTpForLong() public {
@@ -893,15 +895,16 @@ contract TradingEngineTest is Test {
         engine.updateSl(tradeId, 40_000 * 1e18, EMPTY_UPDATE);
     }
 
-    function test_UpdateSl_RevertWhenPaused() public {
+    /// @notice updateSl is not paused by any flag
+    function test_UpdateSl_WorksWithAllFlagsSet() public {
         uint32 tradeId = _openDefaultTrade(alice);
 
         vm.prank(owner);
-        engine.pause();
+        engine.setPauseFlags(PAUSE_OPEN | PAUSE_SETTLE);
 
         vm.prank(alice);
-        vm.expectRevert(TradingEngine.EnforcedPause.selector);
         engine.updateSl(tradeId, 40_000 * 1e18, EMPTY_UPDATE);
+        assertEq(tradingStorage.getTrade(tradeId).sl, 40_000 * 1e18);
     }
 
     function test_UpdateSl_RevertOnInvalidSlForLong() public {
@@ -957,68 +960,98 @@ contract TradingEngineTest is Test {
                           PAUSE TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_Pause() public {
-        vm.prank(owner);
-        engine.pause();
-        assertTrue(engine.paused());
+    /// @notice The local flag constants of this file match the engine's
+    function test_PauseFlagConstants() public view {
+        assertEq(engine.PAUSE_OPEN(), PAUSE_OPEN);
+        assertEq(engine.PAUSE_SETTLE(), PAUSE_SETTLE);
     }
 
-    function test_Pause_EmitsEvent() public {
+    function test_SetPauseFlags() public {
+        uint8 both = PAUSE_OPEN | PAUSE_SETTLE;
+        vm.prank(owner);
+        engine.setPauseFlags(both);
+        assertEq(engine.pauseFlags(), both);
+
+        vm.prank(owner);
+        engine.setPauseFlags(0);
+        assertEq(engine.pauseFlags(), 0);
+    }
+
+    function test_SetPauseFlags_EmitsEvent() public {
         vm.expectEmit(false, false, false, true);
-        emit Paused(owner);
+        emit PauseFlagsUpdated(2);
 
         vm.prank(owner);
-        engine.pause();
+        engine.setPauseFlags(2);
     }
 
-    function test_Unpause() public {
-        vm.prank(owner);
-        engine.pause();
-
-        vm.prank(owner);
-        engine.unpause();
-        assertFalse(engine.paused());
-    }
-
-    function test_Unpause_EmitsEvent() public {
-        vm.prank(owner);
-        engine.pause();
-
-        vm.expectEmit(false, false, false, true);
-        emit Unpaused(owner);
-
-        vm.prank(owner);
-        engine.unpause();
-    }
-
-    function test_Pause_RevertIfNotOwner() public {
+    function test_SetPauseFlags_RevertIfNotOwner() public {
         vm.prank(alice);
         vm.expectRevert();
-        engine.pause();
+        engine.setPauseFlags(1);
     }
 
-    function test_Unpause_RevertIfNotOwner() public {
+    function test_SetPauseFlags_RevertOnUnknownBits() public {
         vm.prank(owner);
-        engine.pause();
-
-        vm.prank(alice);
-        vm.expectRevert();
-        engine.unpause();
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.InvalidPauseFlags.selector, uint8(4)));
+        engine.setPauseFlags(4);
     }
 
-    function test_Pause_RevertIfAlreadyPaused() public {
-        vm.prank(owner);
-        engine.pause();
+    /// @notice PAUSE_OPEN alone does not touch the funding state
+    function test_SetPauseFlags_OpenOnlyLeavesFundingUntouched() public {
+        _openDefaultTrade(alice);
+        vm.warp(block.timestamp + 1 hours);
+        uint256 lastUpdated = tradingStorage.getFundingLastUpdated(DEFAULT_PAIR_INDEX);
 
         vm.prank(owner);
-        vm.expectRevert(TradingEngine.EnforcedPause.selector);
-        engine.pause();
+        engine.setPauseFlags(PAUSE_OPEN);
+        assertEq(tradingStorage.getFundingLastUpdated(DEFAULT_PAIR_INDEX), lastUpdated);
     }
 
-    function test_Unpause_RevertIfNotPaused() public {
+    /// @notice Setting PAUSE_SETTLE accrues up to now; clearing it moves the timestamp without accruing
+    function test_SetPauseFlags_SettleAccruesThenFreezesFunding() public {
+        _openDefaultTrade(alice);
+        _openSmallShort(bob);
+        vm.warp(block.timestamp + 1 hours);
+
         vm.prank(owner);
-        vm.expectRevert(TradingEngine.ExpectedPause.selector);
-        engine.unpause();
+        engine.setPauseFlags(PAUSE_SETTLE);
+        assertEq(tradingStorage.getFundingLastUpdated(DEFAULT_PAIR_INDEX), block.timestamp, "not accrued when the pause started");
+        int256 indexAtPause = tradingStorage.getCumulativeFundingIndex(DEFAULT_PAIR_INDEX, true);
+        assertGt(indexAtPause, 0, "no funding accrued before the pause");
+
+        vm.warp(block.timestamp + 5 days);
+        vm.prank(owner);
+        engine.setPauseFlags(0);
+        assertEq(tradingStorage.getFundingLastUpdated(DEFAULT_PAIR_INDEX), block.timestamp, "timestamp not moved past the pause");
+        assertEq(tradingStorage.getCumulativeFundingIndex(DEFAULT_PAIR_INDEX, true), indexAtPause, "funding accrued during the pause");
+    }
+
+    /// @notice setFundingFactor while settlement is paused accrues nothing for the paused time
+    function test_SetFundingFactor_WhileSettlePausedDoesNotAccrue() public {
+        _openDefaultTrade(alice);
+        _openSmallShort(bob);
+        vm.prank(owner);
+        engine.setPauseFlags(PAUSE_SETTLE);
+        int256 indexAtPause = tradingStorage.getCumulativeFundingIndex(DEFAULT_PAIR_INDEX, true);
+
+        vm.warp(block.timestamp + 1 days);
+        vm.prank(owner);
+        engine.setFundingFactor(2e14);
+        assertEq(tradingStorage.getCumulativeFundingIndex(DEFAULT_PAIR_INDEX, true), indexAtPause);
+    }
+
+    /// @notice An open while settlement is paused (PAUSE_OPEN clear) accrues nothing for the paused time
+    function test_OpenTrade_WhileSettlePausedDoesNotAccrue() public {
+        _openDefaultTrade(alice);
+        _openSmallShort(bob);
+        vm.prank(owner);
+        engine.setPauseFlags(PAUSE_SETTLE);
+        int256 indexAtPause = tradingStorage.getCumulativeFundingIndex(DEFAULT_PAIR_INDEX, true);
+
+        vm.warp(block.timestamp + 1 days);
+        _openDefaultTrade(alice);
+        assertEq(tradingStorage.getCumulativeFundingIndex(DEFAULT_PAIR_INDEX, true), indexAtPause);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -2301,14 +2334,13 @@ contract TradingEngineTest is Test {
         engine.liquidate(999, EMPTY_UPDATE);
     }
 
-    function test_Liquidate_WorksWhilePaused() public {
-        // Liquidation is the solvency valve and must stay live even while trading is paused.
+    function test_Liquidate_WorksWhileOpenPaused() public {
         uint32 tradeId = _openDefaultTrade(alice);
         uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 9200);
         mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
 
         vm.prank(owner);
-        engine.pause();
+        engine.setPauseFlags(PAUSE_OPEN);
 
         uint256 bobBefore = usdc.balanceOf(bob);
         vm.prank(bob);
@@ -2316,6 +2348,19 @@ contract TradingEngineTest is Test {
 
         assertGt(usdc.balanceOf(bob), bobBefore);
         assertEq(tradingStorage.getTrade(tradeId).user, address(0));
+    }
+
+    /// @notice PAUSE_SETTLE blocks liquidation together with closeTrade
+    function test_Liquidate_RevertWhenSettlePaused() public {
+        uint32 tradeId = _openDefaultTrade(alice);
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 9200));
+
+        vm.prank(owner);
+        engine.setPauseFlags(PAUSE_SETTLE);
+
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.EnforcedPause.selector, PAUSE_SETTLE));
+        engine.liquidate(tradeId, EMPTY_UPDATE);
     }
 
     function test_Liquidate_Permissionless_OwnerCanLiquidate() public {
@@ -2796,10 +2841,10 @@ contract TradingEngineTest is Test {
         mockOracle.setPrice(DEFAULT_PAIR_INDEX, oracle);
 
         vm.prank(owner);
-        engine.pause();
+        engine.setPauseFlags(PAUSE_SETTLE);
 
         vm.prank(bob);
-        vm.expectRevert(TradingEngine.EnforcedPause.selector);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.EnforcedPause.selector, PAUSE_SETTLE));
         engine.executeLimit(tradeId, EMPTY_UPDATE);
     }
 

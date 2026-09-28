@@ -105,7 +105,7 @@ contract OpenPnlNavRegressionTest is Test {
 
         uint256 liability = _liability();
         assertGt(liability, 20_000 * 10 ** 6, "setup: expected a large unrealised profit");
-        (uint256 shares,) = vault.withdrawalRequests(lp);
+        (uint256 shares,,) = vault.withdrawalRequests(lp);
         uint256 expected = (shares * (usdc.balanceOf(address(vault)) - liability + 1)) / (vault.totalSupply() + 1e12);
 
         uint256 before = usdc.balanceOf(lp);

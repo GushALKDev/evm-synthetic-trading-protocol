@@ -34,6 +34,7 @@ contract MockUSDC is ERC20 {
  *      the open totals exactly. 1,000 USDC at 10x on 50,000 is 10,000 USD of size and 0.2 asset units.
  */
 contract VaultNavTest is Test {
+    uint8 constant PAUSE_DEPOSIT = 1; // Vault.PAUSE_DEPOSIT
     Vault vault;
     TradingStorage tradingStorage;
     MockOracle mockOracle;
@@ -391,17 +392,17 @@ contract VaultNavTest is Test {
 
     function test_RefreshAndDeposit_RevertsWhenPaused() public {
         vm.prank(owner);
-        vault.pause();
+        vault.setPauseFlags(PAUSE_DEPOSIT);
         vm.prank(lp);
-        vm.expectRevert(Vault.EnforcedPause.selector);
+        vm.expectRevert(abi.encodeWithSelector(Vault.EnforcedPause.selector, PAUSE_DEPOSIT));
         vault.refreshAndDeposit(1_000 * 10 ** 6, lp, EMPTY);
     }
 
     function test_RefreshAndMint_RevertsWhenPaused() public {
         vm.prank(owner);
-        vault.pause();
+        vault.setPauseFlags(PAUSE_DEPOSIT);
         vm.prank(lp);
-        vm.expectRevert(Vault.EnforcedPause.selector);
+        vm.expectRevert(abi.encodeWithSelector(Vault.EnforcedPause.selector, PAUSE_DEPOSIT));
         vault.refreshAndMint(1_000 * 1e18, lp, EMPTY);
     }
 

@@ -114,6 +114,9 @@ contract ProtocolHandler is CommonBase, StdUtils {
     /// @notice Largest excess loss (losses beyond each position's collateral, 18 decimals) seen at a refresh
     uint256 public ghostMaxExcessLoss;
 
+    /// @notice Closes, TP/SL executions or liquidations that succeeded while PAUSE_SETTLE was set
+    uint256 public ghostSettledWhileSettlePaused;
+
     /// @dev Entry funding index of the position being settled, read before the call (deleteTrade clears it)
     int256 internal _entryFundingIndex;
 
@@ -158,7 +161,7 @@ contract ProtocolHandler is CommonBase, StdUtils {
         public
         countCall("openTrade")
     {
-        if (ENGINE.paused()) return;
+        if (ENGINE.pauseFlags() & ENGINE.PAUSE_OPEN() != 0) return;
         OpenParams memory p = _openParams(_actorSeed, _pairSeed, _collateral, _leverage, _isLong, _tpSeed, _slSeed);
         if (TRADING_STORAGE.getOpenInterest(p.pair) + p.sizeWad > MAX_OI) return;
 
@@ -195,13 +198,32 @@ contract ProtocolHandler is CommonBase, StdUtils {
         p.sl = _limitPrice(_isLong, false, oracle, p.exec, _slSeed);
     }
 
+    /**
+     * @dev While PAUSE_SETTLE is set, a settlement action still calls the engine: an unexpected success is recorded
+     *      in ghostSettledWhileSettlePaused and the call returns (a revert would undo the ghost); the expected
+     *      revert ends the call with NotSettled, so the metrics table still counts only settlements
+     */
+    function _probeWhileSettlePaused(address _caller, bytes memory _call) internal {
+        vm.prank(_caller);
+        (bool ok,) = address(ENGINE).call(_call);
+        if (!ok) revert NotSettled();
+        ghostSettledWhileSettlePaused++;
+    }
+
+    function _settlePaused() internal view returns (bool) {
+        return ENGINE.pauseFlags() & ENGINE.PAUSE_SETTLE() != 0;
+    }
+
     /// @notice The owner of an open position closes it at the oracle price
     function closeTrade(uint256 _tradeSeed) external countCall("closeTrade") {
-        if (ENGINE.paused()) revert NotSettled();
         (uint256 tradeId, TradingStorage.Trade memory trade) = _pickRandom(_tradeSeed);
         if (trade.user == address(0)) revert NotSettled();
 
         uint128 exec = _closeExec(ORACLE.peekPrice(trade.pairIndex), trade.isLong);
+        if (_settlePaused()) {
+            _probeWhileSettlePaused(trade.user, abi.encodeCall(ENGINE.closeTrade, (tradeId, exec, 1, EMPTY_UPDATE)));
+            return;
+        }
         uint256 traderBefore = USDC.balanceOf(trade.user);
 
         _entryFundingIndex = TRADING_STORAGE.getTradeFundingIndex(tradeId);
@@ -221,6 +243,10 @@ contract ProtocolHandler is CommonBase, StdUtils {
         if (trade.user == address(0)) revert NotSettled();
 
         uint128 exec = _closeExec(_liqPrice(trade.pairIndex, trade.isLong), trade.isLong);
+        if (_settlePaused()) {
+            _probeWhileSettlePaused(KEEPER, abi.encodeCall(ENGINE.liquidate, (tradeId, EMPTY_UPDATE)));
+            return;
+        }
         uint256 keeperBefore = USDC.balanceOf(KEEPER);
         uint256 traderBefore = USDC.balanceOf(trade.user);
 
@@ -233,11 +259,14 @@ contract ProtocolHandler is CommonBase, StdUtils {
 
     /// @notice A keeper executes a triggered TP or SL; reverts (and is discarded) when nothing is triggered
     function executeLimit(uint256 _tradeSeed) external countCall("executeLimit") {
-        if (ENGINE.paused()) revert NotSettled();
         (uint256 tradeId, TradingStorage.Trade memory trade) = _pickTriggered(_tradeSeed);
         if (trade.user == address(0)) revert NotSettled();
 
         uint128 exec = _closeExec(ORACLE.peekPrice(trade.pairIndex), trade.isLong);
+        if (_settlePaused()) {
+            _probeWhileSettlePaused(KEEPER, abi.encodeCall(ENGINE.executeLimit, (tradeId, EMPTY_UPDATE)));
+            return;
+        }
         uint256 keeperBefore = USDC.balanceOf(KEEPER);
         uint256 traderBefore = USDC.balanceOf(trade.user);
 
@@ -247,9 +276,8 @@ contract ProtocolHandler is CommonBase, StdUtils {
         _record(tradeId, trade, exec, LIMIT, USDC.balanceOf(trade.user) - traderBefore, USDC.balanceOf(KEEPER) - keeperBefore);
     }
 
-    /// @notice The owner moves the TP of an open position (seed 0 clears it)
+    /// @notice The owner moves the TP of an open position (seed 0 clears it); no flag pauses it
     function updateTp(uint256 _tradeSeed, uint256 _tpSeed) external countCall("updateTp") {
-        if (ENGINE.paused()) return;
         (uint256 tradeId, TradingStorage.Trade memory trade) = _pickRandom(_tradeSeed);
         if (trade.user == address(0)) return;
         uint128 tp = _limitPrice(trade.isLong, true, ORACLE.peekPrice(trade.pairIndex), trade.openPrice, _tpSeed);
@@ -257,9 +285,8 @@ contract ProtocolHandler is CommonBase, StdUtils {
         ENGINE.updateTp(tradeId, tp, EMPTY_UPDATE);
     }
 
-    /// @notice The owner moves the SL of an open position (seed 0 clears it)
+    /// @notice The owner moves the SL of an open position (seed 0 clears it); no flag pauses it
     function updateSl(uint256 _tradeSeed, uint256 _slSeed) external countCall("updateSl") {
-        if (ENGINE.paused()) return;
         (uint256 tradeId, TradingStorage.Trade memory trade) = _pickRandom(_tradeSeed);
         if (trade.user == address(0)) return;
         uint128 sl = _limitPrice(trade.isLong, false, ORACLE.peekPrice(trade.pairIndex), trade.openPrice, _slSeed);

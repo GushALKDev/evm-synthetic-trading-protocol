@@ -43,7 +43,7 @@ contract MockUSDC is ERC20 {
  * @dev Two handlers drive the system: ProtocolHandler (trading on three pairs, with a settlement model, target
  *      selection and PnL snapshot refreshes checked against a brute-force valuation) and LiquidityHandler (LP
  *      flows with and without a snapshot refresh, time, price moves in both directions with a confidence band of
- *      0% to 2%, pause, solvency actions). The Vault starts with 1,000,000 USDC from an LP that never withdraws.
+ *      0% to 2%, the four pause flags, solvency actions). The Vault starts with 1,000,000 USDC from an LP that never withdraws.
  *      ProtocolKeeperLatencyInvariantTest runs the same invariants with a one-day keeper latency.
  */
 contract ProtocolInvariantTest is StdInvariant, Test {
@@ -230,7 +230,7 @@ contract ProtocolInvariantTest is StdInvariant, Test {
         uint256 requested;
         uint256 count = liquidity.actorsLength();
         for (uint256 i; i < count; ++i) {
-            (uint256 shares,) = vault.withdrawalRequests(liquidity.actors(i));
+            (uint256 shares,,) = vault.withdrawalRequests(liquidity.actors(i));
             requested += shares;
         }
         assertEq(vault.balanceOf(address(vault)), requested, "escrow differs from pending requests");
@@ -296,6 +296,41 @@ contract ProtocolInvariantTest is StdInvariant, Test {
     /// @notice checkAndAct never opened a bonding round with the realised ratio at or above 95%
     function invariant_BondingNeverStartsAboveCriticalRealisedRatio() public view {
         assertEq(liquidity.ghostBondingAboveCritical(), 0, "bonding opened at a realised ratio >= 95%");
+    }
+
+    /// @notice No close, TP/SL execution or liquidation succeeded while the engine's PAUSE_SETTLE was set
+    function invariant_NoSettlementWhileSettlePaused() public view {
+        assertEq(handler.ghostSettledWhileSettlePaused(), 0, "settlement succeeded under PAUSE_SETTLE");
+    }
+
+    /**
+     * @notice No withdrawal request expires because of time spent under the vault's PAUSE_WITHDRAW: while the flag
+     *         is clear, a request inside its window by the model (unlocked, before the unextended expiry plus the
+     *         exact seconds paused since the request) can be executed
+     */
+    function invariant_WithdrawPauseDoesNotExpireRequests() public view {
+        uint256 count = liquidity.actorsLength();
+        for (uint256 i; i < count; ++i) {
+            assertFalse(liquidity.expiredByPause(liquidity.actors(i)), "request expired by time spent under PAUSE_WITHDRAW");
+        }
+    }
+
+    /**
+     * @notice No funding accrues for time spent under PAUSE_SETTLE: while it is set the funding indexes of every pair
+     *         equal those right after it was set, clearing it left them unchanged, and no pair's accrual interval
+     *         starts before the last time it was cleared
+     */
+    function invariant_NoFundingAccruesWhileSettlePaused() public view {
+        assertEq(liquidity.ghostFundingAccruedWhileSettlePaused(), 0, "funding index changed across a settlement pause");
+        bool paused = engine.pauseFlags() & engine.PAUSE_SETTLE() != 0;
+        for (uint256 pair; pair < handler.PAIRS(); ++pair) {
+            if (paused) {
+                assertEq(tradingStorage.getCumulativeFundingIndex(pair, true), liquidity.ghostIndexAtSettlePauseLong(pair), "long index moved while paused");
+                assertEq(tradingStorage.getCumulativeFundingIndex(pair, false), liquidity.ghostIndexAtSettlePauseShort(pair), "short index moved while paused");
+            }
+            uint256 lastUpdated = tradingStorage.getFundingLastUpdated(pair);
+            if (lastUpdated != 0) assertGe(lastUpdated, liquidity.ghostLastSettleUnpause(), "accrual interval starts inside a pause");
+        }
     }
 
     /// @notice Share price is strictly positive while shares are outstanding

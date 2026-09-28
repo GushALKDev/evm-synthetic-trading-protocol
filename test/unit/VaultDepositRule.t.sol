@@ -22,6 +22,7 @@ import {RegressionUSDC} from "../regression/RegressionBase.sol";
  *      deposit, or Solady's own maxDeposit check would revert with DepositMoreThanMax instead of the named error.
  */
 contract VaultDepositRuleTest is Test {
+    uint8 constant PAUSE_DEPOSIT = 1; // Vault.PAUSE_DEPOSIT
     TradingEngine engine;
     TradingStorage tradingStorage;
     Vault vault;
@@ -106,7 +107,7 @@ contract VaultDepositRuleTest is Test {
         }
         if (_s.paused) {
             vm.prank(owner);
-            vault.pause();
+            vault.setPauseFlags(PAUSE_DEPOSIT);
         }
     }
 

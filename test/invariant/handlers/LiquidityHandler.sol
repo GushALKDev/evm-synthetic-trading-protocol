@@ -4,6 +4,7 @@ pragma solidity 0.8.24;
 import {CommonBase} from "forge-std/Base.sol";
 import {StdUtils} from "forge-std/StdUtils.sol";
 import {TradingEngine} from "../../../src/TradingEngine.sol";
+import {TradingStorage} from "../../../src/TradingStorage.sol";
 import {Vault} from "../../../src/Vault.sol";
 import {AssistantFund} from "../../../src/AssistantFund.sol";
 import {SolvencyManager} from "../../../src/SolvencyManager.sol";
@@ -16,14 +17,15 @@ import {IMintableUSDC} from "./IMintableUSDC.sol";
  * @title LiquidityHandler
  * @author GushALKDev
  * @notice LP and environment side of the protocol invariant suite: deposits, withdrawal requests, executions
- *         and cancellations, epoch advances, time, price moves in both directions, pause and unpause, and the
- *         solvency actions (checkAndAct, bond, skim).
+ *         and cancellations, epoch advances, time, price moves in both directions, the four pause flags (engine
+ *         PAUSE_OPEN and PAUSE_SETTLE, vault PAUSE_DEPOSIT and PAUSE_WITHDRAW, each set and cleared on its own),
+ *         and the solvency actions (checkAndAct, bond, skim).
  * @dev Each flow into or out of the Vault is modelled before the call from the documented rules and recorded
  *      in a ghost variable; the measured amount is compared with the model (ghostMismatches).
  *      deposit, executeWithdrawal and checkAndAct take a mode seed: 0 acts on the current snapshot (possibly
  *      stale), 1 refreshes the snapshot first, 2 goes through the refresh-and-act entry point. Deposits and
  *      executions are wrapped in try/catch so the handler can count what succeeded against the rules: an
- *      unexpected revert is a mismatch; an expected one (paused, stale snapshot, ratio below 100%, nothing to
+ *      unexpected revert is a mismatch; an expected one (paused, stale snapshot, bonding open or due, nothing to
  *      execute) ends the call with NotExecuted, so in the forge metrics table calls - reverts is the number of
  *      deposits and executions that went through.
  */
@@ -74,6 +76,19 @@ contract LiquidityHandler is CommonBase, StdUtils {
     /// @notice Bonding rounds opened while the realised ratio was at or above CRITICAL_CR
     uint256 public ghostBondingAboveCritical;
 
+    /// @notice Seconds under the vault's PAUSE_WITHDRAW before its current setting, and when it was last set
+    uint256 public ghostWithdrawPausedTotal;
+    uint256 public ghostWithdrawPausedSince;
+    /// @notice Handler paused seconds when each LP made its current request
+    mapping(address => uint256) public ghostPausedAtRequest;
+
+    /// @notice Funding indexes of each pair right after PAUSE_SETTLE was set, and when it was last cleared
+    int256[PAIRS] public ghostIndexAtSettlePauseLong;
+    int256[PAIRS] public ghostIndexAtSettlePauseShort;
+    uint256 public ghostLastSettleUnpause;
+    /// @notice Pairs whose funding index changed between setting and clearing PAUSE_SETTLE
+    uint256 public ghostFundingAccruedWhileSettlePaused;
+
     /// @dev The action was rejected for a documented reason or had nothing to do
     error NotExecuted();
 
@@ -117,7 +132,6 @@ contract LiquidityHandler is CommonBase, StdUtils {
      * @dev The injection made inside the deposit is recorded like one from checkAndAct.
      */
     function deposit(uint256 _actorSeed, uint256 _assets, uint256 _mode) external countCall("deposit") {
-        if (VAULT.paused()) revert NotExecuted();
         address lp = _actor(_actorSeed);
         uint256 assets = bound(_assets, 1 * 10 ** 6, 100_000 * 10 ** 6);
         _mode %= 3;
@@ -161,13 +175,14 @@ contract LiquidityHandler is CommonBase, StdUtils {
 
     /// @notice Request a withdrawal of a fraction of the LP's shares (replaces any pending request)
     function requestWithdrawal(uint256 _actorSeed, uint256 _bps) external countCall("requestWithdrawal") {
-        if (VAULT.paused()) return;
+        if (VAULT.pauseFlags() & VAULT.PAUSE_WITHDRAW() != 0) return;
         address lp = _actor(_actorSeed);
-        (uint256 escrowed,) = VAULT.withdrawalRequests(lp);
+        (uint256 escrowed,,) = VAULT.withdrawalRequests(lp);
         uint256 shares = ((VAULT.balanceOf(lp) + escrowed) * bound(_bps, 1, 10_000)) / 10_000;
         if (shares == 0) return;
         vm.prank(lp);
         VAULT.requestWithdrawal(shares);
+        ghostPausedAtRequest[lp] = withdrawPausedSeconds();
     }
 
     /// @notice An LP executes an unlocked request; succeeds only with a fresh snapshot, paid at the NAV
@@ -177,7 +192,7 @@ contract LiquidityHandler is CommonBase, StdUtils {
         _mode %= 3;
         if (_mode != 0) VAULT.refreshPnlSnapshot(EMPTY_UPDATE);
         bool fresh = VAULT.isPnlSnapshotFresh();
-        (uint256 shares,) = VAULT.withdrawalRequests(lp);
+        (uint256 shares,,) = VAULT.withdrawalRequests(lp);
         uint256 expected = VAULT.previewRedeem(shares);
         uint256 before = USDC.balanceOf(lp);
 
@@ -208,7 +223,7 @@ contract LiquidityHandler is CommonBase, StdUtils {
 
     function cancelWithdrawal(uint256 _actorSeed) external countCall("cancelWithdrawal") {
         address lp = _actor(_actorSeed);
-        (uint256 shares,) = VAULT.withdrawalRequests(lp);
+        (uint256 shares,,) = VAULT.withdrawalRequests(lp);
         if (shares == 0) return;
         vm.prank(lp);
         VAULT.cancelWithdrawal();
@@ -248,17 +263,66 @@ contract LiquidityHandler is CommonBase, StdUtils {
     }
 
     /**
-     * @notice Pause or unpause the engine or the Vault
-     * @dev Unpauses whenever the target is paused, pauses only one call in four, so most of a run is live.
+     * @notice Set or clear one pause flag: engine PAUSE_OPEN or PAUSE_SETTLE, vault PAUSE_DEPOSIT or PAUSE_WITHDRAW
+     * @dev A set flag is always cleared; a clear one is set one call in four, so most of a run is live. The
+     *      handler keeps its own PAUSE_WITHDRAW clock and, for PAUSE_SETTLE, the funding indexes at the pause.
      */
     function togglePause(uint256 _seed) external countCall("togglePause") {
-        bool engine = _seed % 2 == 0;
-        bool isPaused = engine ? ENGINE.paused() : VAULT.paused();
-        if (!isPaused && _seed % 8 >= 2) return;
-        vm.startPrank(OWNER);
-        if (engine) isPaused ? ENGINE.unpause() : ENGINE.pause();
-        else isPaused ? VAULT.unpause() : VAULT.pause();
-        vm.stopPrank();
+        uint256 which = _seed % 4;
+        bool engine = which < 2;
+        uint8 flag = engine ? (which == 0 ? ENGINE.PAUSE_OPEN() : ENGINE.PAUSE_SETTLE()) : (which == 2 ? VAULT.PAUSE_DEPOSIT() : VAULT.PAUSE_WITHDRAW());
+        uint8 flags = engine ? ENGINE.pauseFlags() : VAULT.pauseFlags();
+        bool isSet = flags & flag != 0;
+        if (!isSet && (_seed / 4) % 4 != 0) return;
+        uint8 newFlags = isSet ? flags & ~flag : flags | flag;
+
+        if (which == 3) {
+            if (isSet) ghostWithdrawPausedTotal = withdrawPausedSeconds();
+            else ghostWithdrawPausedSince = block.timestamp;
+        }
+        vm.prank(OWNER);
+        if (engine) ENGINE.setPauseFlags(newFlags);
+        else VAULT.setPauseFlags(newFlags);
+
+        if (which == 1) _recordSettlePause(isSet);
+    }
+
+    function _recordSettlePause(bool _cleared) internal {
+        TradingStorage store = ENGINE.TRADING_STORAGE();
+        for (uint256 pair; pair < PAIRS; ++pair) {
+            int256 indexLong = store.getCumulativeFundingIndex(pair, true);
+            int256 indexShort = store.getCumulativeFundingIndex(pair, false);
+            if (_cleared) {
+                if (indexLong != ghostIndexAtSettlePauseLong[pair] || indexShort != ghostIndexAtSettlePauseShort[pair]) {
+                    ghostFundingAccruedWhileSettlePaused++;
+                }
+            } else {
+                ghostIndexAtSettlePauseLong[pair] = indexLong;
+                ghostIndexAtSettlePauseShort[pair] = indexShort;
+            }
+        }
+        if (_cleared) ghostLastSettleUnpause = block.timestamp;
+    }
+
+    /// @notice Seconds spent under the vault's PAUSE_WITHDRAW, from the handler's own clock
+    function withdrawPausedSeconds() public view returns (uint256 total) {
+        total = ghostWithdrawPausedTotal;
+        if (VAULT.pauseFlags() & VAULT.PAUSE_WITHDRAW() != 0) total += block.timestamp - ghostWithdrawPausedSince;
+    }
+
+    /**
+     * @notice Whether an LP's pending request is inside its window by the model (unlocked, and before the
+     *         unextended expiry plus the exact seconds paused since the request) while the vault says it cannot
+     *         execute with PAUSE_WITHDRAW clear
+     */
+    function expiredByPause(address _lp) external view returns (bool) {
+        (uint256 shares, uint256 requestEpoch,) = VAULT.withdrawalRequests(_lp);
+        if (shares == 0 || VAULT.pauseFlags() & VAULT.PAUSE_WITHDRAW() != 0) return false;
+        uint256 epochLength = VAULT.EPOCH_LENGTH();
+        uint256 unlockTime = VAULT.DEPLOY_TIMESTAMP() + (requestEpoch + VAULT.WITHDRAWAL_DELAY_EPOCHS()) * epochLength;
+        uint256 expiryTime = unlockTime + VAULT.WITHDRAWAL_WINDOW_EPOCHS() * epochLength + withdrawPausedSeconds() - ghostPausedAtRequest[_lp];
+        bool inModelWindow = block.timestamp >= unlockTime && block.timestamp < expiryTime;
+        return inModelWindow && !VAULT.canExecuteWithdrawal(_lp);
     }
 
     /*//////////////////////////////////////////////////////////////

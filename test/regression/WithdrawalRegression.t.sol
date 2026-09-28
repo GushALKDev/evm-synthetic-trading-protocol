@@ -16,6 +16,7 @@ import {RegressionUSDC} from "./RegressionBase.sol";
  * @dev Uses only functions that existed before the fix; new errors are matched by selector literal.
  */
 contract WithdrawalRegressionTest is Test {
+    uint8 constant PAUSE_DEPOSIT = 1; // Vault.PAUSE_DEPOSIT
     Vault vault;
     RegressionUSDC usdc;
 
@@ -89,7 +90,7 @@ contract WithdrawalRegressionTest is Test {
     /// @notice While paused, deposit and mint revert, so maxDeposit and maxMint report 0
     function test_Regression_MaxDepositAndMaxMintZeroWhenPaused() public {
         vm.prank(owner);
-        vault.pause();
+        vault.setPauseFlags(PAUSE_DEPOSIT);
         assertEq(vault.maxDeposit(alice), 0, "maxDeposit not 0 while paused");
         assertEq(vault.maxMint(alice), 0, "maxMint not 0 while paused");
     }
