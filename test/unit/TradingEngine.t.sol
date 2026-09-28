@@ -2268,19 +2268,19 @@ contract TradingEngineTest is Test {
 
     function test_OpenTrade_RevertWhenPreLiquidatable() public {
         // A spread large enough to open straight into the liquidation zone must be rejected.
-        // At 100x leverage, a ~90 bps spread already means 90% instant loss.
+        // At 100x, 100 bps to open and 100 bps to close is ~200% of the collateral net of fees.
         mockSpreadManager.setSpreadBps(100); // 1% spread
         uint16 highLeverage = 100;
 
         vm.prank(alice);
-        vm.expectRevert();
+        vm.expectPartialRevert(TradingEngine.NotLiquidatable.selector);
         engine.openTrade(
             DEFAULT_PAIR_INDEX,
             true,
             DEFAULT_COLLATERAL,
             highLeverage,
-            0, // no expected price constraint
-            10_000, // 100% slippage tolerance so slippage doesn't revert first
+            DEFAULT_ORACLE_PRICE, // expected price at the oracle price...
+            10_000, // ...and 100% slippage tolerance, so only the guard can revert
             0,
             0,
             EMPTY_UPDATE

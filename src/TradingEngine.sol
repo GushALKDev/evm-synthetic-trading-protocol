@@ -178,8 +178,14 @@ contract TradingEngine is Ownable, ReentrancyGuard {
      *      Long close / Short open: price goes DOWN → price * (10000 - spread) / 10000
      */
     function _applySpread(uint128 _oraclePrice, bool _isLong, bool _isOpen, uint16 _pairIndex) internal view returns (uint128) {
-        uint256 currentOI = TRADING_STORAGE.getOpenInterest(_pairIndex);
-        uint256 spreadBps = SPREAD_MANAGER.getSpreadBps(_pairIndex, currentOI);
+        return _applySpreadAtOI(_oraclePrice, _isLong, _isOpen, _pairIndex, TRADING_STORAGE.getOpenInterest(_pairIndex));
+    }
+
+    /**
+     * @dev Same as _applySpread with the spread computed at a given total OI (18 decimals).
+     */
+    function _applySpreadAtOI(uint128 _oraclePrice, bool _isLong, bool _isOpen, uint16 _pairIndex, uint256 _openInterest) internal view returns (uint128) {
+        uint256 spreadBps = SPREAD_MANAGER.getSpreadBps(_pairIndex, _openInterest);
         bool spreadUp = (_isLong && _isOpen) || (!_isLong && !_isOpen);
         if (spreadUp) {
             return uint128((uint256(_oraclePrice) * (BPS_DENOMINATOR + spreadBps)) / BPS_DENOMINATOR);
@@ -343,13 +349,20 @@ contract TradingEngine is Ownable, ReentrancyGuard {
 
     /**
      * @dev Reject positions that would already be liquidatable right after opening.
-     *      The applied spread creates an instant unrealized loss (openPrice vs fair oraclePrice).
-     *      If that loss already reaches the liquidation threshold, the trade is rejected so it
-     *      cannot be opened straight into the liquidation zone.
+     *      Mirrors liquidate at an unchanged oracle price in the same block: collateral net of the open fee,
+     *      close-direction spread at the OI after the open (which includes this position), no funding and
+     *      no confidence band (conf only makes liquidation harder, so zero is the worst case).
      */
-    function _validateNotPreLiquidatable(uint64 _collateral, uint16 _leverage, uint128 _openPrice, uint128 _oraclePrice, bool _isLong) internal pure {
-        int256 instantPnl = _calculatePnl(_collateral, _leverage, _openPrice, _oraclePrice, _isLong);
-        uint256 threshold = (uint256(_collateral) * LIQUIDATION_THRESHOLD_BPS) / BPS_DENOMINATOR;
+    function _validateNotPreLiquidatable(uint16 _pairIndex, uint64 _collateral, uint16 _leverage, uint128 _openPrice, uint128 _oraclePrice, bool _isLong)
+        internal
+        view
+    {
+        // Cannot underflow: MAX_LEVERAGE caps the open fee at 8% of collateral
+        uint64 effectiveCollateral = uint64(uint256(_collateral) - _calculateFee(_collateral, _leverage, OPEN_FEE_BPS));
+        uint256 postOpenOI = TRADING_STORAGE.getOpenInterest(_pairIndex) + _positionSizeWad(effectiveCollateral, _leverage);
+        uint128 closePrice = _applySpreadAtOI(_oraclePrice, _isLong, false, _pairIndex, postOpenOI);
+        int256 instantPnl = _calculatePnl(effectiveCollateral, _leverage, _openPrice, closePrice, _isLong);
+        uint256 threshold = (uint256(effectiveCollateral) * LIQUIDATION_THRESHOLD_BPS) / BPS_DENOMINATOR;
         uint256 loss = instantPnl < 0 ? uint256(-instantPnl) : 0;
         if (loss >= threshold) revert NotLiquidatable(0, loss, threshold);
     }
@@ -370,7 +383,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     ) internal view returns (uint128 executionPrice) {
         executionPrice = _applySpread(_oraclePrice, _isLong, true, _pairIndex);
         _validateSlippage(executionPrice, _expectedPrice, _slippageBps);
-        _validateNotPreLiquidatable(_collateral, _leverage, executionPrice, _oraclePrice, _isLong);
+        _validateNotPreLiquidatable(_pairIndex, _collateral, _leverage, executionPrice, _oraclePrice, _isLong);
     }
 
     /**
