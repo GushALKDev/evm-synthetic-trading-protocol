@@ -171,11 +171,12 @@ contract LiquidityHandler is CommonBase, StdUtils {
                            SOLVENCY ACTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Anyone runs the solvency check: reserve injection below 100% CR, bonding below 95%
+    /// @notice Anyone runs the solvency check: reserve injection below a 100% NAV ratio with a fresh snapshot,
+    ///         bonding below a 95% realised ratio
     function checkAndAct() external countCall("checkAndAct") {
         uint256 crBefore = VAULT.collateralizationRatio();
         uint256 expectedInjection;
-        if (crBefore < DEFICIT_CR) {
+        if (crBefore < DEFICIT_CR && VAULT.isPnlSnapshotFresh()) {
             uint256 deficit = VAULT.collateralizationDeficit();
             uint256 reserve = ASSISTANT_FUND.balance();
             expectedInjection = reserve < deficit ? reserve : deficit;
@@ -189,10 +190,10 @@ contract LiquidityHandler is CommonBase, StdUtils {
         _trackRescue(crBefore);
     }
 
-    /// @notice A bonder buys into the open round, never above the remaining cap or the Vault deficit
+    /// @notice A bonder buys into the open round, never above the remaining cap or the Vault realised deficit
     function bond(uint256 _actorSeed, uint256 _amount) external countCall("bond") {
         uint256 cap = BOND_DEPOSITORY.remainingCap();
-        uint256 deficit = VAULT.collateralizationDeficit();
+        uint256 deficit = VAULT.realisedCollateralizationDeficit();
         uint256 available = deficit < cap ? deficit : cap;
         if (available == 0) return;
 

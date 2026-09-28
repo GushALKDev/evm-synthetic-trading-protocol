@@ -128,7 +128,7 @@ contract SolvencyHandler is CommonBase, StdCheats, StdUtils {
     /// @notice A bonder buys into an open round (no-op when none is active)
     function bond(uint256 _actorSeed, uint256 _amount) external countCall("bond") {
         uint256 cap = d.bondDepository.remainingCap();
-        uint256 deficit = d.vault.collateralizationDeficit();
+        uint256 deficit = d.vault.realisedCollateralizationDeficit();
         uint256 available = deficit < cap ? deficit : cap;
         if (available == 0) return; // bond() reverts NoActiveRound
         currentActor = actors[bound(_actorSeed, 0, actors.length - 1)];

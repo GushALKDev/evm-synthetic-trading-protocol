@@ -3,7 +3,9 @@ pragma solidity 0.8.24;
 
 /**
  * @title ISolvencyVault
- * @notice Minimal Vault interface the SolvencyManager reads to assess collateralization
+ * @notice Minimal Vault interface the SolvencyManager and BondDepository read to assess collateralization
+ * @dev collateralizationRatio/Deficit use the conservative NAV (balance minus unrealised trader profit from the
+ *      PnL snapshot); the realised variants use the USDC balance only.
  */
 interface ISolvencyVault {
     function totalAssets() external view returns (uint256);
@@ -11,6 +13,14 @@ interface ISolvencyVault {
     function collateralizationRatio() external view returns (uint256);
 
     function collateralizationDeficit() external view returns (uint256);
+
+    function realisedCollateralizationRatio() external view returns (uint256);
+
+    function realisedCollateralizationDeficit() external view returns (uint256);
+
+    function isPnlSnapshotFresh() external view returns (bool);
+
+    function refreshPnlSnapshot(bytes[] calldata priceUpdate) external payable;
 }
 
 /**

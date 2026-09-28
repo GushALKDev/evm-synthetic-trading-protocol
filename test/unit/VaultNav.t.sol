@@ -417,6 +417,21 @@ contract VaultNavTest is Test {
         assertEq(vault.collateralizationDeficit(), 1_000 * 10 ** 6);
     }
 
+    /**
+     * @notice The realised ratio is at least the NAV ratio and the realised deficit at most the NAV deficit
+     * @dev NAV = balance minus a non-negative liability. The SolvencyManager relies on this to return early on a
+     *      NAV ratio of 100% or more without skipping a bonding the realised ratio would need.
+     */
+    function testFuzz_Ratios_RealisedAtLeastNav(uint256 _priceBps, uint256 _payout, bool _isLong) public {
+        _open(PAIR, _isLong, 1_000 * 10 ** 6, 100, PRICE);
+        vm.prank(engine);
+        vault.sendPayout(trader, bound(_payout, 0, LP_DEPOSIT));
+        mockOracle.setPrice(PAIR, uint128((uint256(PRICE) * bound(_priceBps, 5_000, 20_000)) / 10_000));
+        vault.refreshPnlSnapshot(EMPTY);
+        assertGe(vault.realisedCollateralizationRatio(), vault.collateralizationRatio());
+        assertLe(vault.realisedCollateralizationDeficit(), vault.collateralizationDeficit());
+    }
+
     function test_Ratios_RealisedDeficitAfterPayout() public {
         vm.prank(engine);
         vault.sendPayout(trader, 4_000 * 10 ** 6);

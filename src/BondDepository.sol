@@ -13,10 +13,11 @@ import {ISolvencyVault} from "./interfaces/ISolvency.sol";
  *         rounds. The raised USDC is injected straight into the Vault; the discounted $SYNTH is vested
  *         to bonders linearly over a configurable window.
  * @dev A round is opened only by the SolvencyManager via activateBonding(neededUsdc), which sets the
- *      remaining cap for that round. A bond takes at most min(remaining cap, Vault collateralization
- *      deficit), so a round never raises more than is needed to bring the Vault back to 100% CR. The round
- *      closes when that amount is exhausted (the cap is used up or the bond restores CR to 100%), or when
- *      the SolvencyManager finds CR back at 100% through other inflows and calls closeBonding. $SYNTH is
+ *      remaining cap for that round. A bond takes at most min(remaining cap, Vault realised collateralization
+ *      deficit), so a round never raises more than is needed to bring the realised ratio (USDC balance per
+ *      share, open trader PnL ignored) back to 100%. The round closes when that amount is exhausted (the cap is
+ *      used up or the bond restores the realised ratio to 100%), or when the SolvencyManager finds the realised
+ *      ratio back at 100% through other inflows and calls closeBonding. $SYNTH is
  *      priced off an owner-set referencePrice (USDC per SYNTH, a stand-in for a TWAP) with a capped discount.
  *
  *      Vesting rationale (PoC): the sell-side discount makes an instant "bond → dump on market" a
@@ -192,10 +193,10 @@ contract BondDepository is Ownable {
      * @notice Buy discounted $SYNTH by depositing USDC; the USDC is injected into the Vault
      * @dev Permissionless. USDC is pulled from the caller and sent to the Vault; the discounted $SYNTH
      *      is minted to this contract and vested to the caller linearly over vestingPeriod (claimed
-     *      via claim). The deposit is clamped to min(remainingCap, Vault deficit); the round closes when
+     *      via claim). The deposit is clamped to min(remainingCap, Vault realised deficit); the round closes when
      *      that amount is exhausted. Reverts NoActiveRound when either is zero. CEI: state (cap, position)
      *      updated before external mint/transfers.
-     * @param _usdcAmount USDC the caller wishes to bond (clamped to min(remainingCap, deficit))
+     * @param _usdcAmount USDC the caller wishes to bond (clamped to min(remainingCap, realised deficit))
      * @return bondId Index of the created vesting position for msg.sender
      * @return synthOut Amount of $SYNTH vesting to the caller
      */
@@ -203,7 +204,7 @@ contract BondDepository is Ownable {
         if (_usdcAmount == 0) revert ZeroAmount();
         uint256 cap = remainingCap;
         if (cap == 0) revert NoActiveRound();
-        uint256 deficit = ISolvencyVault(VAULT).collateralizationDeficit();
+        uint256 deficit = ISolvencyVault(VAULT).realisedCollateralizationDeficit();
         uint256 available = deficit < cap ? deficit : cap;
         if (available == 0) revert NoActiveRound();
 

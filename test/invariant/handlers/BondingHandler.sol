@@ -86,7 +86,7 @@ contract BondingHandler is CommonBase, StdCheats, StdUtils {
 
     /// @notice The SolvencyManager closes the round once the Vault deficit is zero (checkAndAct at CR >= 100%)
     function closeIfRecovered() external countCall("closeIfRecovered") {
-        if (!BOND.isActive() || MockSolvencyVault(BOND.VAULT()).collateralizationDeficit() != 0) return;
+        if (!BOND.isActive() || MockSolvencyVault(BOND.VAULT()).realisedCollateralizationDeficit() != 0) return;
         vm.startPrank(SOLVENCY_MANAGER);
         BOND.closeBonding();
         vm.stopPrank();
@@ -96,7 +96,7 @@ contract BondingHandler is CommonBase, StdCheats, StdUtils {
     function bond(uint256 _bonderSeed, uint256 _usdcAmount) external countCall("bond") {
         MockSolvencyVault vault = MockSolvencyVault(BOND.VAULT());
         uint256 cap = BOND.remainingCap();
-        uint256 deficit = vault.collateralizationDeficit();
+        uint256 deficit = vault.realisedCollateralizationDeficit();
         uint256 available = deficit < cap ? deficit : cap;
         if (available == 0) return; // bond() reverts NoActiveRound
         currentBonder = bonders[bound(_bonderSeed, 0, bonders.length - 1)];
