@@ -47,7 +47,7 @@ contract OracleLatencyRegressionTest is Test {
         oracle = new PythChainlinkOracle(address(mockPyth), address(0), owner);
         oracle.setPairFeed(PAIR, FEED_ID, address(mockChainlink), 3600);
         tradingStorage = new TradingStorage(address(usdc), owner);
-        vault = new Vault(address(usdc), owner);
+        vault = new Vault(address(usdc), owner, address(tradingStorage), address(oracle));
         engine = new TradingEngine(
             address(tradingStorage), address(vault), address(oracle), address(usdc), makeAddr("treasury"), address(new MockSpreadManager(5)), owner
         );

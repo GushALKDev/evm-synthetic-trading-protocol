@@ -3,6 +3,8 @@ pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {Vault} from "../../src/Vault.sol";
+import {TradingStorage} from "../../src/TradingStorage.sol";
+import {MockOracle} from "../mocks/MockOracle.sol";
 import {RegressionUSDC} from "./RegressionBase.sol";
 
 /**
@@ -27,7 +29,7 @@ contract WithdrawalRegressionTest is Test {
     function setUp() public {
         vm.warp(1_000_000);
         usdc = new RegressionUSDC();
-        vault = new Vault(address(usdc), owner);
+        vault = new Vault(address(usdc), owner, address(new TradingStorage(address(usdc), owner)), address(new MockOracle()));
         usdc.mint(alice, DEPOSIT);
         vm.startPrank(alice);
         usdc.approve(address(vault), type(uint256).max);

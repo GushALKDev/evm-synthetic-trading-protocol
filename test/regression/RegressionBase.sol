@@ -59,7 +59,7 @@ abstract contract RegressionBase is Test {
 
         vm.startPrank(owner);
         tradingStorage = new TradingStorage(address(usdc), owner);
-        vault = new Vault(address(usdc), owner);
+        vault = new Vault(address(usdc), owner, address(tradingStorage), address(mockOracle));
         engine = new TradingEngine(address(tradingStorage), address(vault), address(mockOracle), address(usdc), treasuryAddr, address(mockSpreadManager), owner);
         tradingStorage.setTradingEngine(address(engine));
         vault.setTradingEngine(address(engine));

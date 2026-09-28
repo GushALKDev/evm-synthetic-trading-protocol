@@ -59,8 +59,8 @@ contract GasBenchmarks is Test {
 
         vm.startPrank(owner);
         tradingStorage = new TradingStorage(address(usdc), owner);
-        vault = new Vault(address(usdc), owner);
         oracle = new PythChainlinkOracle(address(mockPyth), address(sequencer), owner);
+        vault = new Vault(address(usdc), owner, address(tradingStorage), address(oracle));
         SpreadManager spreadManager = new SpreadManager(5, 3e5, 100, 100, 5000, owner, owner);
         assistantFund = new AssistantFund(address(usdc), address(vault), 1_000_000 * 10 ** 6, owner);
         SynthToken synth = new SynthToken(owner);

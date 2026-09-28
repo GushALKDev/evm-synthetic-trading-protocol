@@ -3,6 +3,8 @@ pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {Vault} from "../../src/Vault.sol";
+import {TradingStorage} from "../../src/TradingStorage.sol";
+import {MockOracle} from "../mocks/MockOracle.sol";
 import {ERC20} from "solady/tokens/ERC20.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 
@@ -29,6 +31,8 @@ contract VaultTest is Test {
 
     Vault vault;
     MockUSDC usdc;
+    TradingStorage tradingStorage;
+    MockOracle mockOracle;
 
     address owner = makeAddr("owner");
     address alice = makeAddr("alice");
@@ -48,8 +52,11 @@ contract VaultTest is Test {
 
         usdc = new MockUSDC();
 
+        mockOracle = new MockOracle();
+        tradingStorage = new TradingStorage(address(usdc), owner);
+
         vm.prank(owner);
-        vault = new Vault(address(usdc), owner);
+        vault = new Vault(address(usdc), owner, address(tradingStorage), address(mockOracle));
 
         vm.prank(owner);
         vault.setTradingEngine(tradingEngine);
@@ -879,7 +886,7 @@ contract VaultTest is Test {
 
     function test_Constructor_RevertOnZeroAsset() public {
         vm.expectRevert(Vault.ZeroAddress.selector);
-        new Vault(address(0), owner);
+        new Vault(address(0), owner, address(tradingStorage), address(mockOracle));
     }
 
     /*//////////////////////////////////////////////////////////////

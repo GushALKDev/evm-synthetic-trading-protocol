@@ -289,7 +289,7 @@ contract PythChainlinkOracleForkTest is Test {
         RegressionUSDC usdc = new RegressionUSDC();
         vm.startPrank(owner);
         TradingStorage tradingStorage = new TradingStorage(address(usdc), owner);
-        Vault vault = new Vault(address(usdc), owner);
+        Vault vault = new Vault(address(usdc), owner, address(tradingStorage), address(oracle));
         TradingEngine engine = new TradingEngine(
             address(tradingStorage), address(vault), address(oracle), address(usdc), makeAddr("treasury"), address(new MockSpreadManager(5)), owner
         );

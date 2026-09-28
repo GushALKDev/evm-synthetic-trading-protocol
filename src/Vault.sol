@@ -5,6 +5,10 @@ import {ERC4626} from "solady/tokens/ERC4626.sol";
 import {Ownable} from "solady/auth/Ownable.sol";
 import {ReentrancyGuard} from "solady/utils/ReentrancyGuard.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
+import {SafeCastLib} from "solady/utils/SafeCastLib.sol";
+import {TradingStorage} from "./TradingStorage.sol";
+import {IOracle} from "./interfaces/IOracle.sol";
+import {OpenPnlLib} from "./libraries/OpenPnlLib.sol";
 
 /// @title Vault
 /// @author GushALKDev
@@ -12,6 +16,10 @@ import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 /// @dev Implements a withdrawal lock mechanism to prevent front-running of trader payouts.
 ///      Requested shares are escrowed in the vault itself: returned on cancel or on a new request, burned on
 ///      execution. A request can be executed only during WITHDRAWAL_WINDOW_EPOCHS after it unlocks.
+///      totalAssets is a conservative NAV: the USDC balance minus the positive net unrealised trader PnL from the
+///      latest snapshot (refreshPnlSnapshot). Net trader losses are not added. deposit, mint and
+///      executeWithdrawal need a fresh snapshot: no open trade, or taken within maxPnlSnapshotAge with no position
+///      opened or closed since. The refreshAnd* entry points refresh and act in one transaction.
 contract Vault is ERC4626, Ownable, ReentrancyGuard {
     using SafeTransferLib for address;
 
@@ -35,6 +43,15 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
      */
     uint256 public constant WAD = 1e18;
 
+    /**
+     * @notice Default maximum age of the PnL snapshot for actions that price shares, and its immutable ceiling
+     */
+    uint256 public constant DEFAULT_MAX_PNL_SNAPSHOT_AGE = 60; // seconds
+    uint256 public constant MAX_PNL_SNAPSHOT_AGE_CEILING = 3600; // seconds
+
+    /// @dev Transient slot holding the Vault's ETH balance before the current call's msg.value
+    bytes32 private constant _ETH_BASELINE_SLOT = keccak256("Vault.ethBaseline");
+
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -50,8 +67,18 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
     uint256 public immutable DEPLOY_TIMESTAMP;
 
     /**
+     * @notice Source of the open position aggregates valued by the PnL snapshot
+     */
+    TradingStorage public immutable TRADING_STORAGE;
+
+    /**
+     * @notice Oracle used by the PnL snapshot (same checks as trade execution)
+     */
+    IOracle public immutable ORACLE;
+
+    /**
      * @notice The trading engine address authorized to request payouts
-     * @dev Packed with _paused in the same slot (address = 20 bytes + bool = 1 byte = 21 bytes < 32)
+     * @dev Packed with _paused and maxPnlSnapshotAge in one slot (20 + 1 + 4 = 25 bytes)
      */
     address public tradingEngine;
 
@@ -59,6 +86,22 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
      * @notice Whether the vault is paused (packed with tradingEngine)
      */
     bool private _paused;
+
+    /**
+     * @notice Maximum age of the PnL snapshot for deposit, mint and executeWithdrawal, in seconds
+     */
+    uint32 public maxPnlSnapshotAge;
+
+    /**
+     * @notice Net unrealised trader PnL of all open positions, valued at refresh time
+     * @dev netPnl is USDC (6 decimals), positive when traders are in profit, rounded to overstate trader profit.
+     *      nonce is TradingStorage's positions nonce at refresh time; any open or close changes it.
+     */
+    struct PnlSnapshot {
+        int128 netPnl; //    16 bytes -┐
+        uint48 timestamp; //  6 bytes  │  Slot 0 (26/32)
+        uint32 nonce; //      4 bytes -┘
+    }
 
     /**
      * @notice Defines a withdrawal request
@@ -73,6 +116,11 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
      */
     mapping(address => WithdrawalRequest) public withdrawalRequests;
 
+    /**
+     * @notice Latest PnL snapshot
+     */
+    PnlSnapshot public pnlSnapshot;
+
     /*//////////////////////////////////////////////////////////////
                                 EVENTS
     //////////////////////////////////////////////////////////////*/
@@ -84,12 +132,14 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
     event WithdrawalCancelled(address indexed owner);
     event Paused(address account);
     event Unpaused(address account);
+    event PnlSnapshotRefreshed(int256 netPnl, uint256 timestamp);
+    event MaxPnlSnapshotAgeUpdated(uint256 maxPnlSnapshotAge);
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
 
-    error InsufficientVaultBalance(uint256 amount, uint256 totalAssets);
+    error InsufficientVaultBalance(uint256 amount, uint256 balance);
     error InsufficientShares(uint256 shares, uint256 balance);
     error WithdrawalLocked(uint256 unlockEpoch);
     error WithdrawalExpired(uint256 expiryEpoch);
@@ -99,6 +149,8 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
     error EnforcedPause();
     error ExpectedPause();
     error ZeroAddress();
+    error StalePnlSnapshot(uint256 snapshotTimestamp);
+    error InvalidMaxPnlSnapshotAge(uint256 maxPnlSnapshotAge);
 
     /*//////////////////////////////////////////////////////////////
                               MODIFIERS
@@ -114,6 +166,15 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
         _;
     }
 
+    /**
+     * @dev Refund, at the end of the call, only the ETH this call added (msg.value minus the oracle fee paid)
+     */
+    modifier refundsEthSurplus() {
+        _recordEthBaseline();
+        _;
+        _refundEth();
+    }
+
     /*//////////////////////////////////////////////////////////////
                           INTERNAL HELPERS
     //////////////////////////////////////////////////////////////*/
@@ -126,16 +187,92 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
         if (!_paused) revert ExpectedPause();
     }
 
+    function _requireFreshPnlSnapshot() internal view {
+        if (!isPnlSnapshotFresh()) revert StalePnlSnapshot(pnlSnapshot.timestamp);
+    }
+
+    function _recordEthBaseline() internal {
+        uint256 baseline = address(this).balance - msg.value;
+        bytes32 slot = _ETH_BASELINE_SLOT;
+        assembly {
+            tstore(slot, baseline)
+        }
+    }
+
+    function _refundEth() internal {
+        uint256 baseline;
+        bytes32 slot = _ETH_BASELINE_SLOT;
+        assembly {
+            baseline := tload(slot)
+        }
+        uint256 surplus = address(this).balance - baseline;
+        if (surplus > 0) msg.sender.safeTransferETH(surplus);
+    }
+
+    /**
+     * @dev Positive part of the snapshot's net trader PnL; zero when no trade is open
+     */
+    function _openPnlLiability() internal view returns (uint256) {
+        (uint32 openTrades,) = TRADING_STORAGE.getPositionState();
+        if (openTrades == 0) return 0;
+        int256 netPnl = pnlSnapshot.netPnl;
+        return netPnl > 0 ? uint256(netPnl) : 0;
+    }
+
+    /**
+     * @dev Value the open positions of every pair with open interest and store the snapshot.
+     *      The update data and msg.value go to the first priced pair; later pairs read the prices it stored, so
+     *      the caller must bring updates for every pair with open interest (or their stored prices must be
+     *      within the oracle's age limit). Each price goes through the oracle's checks.
+     */
+    function _refreshPnlSnapshot(bytes[] calldata _priceUpdate) internal {
+        uint256 pairsCount = TRADING_STORAGE.getPairsCount();
+        bytes[] memory noUpdate;
+        bool pythUpdated;
+        int256 netWad;
+        for (uint256 i; i < pairsCount; ++i) {
+            OpenPnlLib.PairTotals memory totals = TRADING_STORAGE.getPairOpenTotals(i);
+            if (totals.longSize == 0 && totals.shortSize == 0) continue;
+            uint128 price;
+            uint128 conf;
+            if (pythUpdated) {
+                (price, conf) = ORACLE.getPrice(i, noUpdate);
+            } else {
+                (price, conf) = ORACLE.getPrice{value: msg.value}(i, _priceUpdate);
+                pythUpdated = true;
+            }
+            netWad += OpenPnlLib.pairPnl(price, conf, totals);
+        }
+        (, uint32 nonce) = TRADING_STORAGE.getPositionState();
+        int256 netPnl = OpenPnlLib.toUsdcUp(netWad);
+        pnlSnapshot = PnlSnapshot({netPnl: SafeCastLib.toInt128(netPnl), timestamp: uint48(block.timestamp), nonce: nonce});
+        emit PnlSnapshotRefreshed(netPnl, block.timestamp);
+    }
+
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address _asset, address _owner) {
-        if (_asset == address(0)) revert ZeroAddress();
+    /**
+     * @param _asset USDC
+     * @param _owner Contract owner
+     * @param _tradingStorage TradingStorage holding the open position aggregates
+     * @param _oracle Oracle used to value the open positions
+     */
+    constructor(address _asset, address _owner, address _tradingStorage, address _oracle) {
+        if (_asset == address(0) || _tradingStorage == address(0) || _oracle == address(0)) revert ZeroAddress();
         _initializeOwner(_owner);
         ASSET = _asset;
         DEPLOY_TIMESTAMP = block.timestamp;
+        TRADING_STORAGE = TradingStorage(_tradingStorage);
+        ORACLE = IOracle(_oracle);
+        maxPnlSnapshotAge = uint32(DEFAULT_MAX_PNL_SNAPSHOT_AGE);
     }
+
+    /**
+     * @dev Accept the oracle's fee refunds; refundsEthSurplus returns them to the caller
+     */
+    receive() external payable {}
 
     /*//////////////////////////////////////////////////////////////
                            ERC4626 OVERRIDES
@@ -170,17 +307,60 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev Override deposit to enforce any logic if needed, currently standard
+     * @notice Conservative NAV: USDC balance minus the positive net unrealised trader PnL of the latest snapshot
+     * @dev Uses the latest snapshot even if stale, so it never reverts; previews and convertTo* use it too.
+     *      Net trader losses are not added.
+     */
+    function totalAssets() public view virtual override returns (uint256) {
+        uint256 balance = SafeTransferLib.balanceOf(ASSET, address(this));
+        uint256 liability = _openPnlLiability();
+        return balance > liability ? balance - liability : 0;
+    }
+
+    /**
+     * @dev Needs a fresh PnL snapshot (see isPnlSnapshotFresh)
      */
     function deposit(uint256 assets, address receiver) public virtual override nonReentrant whenNotPaused returns (uint256 shares) {
+        _requireFreshPnlSnapshot();
         return super.deposit(assets, receiver);
     }
 
     /**
-     * @dev Override mint to enforce any logic if needed, currently standard
+     * @dev Needs a fresh PnL snapshot (see isPnlSnapshotFresh)
      */
     function mint(uint256 shares, address receiver) public virtual override nonReentrant whenNotPaused returns (uint256 assets) {
+        _requireFreshPnlSnapshot();
         return super.mint(shares, receiver);
+    }
+
+    /**
+     * @notice Refresh the PnL snapshot, then deposit
+     */
+    function refreshAndDeposit(uint256 assets, address receiver, bytes[] calldata priceUpdate)
+        external
+        payable
+        nonReentrant
+        whenNotPaused
+        refundsEthSurplus
+        returns (uint256 shares)
+    {
+        _refreshPnlSnapshot(priceUpdate);
+        shares = super.deposit(assets, receiver);
+    }
+
+    /**
+     * @notice Refresh the PnL snapshot, then mint
+     */
+    function refreshAndMint(uint256 shares, address receiver, bytes[] calldata priceUpdate)
+        external
+        payable
+        nonReentrant
+        whenNotPaused
+        refundsEthSurplus
+        returns (uint256 assets)
+    {
+        _refreshPnlSnapshot(priceUpdate);
+        assets = super.mint(shares, receiver);
     }
 
     /**
@@ -198,11 +378,11 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
      * @dev ERC-4626 requires max* to report what the action accepts: deposit and mint revert while paused
      */
     function maxDeposit(address to) public view virtual override returns (uint256) {
-        return _paused ? 0 : super.maxDeposit(to);
+        return _paused || !isPnlSnapshotFresh() ? 0 : super.maxDeposit(to);
     }
 
     function maxMint(address to) public view virtual override returns (uint256) {
-        return _paused ? 0 : super.maxMint(to);
+        return _paused || !isPnlSnapshotFresh() ? 0 : super.maxMint(to);
     }
 
     /**
@@ -256,8 +436,22 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
     /**
      * @notice Execute a withdrawal request between its unlock epoch and the end of its window
      * @dev An expired request cannot be executed; cancelWithdrawal or a new request returns its shares.
+     *      Pays at the conservative NAV, so it needs a fresh PnL snapshot.
      */
     function executeWithdrawal() external nonReentrant {
+        _requireFreshPnlSnapshot();
+        _executeWithdrawal();
+    }
+
+    /**
+     * @notice Refresh the PnL snapshot, then execute the caller's withdrawal request
+     */
+    function refreshAndExecuteWithdrawal(bytes[] calldata priceUpdate) external payable nonReentrant refundsEthSurplus {
+        _refreshPnlSnapshot(priceUpdate);
+        _executeWithdrawal();
+    }
+
+    function _executeWithdrawal() internal {
         WithdrawalRequest storage req = withdrawalRequests[msg.sender];
         if (req.shares == 0) revert NoWithdrawalRequest();
 
@@ -325,13 +519,12 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Collateralization ratio of the Vault, scaled to WAD (1e18 == 100%)
-     * @dev CR compares current liquidity against the nominal deposit basis of all outstanding shares.
-     *      At the nominal 1:1 mint price, totalSupply shares are worth `totalSupply / 10**offset`
-     *      USDC, so CR = totalAssets * 10**offset * WAD / totalSupply. CR < 1e18 means the Vault has
-     *      paid out more than it took in (LP shares under water). Consumed by the SolvencyManager to
-     *      decide whether to inject reserve or activate bonding. When totalSupply == 0 the Vault has
-     *      no liabilities, so it reports max (trivially solvent) and never triggers a rescue.
+     * @notice LP principal coverage ratio: share price at the conservative NAV relative to 1.0 (WAD, 1e18 == 100%)
+     * @dev CR compares the conservative NAV (totalAssets) against the nominal deposit basis of all outstanding
+     *      shares. At the nominal 1:1 mint price, totalSupply shares are worth `totalSupply / 10**offset`
+     *      USDC, so CR = totalAssets * 10**offset * WAD / totalSupply. CR < 1e18 means the NAV is below what LPs
+     *      paid in at 1.0 per share. It does not measure whether the Vault can pay every open trade at its cap,
+     *      and it uses the latest PnL snapshot even if stale. When totalSupply == 0 it reports max.
      * @return ratio The collateralization ratio in WAD
      */
     function collateralizationRatio() external view returns (uint256 ratio) {
@@ -341,7 +534,46 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice USDC needed to bring the Vault back to a 100% collateralization ratio
+     * @notice Realised collateralization ratio: the USDC balance per share relative to 1.0, ignoring open PnL (WAD)
+     * @dev Used for bonding, so $SYNTH is not sold at a discount because of an unrealised move that can reverse.
+     */
+    function realisedCollateralizationRatio() external view returns (uint256) {
+        uint256 supply = totalSupply();
+        if (supply == 0) return type(uint256).max;
+        return (SafeTransferLib.balanceOf(ASSET, address(this)) * (10 ** _decimalsOffset()) * WAD) / supply;
+    }
+
+    /**
+     * @notice USDC needed to bring the realised collateralization ratio back to 100%
+     */
+    function realisedCollateralizationDeficit() external view returns (uint256) {
+        uint256 nominalLiabilities = totalSupply() / (10 ** _decimalsOffset());
+        uint256 balance = SafeTransferLib.balanceOf(ASSET, address(this));
+        return nominalLiabilities > balance ? nominalLiabilities - balance : 0;
+    }
+
+    /**
+     * @notice Whether the PnL snapshot can price shares: no open trade, or taken within maxPnlSnapshotAge with no
+     *         position opened or closed since
+     */
+    function isPnlSnapshotFresh() public view returns (bool) {
+        (uint32 openTrades, uint32 nonce) = TRADING_STORAGE.getPositionState();
+        if (openTrades == 0) return true;
+        PnlSnapshot memory snapshot = pnlSnapshot;
+        return snapshot.timestamp != 0 && snapshot.nonce == nonce && block.timestamp - snapshot.timestamp <= maxPnlSnapshotAge;
+    }
+
+    /**
+     * @notice Refresh the PnL snapshot: value the open positions of every pair with open interest
+     * @dev Permissionless. msg.value funds the oracle fee; only msg.value minus the fee paid is refunded.
+     * @param priceUpdate Pyth update data for every pair with open interest
+     */
+    function refreshPnlSnapshot(bytes[] calldata priceUpdate) external payable nonReentrant refundsEthSurplus {
+        _refreshPnlSnapshot(priceUpdate);
+    }
+
+    /**
+     * @notice USDC needed to bring the conservative NAV back to a 100% collateralization ratio
      * @dev Derived from the nominal deposit basis of outstanding shares rather than from the ratio,
      *      so it stays well-defined when the Vault is fully drained (totalAssets == 0 with shares
      *      outstanding), which is precisely when a rescue must remain callable.
@@ -363,9 +595,10 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
      * @param amount The amount of USDC to send
      */
     function sendPayout(address receiver, uint256 amount) external nonReentrant {
-        uint256 totalAssets = totalAssets();
+        // Compared with the USDC balance: totalAssets already subtracts the unrealised profit being paid here
+        uint256 balance = SafeTransferLib.balanceOf(ASSET, address(this));
         if (msg.sender != tradingEngine) revert CallerNotTradingEngine();
-        if (amount > totalAssets) revert InsufficientVaultBalance(amount, totalAssets);
+        if (amount > balance) revert InsufficientVaultBalance(amount, balance);
 
         // Transfers LP liquidity to winning traders (does not affect share price calculation)
         emit PayoutSent(receiver, amount);
@@ -375,6 +608,16 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
     /*//////////////////////////////////////////////////////////////
                             ADMIN FUNCTIONS
     //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice Set the maximum age of the PnL snapshot for deposit, mint and executeWithdrawal
+     * @param _maxPnlSnapshotAge Seconds, from 1 to MAX_PNL_SNAPSHOT_AGE_CEILING
+     */
+    function setMaxPnlSnapshotAge(uint256 _maxPnlSnapshotAge) external onlyOwner {
+        if (_maxPnlSnapshotAge == 0 || _maxPnlSnapshotAge > MAX_PNL_SNAPSHOT_AGE_CEILING) revert InvalidMaxPnlSnapshotAge(_maxPnlSnapshotAge);
+        maxPnlSnapshotAge = uint32(_maxPnlSnapshotAge);
+        emit MaxPnlSnapshotAgeUpdated(_maxPnlSnapshotAge);
+    }
 
     function setTradingEngine(address _tradingEngine) external onlyOwner {
         if (_tradingEngine == address(0)) revert ZeroAddress();

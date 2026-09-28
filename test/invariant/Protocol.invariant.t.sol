@@ -70,7 +70,7 @@ contract ProtocolInvariantTest is StdInvariant, Test {
 
         vm.startPrank(owner);
         tradingStorage = new TradingStorage(address(usdc), owner);
-        vault = new Vault(address(usdc), owner);
+        vault = new Vault(address(usdc), owner, address(tradingStorage), address(oracle));
         assistantFund = new AssistantFund(address(usdc), address(vault), 50_000 * 10 ** 6, owner);
         synth = new SynthToken(owner);
         bondDepository = new BondDepository(address(usdc), address(vault), address(synth), 500, owner);

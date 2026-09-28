@@ -61,8 +61,9 @@ library DeployLib {
     function deploy(DeployConfig memory _cfg) internal returns (Deployed memory d) {
         // --- Core ---
         d.tradingStorage = new TradingStorage(_cfg.asset, _cfg.owner);
-        d.vault = new Vault(_cfg.asset, _cfg.owner);
         d.oracle = new PythChainlinkOracle(_cfg.pyth, _cfg.sequencerUptimeFeed, _cfg.owner);
+        // The Vault reads open positions from TradingStorage and prices them with the oracle for its NAV
+        d.vault = new Vault(_cfg.asset, _cfg.owner, address(d.tradingStorage), address(d.oracle));
         d.spreadManager =
             new SpreadManager(_cfg.baseSpreadBps, _cfg.impactFactor, _cfg.volFactor, _cfg.maxSpreadBps, _cfg.maxVolatilityChangeBps, _cfg.keeper, _cfg.owner);
 

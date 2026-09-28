@@ -90,7 +90,7 @@ contract TradingEngineTest is Test {
 
         vm.startPrank(owner);
         tradingStorage = new TradingStorage(address(usdc), owner);
-        vault = new Vault(address(usdc), owner);
+        vault = new Vault(address(usdc), owner, address(tradingStorage), address(mockOracle));
         engine = new TradingEngine(address(tradingStorage), address(vault), address(mockOracle), address(usdc), treasuryAddr, address(mockSpreadManager), owner);
 
         tradingStorage.setTradingEngine(address(engine));
@@ -2038,7 +2038,7 @@ contract TradingEngineTest is Test {
         MockSpreadManager zeroSpreadManager = new MockSpreadManager(0);
         vm.startPrank(owner);
         TradingStorage ts2 = new TradingStorage(address(usdc), owner);
-        Vault v2 = new Vault(address(usdc), owner);
+        Vault v2 = new Vault(address(usdc), owner, address(ts2), address(mockOracle));
         TradingEngine engine2 =
             new TradingEngine(address(ts2), address(v2), address(mockOracle), address(usdc), treasuryAddr, address(zeroSpreadManager), owner);
         ts2.setTradingEngine(address(engine2));

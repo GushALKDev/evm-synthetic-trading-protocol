@@ -466,7 +466,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         ) revert ZeroAddress();
         _initializeOwner(_owner);
         TRADING_STORAGE = TradingStorage(_tradingStorage);
-        VAULT = Vault(_vault);
+        VAULT = Vault(payable(_vault));
         ORACLE = IOracle(_oracle);
         ASSET = _asset;
         SPREAD_MANAGER = SpreadManager(_spreadManager);
