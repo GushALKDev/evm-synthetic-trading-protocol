@@ -127,6 +127,19 @@ contract ProtocolInvariantTest is StdInvariant, Test {
     }
 
     /**
+     * @notice totalAssets is the USDC balance minus the positive part of the latest snapshot, floored at 0, and the
+     *         balance itself while no trade is open
+     * @dev The snapshot is used even when stale, so totalAssets and the previews never revert.
+     */
+    function invariant_TotalAssetsIsBalanceMinusSnapshotLiability() public view {
+        uint256 balance = usdc.balanceOf(address(vault));
+        (uint32 openTrades,) = tradingStorage.getPositionState();
+        (int128 netPnl,,) = vault.pnlSnapshot();
+        uint256 liability = openTrades == 0 || netPnl <= 0 ? 0 : uint256(int256(netPnl));
+        assertEq(vault.totalAssets(), balance > liability ? balance - liability : 0, "totalAssets differs from balance minus liability");
+    }
+
+    /**
      * @notice The AssistantFund (the treasury) holds exactly the treasury fee share minus what it sent to the Vault
      * @dev AssistantFund USDC = 20% of open and close fees - injections - skims
      */

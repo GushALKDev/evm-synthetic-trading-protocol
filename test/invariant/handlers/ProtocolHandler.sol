@@ -95,7 +95,7 @@ contract ProtocolHandler is CommonBase, StdUtils {
     uint256 public ghostRefreshes;
     /// @notice Refreshes whose snapshot differs from the brute-force aggregate valuation
     uint256 public ghostSnapshotMismatches;
-    /// @notice Refreshes where snapshot + excess loss is below the exact per-position clamped PnL
+    /// @notice Refreshes where the brute-force liability exceeded max(0, snapshot) by more than the excess loss
     uint256 public ghostSnapshotNotConservative;
     /// @notice Largest excess loss (losses beyond each position's collateral, 18 decimals) seen at a refresh
     uint256 public ghostMaxExcessLoss;
@@ -243,11 +243,13 @@ contract ProtocolHandler is CommonBase, StdUtils {
 
     /**
      * @notice Anyone refreshes the Vault's PnL snapshot; the result is checked against the open positions
-     * @dev Two checks at the oracle price (MockOracle conf is 0):
+     * @dev Two checks at the oracle price (MockOracle conf is 0), 18 decimals:
      *      1. snapshot == toUsdcUp(pairPnl(totals built position by position)), exactly;
-     *      2. snapshot * 1e12 + E >= sum over positions of max(pnl_i, -collateral_i), with pnl_i rounded against
-     *         the trader and E the excess loss sum of max(0, -pnl_i - collateral_i). The side clamp lets
-     *         positions past 100% loss offset winners; E bounds that. Tolerance 0.
+     *      2. conservativeness: L <= max(0, snapshot) + E, where L is the brute-force liability, the positive
+     *         part of the sum over positions of pnl_i capped at 8x collateral and floored at minus collateral,
+     *         and E the excess loss, the sum of max(0, -pnl_i - collateral_i) over positions past 100% loss that
+     *         are not liquidated. The side clamp lets those positions offset winners; E bounds that. pnl_i is
+     *         rounded against the trader, as the engine settles it. Tolerance 0.
      */
     function refreshSnapshot() external countCall("refreshSnapshot") {
         VAULT.refreshPnlSnapshot(EMPTY_UPDATE);
@@ -256,24 +258,29 @@ contract ProtocolHandler is CommonBase, StdUtils {
         uint128 price = ORACLE.peekPrice(PAIR_INDEX);
         if (int256(netPnl) != OpenPnlLib.toUsdcUp(OpenPnlLib.pairPnl(price, 0, bruteForceTotals()))) ghostSnapshotMismatches++;
 
-        (int256 exact, uint256 excess) = _exactClampedPnl(price);
-        if (int256(netPnl) * 1e12 + int256(excess) < exact) ghostSnapshotNotConservative++;
+        (uint256 liability, uint256 excess) = _bruteForceLiability(price);
+        uint256 snapshotLiability = netPnl > 0 ? uint256(int256(netPnl)) * 1e12 : 0;
+        if (liability > snapshotLiability + excess) ghostSnapshotNotConservative++;
         if (excess > ghostMaxExcessLoss) ghostMaxExcessLoss = excess;
     }
 
-    /// @dev Per-position PnL at _price rounded against the trader, clamped at -collateral; excess is what the clamp cut
-    function _exactClampedPnl(uint128 _price) internal view returns (int256 exact, uint256 excess) {
+    /// @dev Positive part of the sum of per-position PnL at _price, capped at 8x collateral and floored at -collateral
+    function _bruteForceLiability(uint128 _price) internal view returns (uint256 liability, uint256 excess) {
+        int256 sum;
         uint256 len = openTradeIds.length;
         for (uint256 i; i < len; ++i) {
             TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(openTradeIds[i]);
+            int256 collateral = int256(uint256(trade.collateral) * 1e12);
             int256 pnl = _pnl(uint256(trade.collateral) * trade.leverage * 1e12, trade.openPrice, _price, trade.isLong);
-            int256 floor = -int256(uint256(trade.collateral) * 1e12);
-            if (pnl < floor) {
-                excess += uint256(floor - pnl);
-                pnl = floor;
+            if (pnl < -collateral) {
+                excess += uint256(-collateral - pnl);
+                pnl = -collateral;
             }
-            exact += pnl;
+            int256 cap = collateral * int256(MAX_PROFIT_MULTIPLE);
+            if (pnl > cap) pnl = cap;
+            sum += pnl;
         }
+        liability = sum > 0 ? uint256(sum) : 0;
     }
 
     /*//////////////////////////////////////////////////////////////
