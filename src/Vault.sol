@@ -151,6 +151,7 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
     error ZeroAddress();
     error StalePnlSnapshot(uint256 snapshotTimestamp);
     error InvalidMaxPnlSnapshotAge(uint256 maxPnlSnapshotAge);
+    error CoverageBelowPar(uint256 ratio);
 
     /*//////////////////////////////////////////////////////////////
                               MODIFIERS
@@ -189,6 +190,15 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
 
     function _requireFreshPnlSnapshot() internal view {
         if (!isPnlSnapshotFresh()) revert StalePnlSnapshot(pnlSnapshot.timestamp);
+    }
+
+    /**
+     * @dev Below 100% a new deposit would buy shares under 1.0 and take part of the next injection or bond
+     *      proceeds meant for the LPs who carried the loss
+     */
+    function _requireCoverageAtPar() internal view {
+        uint256 ratio = collateralizationRatio();
+        if (ratio < WAD) revert CoverageBelowPar(ratio);
     }
 
     function _recordEthBaseline() internal {
@@ -318,18 +328,20 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev Needs a fresh PnL snapshot (see isPnlSnapshotFresh)
+     * @dev Needs a fresh PnL snapshot (see isPnlSnapshotFresh) and a coverage ratio of at least 100%
      */
     function deposit(uint256 assets, address receiver) public virtual override nonReentrant whenNotPaused returns (uint256 shares) {
         _requireFreshPnlSnapshot();
+        _requireCoverageAtPar();
         return super.deposit(assets, receiver);
     }
 
     /**
-     * @dev Needs a fresh PnL snapshot (see isPnlSnapshotFresh)
+     * @dev Needs a fresh PnL snapshot (see isPnlSnapshotFresh) and a coverage ratio of at least 100%
      */
     function mint(uint256 shares, address receiver) public virtual override nonReentrant whenNotPaused returns (uint256 assets) {
         _requireFreshPnlSnapshot();
+        _requireCoverageAtPar();
         return super.mint(shares, receiver);
     }
 
@@ -345,6 +357,7 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
         returns (uint256 shares)
     {
         _refreshPnlSnapshot(priceUpdate);
+        _requireCoverageAtPar();
         shares = super.deposit(assets, receiver);
     }
 
@@ -360,6 +373,7 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
         returns (uint256 assets)
     {
         _refreshPnlSnapshot(priceUpdate);
+        _requireCoverageAtPar();
         assets = super.mint(shares, receiver);
     }
 
@@ -375,14 +389,19 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev ERC-4626 requires max* to report what the action accepts: deposit and mint revert while paused
+     * @dev ERC-4626 requires max* to report what the action accepts: deposit and mint revert while paused, with a
+     *      stale PnL snapshot, or with a coverage ratio below 100%
      */
     function maxDeposit(address to) public view virtual override returns (uint256) {
-        return _paused || !isPnlSnapshotFresh() ? 0 : super.maxDeposit(to);
+        return _depositsOpen() ? super.maxDeposit(to) : 0;
     }
 
     function maxMint(address to) public view virtual override returns (uint256) {
-        return _paused || !isPnlSnapshotFresh() ? 0 : super.maxMint(to);
+        return _depositsOpen() ? super.maxMint(to) : 0;
+    }
+
+    function _depositsOpen() internal view returns (bool) {
+        return !_paused && isPnlSnapshotFresh() && collateralizationRatio() >= WAD;
     }
 
     /**
@@ -527,7 +546,7 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
      *      and it uses the latest PnL snapshot even if stale. When totalSupply == 0 it reports max.
      * @return ratio The collateralization ratio in WAD
      */
-    function collateralizationRatio() external view returns (uint256 ratio) {
+    function collateralizationRatio() public view returns (uint256 ratio) {
         uint256 supply = totalSupply();
         if (supply == 0) return type(uint256).max;
         return (totalAssets() * (10 ** _decimalsOffset()) * WAD) / supply;

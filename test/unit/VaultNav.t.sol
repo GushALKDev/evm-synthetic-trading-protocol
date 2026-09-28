@@ -265,8 +265,12 @@ contract VaultNavTest is Test {
                     ERC-4626 PREVIEWS AT THE NAV
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice With a fresh snapshot and a trader profit, deposit and mint match their previews
+    /**
+     * @notice With a fresh snapshot and a trader profit, deposit and mint match their previews
+     * @dev 20,000 USDC of fee income keeps the ratio above 100% for any trader profit in range (at most 10,000)
+     */
     function testFuzz_PreviewsMatchActionsAtNav(uint256 _assets, uint256 _priceBps) public {
+        usdc.mint(address(vault), 20_000 * 10 ** 6);
         _open(PAIR, true, 1_000 * 10 ** 6, 10, PRICE);
         mockOracle.setPrice(PAIR, uint128((uint256(PRICE) * bound(_priceBps, 5_000, 20_000)) / 10_000));
         vault.refreshPnlSnapshot(EMPTY);
@@ -284,6 +288,7 @@ contract VaultNavTest is Test {
 
     /// @notice Shares are priced at the NAV: the same assets buy more shares when traders hold a profit
     function test_Deposit_PricedAtNav() public {
+        usdc.mint(address(vault), 5_000 * 10 ** 6); // fee income keeps the ratio above 100%
         _open(PAIR, true, 1_000 * 10 ** 6, 10, PRICE);
         mockOracle.setPrice(PAIR, 55_000 * 1e18);
         vault.refreshPnlSnapshot(EMPTY);
@@ -291,6 +296,63 @@ contract VaultNavTest is Test {
         uint256 expected = (1_000 * 10 ** 6 * (supply + 1e12)) / (_balance() - 1_000 * 10 ** 6 + 1);
         vm.prank(lp);
         assertEq(vault.deposit(1_000 * 10 ** 6, lp), expected);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        DEPOSITS BELOW PAR
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Deposits stay open at exactly 100%
+    function test_Deposit_AllowedAtExactlyPar() public {
+        assertEq(vault.collateralizationRatio(), 1e18);
+        assertEq(vault.maxDeposit(lp), type(uint256).max);
+        vm.prank(lp);
+        vault.deposit(1_000 * 10 ** 6, lp);
+    }
+
+    /// @notice The first deposit into an empty Vault is not blocked (no shares, ratio reported as max)
+    function test_Deposit_AllowedIntoEmptyVault() public {
+        Vault empty = new Vault(address(usdc), owner, address(tradingStorage), address(mockOracle));
+        vm.startPrank(lp);
+        usdc.approve(address(empty), type(uint256).max);
+        empty.deposit(1_000 * 10 ** 6, lp);
+        vm.stopPrank();
+        assertEq(empty.balanceOf(lp), 1_000 * 1e18);
+    }
+
+    /// @notice Unrealised trader profit alone can push the ratio below 100% and close deposits
+    function test_Deposit_RevertsWhenOpenProfitPushesRatioBelowPar() public {
+        _open(PAIR, true, 1_000 * 10 ** 6, 10, PRICE);
+        mockOracle.setPrice(PAIR, 55_000 * 1e18);
+        vault.refreshPnlSnapshot(EMPTY);
+        uint256 ratio = vault.collateralizationRatio();
+        assertEq(ratio, 0.99e18);
+        assertEq(vault.realisedCollateralizationRatio(), 1e18);
+        assertEq(vault.maxDeposit(lp), 0);
+        assertEq(vault.maxMint(lp), 0);
+
+        vm.startPrank(lp);
+        vm.expectRevert(abi.encodeWithSelector(Vault.CoverageBelowPar.selector, ratio));
+        vault.deposit(1_000 * 10 ** 6, lp);
+        vm.expectRevert(abi.encodeWithSelector(Vault.CoverageBelowPar.selector, ratio));
+        vault.mint(1_000 * 1e18, lp);
+        vm.expectRevert(abi.encodeWithSelector(Vault.CoverageBelowPar.selector, ratio));
+        vault.refreshAndDeposit(1_000 * 10 ** 6, lp, EMPTY);
+        vm.stopPrank();
+    }
+
+    /// @notice Withdrawals are not blocked below 100%: they pay the NAV, which already carries the loss
+    function test_ExecuteWithdrawal_AllowedBelowPar() public {
+        uint256 shares = vault.balanceOf(lp) / 2;
+        vm.prank(lp);
+        vault.requestWithdrawal(shares);
+        vm.prank(engine);
+        vault.sendPayout(trader, 10_000 * 10 ** 6);
+        vm.warp(block.timestamp + 3 * vault.EPOCH_LENGTH());
+        assertLt(vault.collateralizationRatio(), 1e18);
+        vm.prank(lp);
+        vault.executeWithdrawal();
+        assertEq(vault.balanceOf(address(vault)), 0);
     }
 
     /*//////////////////////////////////////////////////////////////
