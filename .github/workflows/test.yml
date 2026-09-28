@@ -21,10 +21,11 @@ jobs:
         with:
           submodules: recursive
 
+      # The Pyth SDK declares engines node >=22.14
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       # Required: the Pyth Solidity SDK is an npm dependency, remapped from node_modules/ in foundry.toml
@@ -53,3 +54,32 @@ jobs:
         run: |
           forge test -vvv
         id: test
+
+  gas:
+    name: Gas benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      # Pass/fail only: every benchmark must succeed. Gas values are written to snapshots/ and not compared with the
+      # committed ones (forge compares only when FORGE_SNAPSHOT_CHECK is set, and it is not set here).
+      - name: Run gas benchmarks
+        env:
+          FOUNDRY_PROFILE: gas
+        run: forge test
