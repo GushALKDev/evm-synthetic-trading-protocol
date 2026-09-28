@@ -15,7 +15,9 @@ import {IOracle} from "./interfaces/IOracle.sol";
  * @notice IOracle implementation: Pyth Network (primary) with Chainlink as deviation anchor
  * @dev Pyth is pull-based: callers submit signed priceData bytes, verified on-chain.
  *      Chainlink is ONLY used as a deviation anchor — if Pyth is stale, we REVERT (no fallback).
- *      Validation pipeline: Feed active → Pyth staleness → Non-zero → Confidence → Normalize → Chainlink staleness → Deviation
+ *      Validation pipeline: Feed active → Pyth age → Non-zero → Confidence → Normalize → Chainlink staleness → Deviation
+ *      Pyth age: publishTime must not be after block.timestamp and must be at most maxPriceAge old. Every
+ *      getPrice call is a trade execution or a TP/SL validation, so the same limit applies to all of them.
  *      The caller funds the Pyth fee via msg.value on getPrice; any surplus is refunded to the caller.
  */
 contract PythChainlinkOracle is IOracle, Ownable {
@@ -25,7 +27,8 @@ contract PythChainlinkOracle is IOracle, Ownable {
                               CONSTANTS
     //////////////////////////////////////////////////////////////*/
 
-    uint256 public constant MAX_STALENESS = 30; // seconds
+    uint256 public constant MAX_STALENESS = 30; // seconds, immutable ceiling for maxPriceAge
+    uint256 public constant DEFAULT_MAX_PRICE_AGE = 5; // seconds
     uint256 public constant MAX_CONFIDENCE_BPS = 200; // 2%
     uint256 public constant MAX_DEVIATION_BPS = 300; // 3%
     uint256 public constant BPS_DENOMINATOR = 10_000;
@@ -48,6 +51,11 @@ contract PythChainlinkOracle is IOracle, Ownable {
 
     IPyth public immutable PYTH;
 
+    /**
+     * @notice Maximum age of the Pyth price used by getPrice, in seconds (1 to MAX_STALENESS)
+     */
+    uint256 public maxPriceAge;
+
     mapping(uint256 => PairFeed) private _pairFeeds;
 
     /*//////////////////////////////////////////////////////////////
@@ -55,6 +63,7 @@ contract PythChainlinkOracle is IOracle, Ownable {
     //////////////////////////////////////////////////////////////*/
 
     event PairFeedSet(uint256 indexed pairIndex, bytes32 pythFeedId, address chainlinkFeed, uint32 heartbeat);
+    event MaxPriceAgeSet(uint256 maxPriceAge);
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -62,6 +71,8 @@ contract PythChainlinkOracle is IOracle, Ownable {
 
     error PairFeedNotSet(uint256 pairIndex);
     error StalePrice(bytes32 feedId, uint256 publishTime, uint256 blockTime);
+    error PriceFromFuture(bytes32 feedId, uint256 publishTime, uint256 blockTime);
+    error InvalidMaxPriceAge(uint256 maxPriceAge);
     error ConfidenceTooWide(uint64 confidence, int64 price);
     error ZeroPrice();
     error PriceDeviationTooHigh(uint256 pythPrice18, uint256 chainlinkPrice18);
@@ -77,6 +88,7 @@ contract PythChainlinkOracle is IOracle, Ownable {
         if (_pyth == address(0)) revert InvalidPairFeed();
         _initializeOwner(_owner);
         PYTH = IPyth(_pyth);
+        maxPriceAge = DEFAULT_MAX_PRICE_AGE;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -85,7 +97,7 @@ contract PythChainlinkOracle is IOracle, Ownable {
 
     /**
      * @notice Get a validated price for a trading pair
-     * @dev Pipeline: Feed active → Update Pyth → Staleness → Non-zero → Confidence → Normalize → Chainlink check → Deviation.
+     * @dev Pipeline: Feed active → Update Pyth → Age → Non-zero → Confidence → Normalize → Chainlink check → Deviation.
      *      The caller funds the Pyth fee via msg.value; any surplus is refunded to msg.sender.
      * @param pairIndex The pair index to get price for
      * @param priceData Pyth-signed price update data (submitted by user, verified on-chain)
@@ -105,8 +117,10 @@ contract PythChainlinkOracle is IOracle, Ownable {
         // Get latest Pyth price (unsafe = no staleness check, we do our own)
         PythStructs.Price memory pythPrice = PYTH.getPriceUnsafe(feed.pythFeedId);
 
-        // Staleness check
-        if (block.timestamp - pythPrice.publishTime > MAX_STALENESS) {
+        // Age check. A publishTime after block.timestamp was never observed on Arbitrum (see docs), so it
+        // is rejected with a named error rather than accepted with a skew or left to underflow.
+        if (pythPrice.publishTime > block.timestamp) revert PriceFromFuture(feed.pythFeedId, pythPrice.publishTime, block.timestamp);
+        if (block.timestamp - pythPrice.publishTime > maxPriceAge) {
             revert StalePrice(feed.pythFeedId, pythPrice.publishTime, block.timestamp);
         }
 
@@ -178,6 +192,16 @@ contract PythChainlinkOracle is IOracle, Ownable {
         _pairFeeds[pairIndex] = PairFeed({pythFeedId: pythFeedId, chainlinkFeed: chainlinkFeed, chainlinkHeartbeat: heartbeat, active: true});
 
         emit PairFeedSet(pairIndex, pythFeedId, chainlinkFeed, heartbeat);
+    }
+
+    /**
+     * @notice Set the maximum age of the Pyth price accepted by getPrice
+     * @param _maxPriceAge Seconds, from 1 to MAX_STALENESS
+     */
+    function setMaxPriceAge(uint256 _maxPriceAge) external onlyOwner {
+        if (_maxPriceAge == 0 || _maxPriceAge > MAX_STALENESS) revert InvalidMaxPriceAge(_maxPriceAge);
+        maxPriceAge = _maxPriceAge;
+        emit MaxPriceAgeSet(_maxPriceAge);
     }
 
     /*//////////////////////////////////////////////////////////////
