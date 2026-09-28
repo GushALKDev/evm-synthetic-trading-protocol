@@ -7,7 +7,7 @@ remappings = [
     "forge-std/=lib/forge-std/src/",
     "solady/=lib/solady/src/"
 ]
-ffi = true
+ffi = false
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
 
