@@ -134,7 +134,8 @@ exceed the vault balance.
 
 ### What the code does
 
-- `liquidate` is permissionless and not paused with trading.
+- `liquidate` is permissionless. It is blocked by `PAUSE_SETTLE` together with `closeTrade`, so no position
+  is liquidated while its owner cannot close it; no funding accrues while that flag is set.
 - The reward is `max(10% of the collateral left after the loss, 0.5% of the collateral)`: 1% of the
   collateral at the threshold and never below 0.5%, including past a 100% loss. It is always paid from the
   position's collateral.
@@ -180,7 +181,8 @@ The oracle design and the dropped custom oracle network are described in
 - Any failed check reverts `closeTrade`, `executeLimit` and `liquidate` as well as `openTrade`, so an
   oracle outage or a sustained Pyth/Chainlink disagreement freezes all positions. Funding keeps accruing
   and is settled when prices return.
-- There is no price circuit breaker, volume limit or automatic pause.
+- There is no price circuit breaker, volume limit or automatic pause. The owner's pause flags and what to
+  set for a wrong price or an outage are in [Guide 8, section 6](./08-security.md#6-incident-playbook).
 - While the L2 sequencer is down every price read reverts. During the one-hour grace period after it comes
   back only openings are blocked; closes, TP/SL and liquidations work, so positions can be closed or
   liquidated before they run past 100% loss.
@@ -193,7 +195,8 @@ The oracle design and the dropped custom oracle network are described in
 
 The vault, collateral and payouts are all USDC. A USDC depeg changes the real value of every balance, and
 Layer 3 bonding sells $SYNTH for USDC. The code does nothing specific about a depeg: there is no peg
-monitor and no automatic pause. The owner can pause trading and the vault manually.
+monitor and no automatic pause. The owner can set the engine and vault pause flags manually
+([Guide 8, section 5](./08-security.md#5-pause-flags)).
 
 | Option | Pros | Cons |
 |:---|:---|:---|
@@ -228,7 +231,7 @@ Qualitative, as assessed in this review.
 | Oracle manipulation | Signed Pyth updates, Chainlink deviation check, confidence cap | 3% band |
 | Oracle outage | Revert | All positions frozen |
 | Liquidation incentives | Permissionless, reward from collateral with a 0.5% floor | Small rewards on small positions |
-| USDC depeg | None beyond manual pause | Full |
+| USDC depeg | None beyond the manual pause flags | Full |
 | Smart contract bugs | Unit, fuzz, invariant and integration tests | Not audited |
 
 ---

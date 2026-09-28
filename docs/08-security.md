@@ -16,8 +16,9 @@ a bug bounty. None of those exist in the code; this version describes what does.
 2. [Access Control as Implemented](#2-access-control-as-implemented)
 3. [Invariants in the Test Suite](#3-invariants-in-the-test-suite)
 4. [Attack Vectors](#4-attack-vectors)
-5. [Pause and Emergency Handling](#5-pause-and-emergency-handling)
-6. [Before an Audit](#6-before-an-audit)
+5. [Pause Flags](#5-pause-flags)
+6. [Incident Playbook](#6-incident-playbook)
+7. [Before an Audit](#7-before-an-audit)
 
 ---
 
@@ -59,23 +60,24 @@ There are no roles, no multisig requirement and no timelock in code.
 
 | Function | Caller | Pause |
 |:---|:---|:---|
-| `deposit`, `mint`, `refreshAndDeposit`, `refreshAndMint` | Anyone | Blocked when paused |
-| `requestWithdrawal` | Share holder (shares move into escrow) | Blocked when paused |
-| `executeWithdrawal`, `refreshAndExecuteWithdrawal`, `cancelWithdrawal` | Requester | Not blocked |
+| `deposit`, `mint`, `refreshAndDeposit`, `refreshAndMint` | Anyone | `PAUSE_DEPOSIT` |
+| `requestWithdrawal` | Share holder (shares move into escrow) | `PAUSE_WITHDRAW` |
+| `executeWithdrawal`, `refreshAndExecuteWithdrawal` | Requester | `PAUSE_WITHDRAW` |
+| `cancelWithdrawal` | Requester | Not blocked |
 | `refreshPnlSnapshot` | Anyone | Not blocked |
 | `withdraw`, `redeem` | Anyone | Always revert |
 | `sendPayout` | `tradingEngine` | Not blocked |
-| `setTradingEngine`, `setMaxPnlSnapshotAge` (1 to 3,600 s), `pause`, `unpause` | Owner | |
+| `setTradingEngine`, `setSolvencyManager`, `setMaxPnlSnapshotAge` (1 to 3,600 s), `setPauseFlags` | Owner | |
 
 ### TradingEngine
 
 | Function | Caller | Pause |
 |:---|:---|:---|
-| `openTrade` | Anyone | Blocked |
-| `closeTrade`, `updateTp`, `updateSl` | Trade owner | Blocked |
-| `executeLimit` | Anyone | Blocked |
-| `liquidate` | Anyone | Not blocked |
-| `setTreasury`, `setFundingFactor` (within 1e12 to 1e15), `pause`, `unpause` | Owner | |
+| `openTrade` | Anyone | `PAUSE_OPEN` |
+| `closeTrade` | Trade owner | `PAUSE_SETTLE` |
+| `executeLimit`, `liquidate` | Anyone | `PAUSE_SETTLE` |
+| `updateTp`, `updateSl` | Trade owner | Not blocked |
+| `setTreasury`, `setFundingFactor` (within 1e12 to 1e15), `setPauseFlags` | Owner | |
 
 ### TradingStorage
 
@@ -108,13 +110,18 @@ All state-changing functions except the admin ones are `onlyTradingEngine`. Owne
 - Set the maximum PnL snapshot age between 1 s and the immutable ceiling of 3,600 s, which widens or narrows
   the window in which an LP can act on an older snapshot.
 - Add pairs up to `MAX_PAIRS` (20), the bound on the snapshot loop.
-- Pause trading (liquidations continue) and the vault.
+- Set and clear the pause flags of the engine and the vault (section 5), which can also keep users from
+  closing, liquidating or exiting for as long as the owner wants.
 
 ---
 
 ## 3. Invariants in the Test Suite
 
-Stateful invariants (`invariant_*` functions), run with Foundry's defaults (256 runs of 500 calls). Call
+Stateful invariants (`invariant_*` functions), run with Foundry's defaults (256 runs of 500 calls). There
+are 32 distinct properties (19 protocol, 5 bonding, 8 solvency integration; `grep -c "function invariant_"`
+on each suite file) and 51 campaigns per full run: `ProtocolKeeperLatencyInvariantTest` inherits the 19
+protocol properties and runs them in a second configuration, which adds campaigns, not properties
+(`forge test --list --json 2>/dev/null | jq '[.[][][] | select(startswith("invariant_"))] | length'`). Call
 summaries are logged from `afterInvariant` hooks and are not counted as invariants. The full list, the
 equations and the handler call distribution are in the [test suite documentation](./tests/README.md).
 
@@ -135,6 +142,9 @@ equations and the handler call distribution are in the [test suite documentation
 | Protocol | `invariant_SnapshotMatchesBruteForceAndIsConservative` | At every refresh the snapshot equals the brute-force valuation, and the brute-force liability (8x cap, floor at minus collateral) is at most `max(0, snapshot)` plus the excess loss |
 | Protocol | `invariant_DepositsFollowRescueRule` | No deposit on a stale snapshot or while a bonding round is open, each deposit settles the pending injection first and mints shares worth at most the assets paid in, no withdrawal on a stale snapshot |
 | Protocol | `invariant_BondingNeverStartsAboveCriticalRealisedRatio` | `checkAndAct` never opened a round with the realised ratio at or above 95% |
+| Protocol | `invariant_NoSettlementWhileSettlePaused` | No close, TP/SL execution or liquidation succeeds while `PAUSE_SETTLE` is set |
+| Protocol | `invariant_WithdrawPauseDoesNotExpireRequests` | No withdrawal request expires because of time spent under `PAUSE_WITHDRAW` |
+| Protocol | `invariant_NoFundingAccruesWhileSettlePaused` | No funding accrues for time spent under `PAUSE_SETTLE` |
 | Bonding | `invariant_EscrowCoversUnclaimedSynth`, `invariant_SupplyEqualsPromised`, `invariant_ClaimedNeverExceedsPromised` | Vesting escrow and supply |
 | Bonding | `invariant_RaisedWithinCap` | Round raise within its cap, total within the sum of caps, vault USDC equals the raise |
 | Bonding | `invariant_BondsNeverExceedDeficit` | Each bond takes `min(amount, cap, realised deficit)` and closes the round when it takes all of it |
@@ -224,48 +234,152 @@ which lasts until the round fills or the realised ratio recovers (see
 
 ---
 
-## 5. Pause and Emergency Handling
+## 5. Pause Flags
 
-What each pause flag blocks, from the `whenNotPaused` modifiers in the code:
+Each of the two pausable contracts has independent flags, set and cleared together by the owner with
+`setPauseFlags(uint8)`, which emits `PauseFlagsUpdated(flags)` and rejects unknown bits. A blocked call
+reverts with `EnforcedPause(flag)`. From the `whenNotPaused(flag)` modifiers in the code:
 
-| Flag | Blocks | Not blocked |
-|:---|:---|:---|
-| `TradingEngine.pause` | `openTrade`, `closeTrade`, `executeLimit`, `updateTp`, `updateSl` | `liquidate`, owner setters |
-| `Vault.pause` | `deposit`, `mint`, `refreshAndDeposit`, `refreshAndMint`, `requestWithdrawal` | `executeWithdrawal`, `refreshAndExecuteWithdrawal`, `cancelWithdrawal`, `refreshPnlSnapshot`, `sendPayout`, sUSDC transfers |
+| Contract | Flag | Blocks | Not blocked by any flag |
+|:---|:---|:---|:---|
+| `TradingEngine` | `PAUSE_OPEN` (1) | `openTrade` | `updateTp`, `updateSl` (they still go through the oracle checks), owner setters |
+| `TradingEngine` | `PAUSE_SETTLE` (2) | `closeTrade`, `executeLimit`, `liquidate`, always together | |
+| `Vault` | `PAUSE_DEPOSIT` (1) | `deposit`, `mint`, `refreshAndDeposit`, `refreshAndMint`; `maxDeposit` and `maxMint` return 0 | `cancelWithdrawal`, `refreshPnlSnapshot`, `sendPayout`, sUSDC transfers, owner setters |
+| `Vault` | `PAUSE_WITHDRAW` (2) | `requestWithdrawal`, `executeWithdrawal`, `refreshAndExecuteWithdrawal`; `canExecuteWithdrawal` returns false | |
 
-`SolvencyManager`, `AssistantFund`, `BondDepository`, `SpreadManager`, `SynthToken`, `TradingStorage` and the
-oracle have no pause.
+`SolvencyManager` (`checkAndAct`, `refreshAndCheckAndAct`), `AssistantFund` (`skim`), `BondDepository`
+(`bond`, `claim`), `SpreadManager`, `SynthToken`, `TradingStorage` and the oracle have no flag.
 
-Findings from this review (reported, pause behaviour not changed):
+**Settlement is paused as a whole.** `liquidate` is blocked together with `closeTrade`, so no position is
+liquidated while its owner cannot close it (`test_Regression_Pause_SettleBlocksLiquidation`).
 
-- Pausing the engine blocks closes and TP/SL execution while liquidations continue: traders cannot exit or
-  have a stop executed, but can still be liquidated (and pay the liquidator reward). Positions stay exposed
-  to the price for the whole pause.
-- Pausing the vault blocks `requestWithdrawal`: LPs cannot start a withdrawal, and a pause longer than the
-  one-epoch execution window lets pending requests expire, so they cannot exit until the pause ends and a
-  new request unlocks three epochs later. Meanwhile the engine is not paused by it and keeps paying winning
-  traders from the vault.
+**Funding under `PAUSE_SETTLE`.** No funding accrues while `PAUSE_SETTLE` is set. The accrual uses a factor
+of 0 while the flag is set; setting it first accrues every pair up to that moment, and clearing it moves each
+pair's timestamp to that moment without accruing, so the paused interval is never charged
+(`TradingEngine.setPauseFlags`, `_activeFundingFactor`). An `openTrade` or a `setFundingFactor` during the
+pause accrues nothing either. Tests: `test_Regression_Pause_SettleFreezesFunding`,
+`test_SetPauseFlags_SettleAccruesThenFreezesFunding`, `test_OpenTrade_WhileSettlePausedDoesNotAccrue`,
+`test_SetFundingFactor_WhileSettlePausedDoesNotAccrue`, invariant `NoFundingAccruesWhileSettlePaused`.
+
+**Withdrawal expiry under `PAUSE_WITHDRAW`.** The expiry clock of pending requests stops while the flag is
+set. Each request stores the seconds the vault had spent under `PAUSE_WITHDRAW` when it was made; its expiry
+epoch is `requestEpoch + 3 + 1 + ceil(paused seconds since the request / 1 day)`. The granularity is one epoch
+(one day), rounded up, so after the pause a request has at least the time to expiry it had when the pause
+started, and up to one day more. The unlock epoch does not move: the three-epoch delay keeps running during
+a pause. `getWithdrawalExpiryEpoch(user)` returns the extended expiry. Tests:
+`test_Regression_Pause_WithdrawPauseDoesNotExpireRequest`, `test_WithdrawPause_ExtendsExpiryByWholeEpochs`,
+invariant `WithdrawPauseDoesNotExpireRequests`.
+
+**Engine and vault flags are independent.** Vault flags do not stop settlements: with `PAUSE_WITHDRAW` set,
+winning traders are still paid from the vault through `sendPayout` unless the engine's `PAUSE_SETTLE` is also
+set. Engine flags do not stop LP flows: with `PAUSE_SETTLE` set, prices keep moving, positions past 100% loss
+cannot be liquidated, and the NAV's optimistic bias (the excess loss of those positions, which offsets winners
+on their side; [Guide 2, section 8.2](./02-mathematics.md#82-known-biases-of-the-nav)) can grow while LPs can
+still exit at that NAV unless `PAUSE_WITHDRAW` is also set. The playbook below says which combination each
+incident needs.
 
 What does not exist: automatic circuit breakers (price jump, volume, solvency), an emergency withdrawal
-path for LPs, or an on-chain emergency mode. Any response to an incident relies on the owner.
+path for LPs, a switch that disables one pair's oracle feed, or an on-chain emergency mode. Any response to
+an incident relies on the owner.
 
 ---
 
-## 6. Before an Audit
+## 6. Incident Playbook
 
-Figures measured at commit `2dd5562`; the commands and the full output are in the
+Derived from the code as it is. "Other levers" are existing owner functions; none of them is a flag.
+
+**Oracle returns a wrong price that passes every check.**
+- Set: engine `PAUSE_OPEN | PAUSE_SETTLE`; vault `PAUSE_DEPOSIT | PAUSE_WITHDRAW`.
+- Why: every trade action prices at the oracle, and the PnL snapshot does too, so the NAV used by deposits
+  and withdrawal executions is wrong. When the wrong price makes traders look like losers, the snapshot
+  liability drops to 0 and the NAV rises to the full balance, so an LP exiting then takes value from the LPs
+  who stay. This case closes LP exits as well as the NAV bug below.
+- Other levers: `setPairFeed` can point the pair to other Pyth and Chainlink feeds (there is no switch that
+  disables a feed); `updatePair(..., isActive = false)` blocks opens on that pair only.
+  `AssistantFund.setSolvencyManager` to an address that is not the SolvencyManager stops injections sized on
+  the wrong NAV; `checkAndAct` then reverts whenever it would inject.
+- Stays open: `updateTp`, `updateSl`, `cancelWithdrawal`, `refreshPnlSnapshot`, `checkAndAct`, `bond`,
+  `claim`, `skim`. Bonding uses the realised ratio (USDC balance per share), which does not depend on prices.
+- Residual: positions are frozen and cannot be liquidated; when the flags are cleared, positions that passed
+  100% loss meanwhile settle with bad debt for the vault. A snapshot refreshed at the wrong price stays until
+  the next refresh.
+
+**Oracle down, or Pyth and Chainlink disagreeing by more than 3%, or the sequencer down.**
+- Set: nothing is required. `getPrice` reverts, so `openTrade`, `closeTrade`, `executeLimit`, `liquidate`,
+  updates with a new TP or SL, and every snapshot refresh revert. With a trade open, deposits and withdrawal
+  executions revert with `StalePnlSnapshot` once the snapshot is older than `maxPnlSnapshotAge` (60 s by
+  default), and `checkAndAct` skips the injection on a stale snapshot.
+- Optional: `PAUSE_SETTLE` for a long outage, to stop funding from accruing while nobody can close.
+  `setPauseFlags` does not read prices, so it works during the outage.
+- Stays open: `requestWithdrawal`, `cancelWithdrawal`, bonding and claims.
+- Residual: no liquidations during the outage; positions can pass 100% loss and settle with bad debt when
+  prices return, and the first liquidations then race each other.
+
+**Bug in trade execution or PnL math (engine settlement).**
+- Set: engine `PAUSE_OPEN | PAUSE_SETTLE`.
+- Why: stops every payout computed by the engine (`sendPayout` is only called by settlements) and every new
+  position.
+- Stays open: LP deposits and withdrawals. The vault NAV comes from `OpenPnlLib` and the USDC balance, not
+  from the engine's settlement code, and losses already paid out are in the balance.
+- Residual: the NAV bias described in section 5 grows while settlement is paused; if prices move far, add
+  `PAUSE_WITHDRAW`. The engine is not upgradeable: a fix means a new `TradingEngine` wired with
+  `Vault.setTradingEngine` and `TradingStorage.setTradingEngine`; open positions and funding state stay in
+  `TradingStorage`.
+
+**Bug in vault accounting or the NAV.**
+- Set: vault `PAUSE_DEPOSIT | PAUSE_WITHDRAW`.
+- Why: deposits and withdrawal executions are the only calls that move value at the NAV. Confirmed as a case
+  that closes LP exits; the wrong-price case above is another.
+- Other levers: `AssistantFund.setSolvencyManager` away from the SolvencyManager if the injection size (from
+  the NAV) is wrong; `checkAndAct` then reverts whenever it would inject. `Vault.setSolvencyManager` rejects the
+  zero address, so the deposit-path wiring cannot be removed, only paused with `PAUSE_DEPOSIT`.
+- Stays open: settlements (`sendPayout` checks the USDC balance, not the NAV), `cancelWithdrawal`, sUSDC
+  transfers. Add `PAUSE_SETTLE` if the bug is in `sendPayout` or the balance check.
+- Residual: LPs cannot exit until the flags are cleared; pending requests do not expire meanwhile.
+
+**Bug in bonding or the AssistantFund.**
+- Set: no flag covers it. Levers: `BondDepository.setSolvencyManager(owner)` then `closeBonding()` closes the
+  round, after which `bond` reverts with `NoActiveRound`; `SynthToken.setMinter` to another address makes
+  every `bond` revert on the mint. `AssistantFund.setSolvencyManager` away from the SolvencyManager stops
+  injections, and `setTargetCap(type(uint256).max)` stops `skim`. Add vault `PAUSE_DEPOSIT`: while an
+  injection is pending, a deposit runs `checkAndAct`, which then reverts anyway.
+- Stays open: `claim`. No lever stops claims: a bug in the vesting math can move escrowed $SYNTH between
+  bonders (the escrow holds only $SYNTH; no USDC is at risk from `claim`).
+- Residual: with the depository or the fund redirected, every `checkAndAct` that would open or close a round,
+  or inject, reverts until the wiring is restored.
+
+**Funding bug.**
+- Set: engine `PAUSE_SETTLE`, which also stops funding from accruing; `PAUSE_OPEN` if new positions should
+  not take on the bug.
+- Why: funding is paid and charged only when a position settles, and it moves the liquidation threshold.
+  `setFundingFactor` can only lower the factor to 1e12, not to 0. The vault NAV does not include funding.
+- Stays open: LP flows, `updateTp`, `updateSl`.
+- Residual: no settlement while the flag is set, and the NAV bias of section 5 grows. The fix needs a new
+  engine (see the execution bug above); the funding indexes stay in `TradingStorage`.
+
+**Owner key compromise.**
+- No flag stops it. The flags are set by the same owner. A compromised owner can point `tradingEngine` on
+  the vault and on storage to its own contract and take all LP USDC and all trader collateral, set the $SYNTH
+  minter, re-point oracle feeds, and set flags to keep users from closing or exiting. There is no timelock,
+  multisig requirement or second role in code (section 2).
+
+---
+
+## 7. Before an Audit
+
+Figures measured at commit `47d848f`; the commands and the full output are in the
 [test suite documentation](./tests/README.md).
 
 | Item | State |
 |:---|:---|
 | Code freeze | No |
-| Coverage on `src/` (`FORK_RPC_URL= FOUNDRY_PROFILE=coverage forge coverage --report summary`) | Lines 100% on every contract; branches below 100% on `BondDepository` (75.00%), `TradingEngine` (97.06%) and `Vault` (96.67%); each branch not taken is an untested revert, listed in the [coverage section](./tests/README.md#coverage) |
+| Coverage on `src/` (`FORK_RPC_URL= FOUNDRY_PROFILE=coverage forge coverage --report summary`) | 100% of lines, statements, branches and functions on every contract; the table is in the [coverage section](./tests/README.md#coverage) |
 | Fuzz tests | 54 `testFuzz_*` functions, 256 runs each |
-| Invariants | 45 invariant functions over four suites (protocol, protocol with a one-day keeper latency, bonding, solvency integration); vault, reserve and funding accounting modelled; open PnL aggregates and the snapshot checked against a brute-force valuation on three pairs with a confidence band |
-| Regression tests | 65 tests in `test/regression/` (round 1 findings, round 2b and round 3) |
-| Slither 0.11.6 | 196 results (4 High, 15 Medium, 41 Low, 136 Informational): 14 false positives, 182 accepted by design; 2 fixed in round 3. [Triage](./tests/README.md#triage) |
-| Aderyn 0.6.8 | 3 High issues (11 instances) and 8 Low issues (57 instances): 3 false-positive instances, 65 accepted by design; 4 fixed in round 3. [Triage](./tests/README.md#triage) |
-| Contract size | `TradingEngine` 17,500 bytes with the optimizer (200 runs), 7,076 under the limit (`forge build --sizes`) |
+| Invariants | 32 distinct properties (19 protocol, 5 bonding, 8 solvency integration) run as 51 campaigns, since the protocol properties also run with a one-day keeper latency; checks include the pause flags; vault, reserve and funding accounting modelled; open PnL aggregates and the snapshot checked against a brute-force valuation on three pairs with a confidence band |
+| Regression tests | 70 tests in `test/regression/` (round 1 findings, rounds 2b, 3 and 3b) |
+| Slither 0.11.6 | 199 results (4 High, 15 Medium, 46 Low, 134 Informational): 14 false positives, 185 accepted by design; 2 fixed in round 3. [Triage](./tests/README.md#triage) |
+| Aderyn 0.6.8 | 3 High issues (11 instances) and 8 Low issues (53 instances): 3 false-positive instances, 61 accepted by design; 4 fixed in round 3. [Triage](./tests/README.md#triage) |
+| Contract size | `TradingEngine` 17,701 bytes with the optimizer (200 runs), 6,875 under the limit (`forge build --sizes`) |
 | Architecture documentation | This set of guides |
 | External audit | Not done |
 

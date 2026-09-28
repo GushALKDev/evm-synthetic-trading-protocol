@@ -2,38 +2,43 @@
 
 **Status:** Proof of concept. Not audited and not deployed.
 
-All numbers below were measured on 2026-09-29 at commit `2dd5562` (branch `hardening/final`) after
+All numbers below were measured on 2026-09-29 at commit `47d848f` (branch `fix/pause-flags`) after
 `npm ci`, with forge 1.7.1 and solc 0.8.24. Mock-mode numbers are taken with `FORK_RPC_URL` empty. Later
-commits change only documentation and code comments (`fa5917a`, `8910c80`), with the same line count in
-every code file; after them `FORK_RPC_URL= forge test` still gives 772 passed and 21 skipped, and the gas
-benchmarks match `snapshots/` with `FORGE_SNAPSHOT_CHECK=true`.
+commits change documentation and, in `ca89c02`, the `file:line` references of cast comments (same line count,
+same runtime sizes from `forge build --sizes`).
 
 | Group | Location | Tests | Command that counts them |
 | :---- | :------- | ----: | :----------------------- |
-| Unit | `test/unit/` | 645 | `forge test --match-path "test/unit/*" --summary` |
-| Regression (review findings, rounds 2, 2b and 3) | `test/regression/` | 65 | `forge test --match-path "test/regression/*" --summary` |
+| Unit | `test/unit/` | 659 | `forge test --match-path "test/unit/*" --summary` |
+| Regression (review findings, rounds 2, 2b, 3 and 3b) | `test/regression/` | 70 | `forge test --match-path "test/regression/*" --summary` |
 | Integration | `test/integration/Solvency.integration.t.sol` | 17 | `forge test --match-path "test/integration/*" --summary` |
-| Invariant (integration) | `test/integration/Solvency.invariant.t.sol` | 8 | same as above |
-| Invariant | `test/invariant/` | 37 | `forge test --match-path "test/invariant/*" --summary` |
+| Invariant campaigns (integration) | `test/integration/Solvency.invariant.t.sol` | 8 | same as above |
+| Invariant campaigns | `test/invariant/` | 43 | `forge test --match-path "test/invariant/*" --summary` |
 | Fork | `test/fork/` | 21 | skipped without `FORK_RPC_URL` |
-| **Total (correctness)** | | **793** | `forge test --list --json 2>/dev/null \| jq '[.[][][]] \| length'` |
+| **Total (correctness)** | | **818** | `forge test --list --json 2>/dev/null \| jq '[.[][][]] \| length'` |
 | Gas benchmarks (not counted above) | `test/gas/` | 14 | `FOUNDRY_PROFILE=gas forge test --list --json 2>/dev/null \| jq '[.[][][]] \| length'` |
 
-`FORK_RPC_URL= forge test` (mock mode): 772 passed, 0 failed, 21 skipped (the fork suite).
+`FORK_RPC_URL= forge test` (mock mode): 797 passed, 0 failed, 21 skipped (the fork suite).
 
 There are 54 functions named `testFuzz_*` (49 in `test/unit/`, 3 in `test/integration/`, 2 in
-`test/regression/`) and 45 stateful invariant functions (`invariant_*`: 16 in the protocol suite, 16 in the
-keeper latency suite, 5 in the bonding suite, 8 in the integration suite). Count them with:
+`test/regression/`). Stateful invariants are counted two ways:
+
+- **Distinct properties: 32.** 19 in `Protocol.invariant.t.sol`, 5 in `Bonding.invariant.t.sol`, 8 in
+  `Solvency.invariant.t.sol` (`grep -c "function invariant_" <file>`). `ProtocolKeeperLatency.invariant.t.sol`
+  defines none: it inherits the 19 protocol properties and runs them with a one-day keeper latency.
+- **Campaigns per full run: 51.** Forge runs one campaign per `invariant_*` function of each test contract, so
+  the 19 protocol properties run twice (19 + 19 + 5 + 8).
 
 ```bash
 forge test --list --json 2>/dev/null | jq '[.[][][] | select(startswith("testFuzz_"))] | length'   # 54
-forge test --list --json 2>/dev/null | jq '[.[][][] | select(startswith("invariant_"))] | length'  # 45
+forge test --list --json 2>/dev/null | jq '[.[][][] | select(startswith("invariant_"))] | length'  # 51 campaigns
+grep -c "function invariant_" test/invariant/*.invariant.t.sol test/integration/Solvency.invariant.t.sol  # 5, 19, 0, 8
 ```
 
 `foundry.toml` has no `[fuzz]` or `[invariant]` section, so Foundry defaults apply: 256 runs per fuzz test,
-and 256 runs of 500 calls per invariant (forge reports 128,000 calls per invariant function). A full
-`forge test` therefore runs 54 x 256 = 13,824 fuzz cases and 45 x 128,000 = 5,760,000 invariant calls. The
-default profile skips `test/gas`; the `gas` profile runs only it.
+and 256 runs of 500 calls per campaign (forge reports 128,000 calls per campaign). A full `forge test`
+therefore runs 54 x 256 = 13,824 fuzz cases and 51 x 128,000 = 6,528,000 invariant calls. The default profile
+skips `test/gas`; the `gas` profile runs only it.
 
 ```bash
 forge test                                    # correctness suite (fork tests skip without FORK_RPC_URL)
@@ -54,11 +59,11 @@ line: it replaces the profile's `no_match_path` and runs the gas benchmarks, whi
 
 ---
 
-## Regression tests (rounds 2, 2b and 3)
+## Regression tests (rounds 2, 2b, 3 and 3b)
 
 One file per finding, in [`test/regression/`](../../test/regression/). The tests named `test_Regression_*`
 and `testFuzz_Regression_*` failed against the code before their fix (the failing output is in the round 2,
-2b and 3 reports); the other tests in these files pass before and after. Most use only functions that
+2b, 3 and 3b reports); the other tests in these files pass before and after. Most use only functions that
 existed before the fix, so they compile against it; new functions are called with low-level calls and new
 errors are matched by selector literal.
 
@@ -81,6 +86,7 @@ errors are matched by selector literal.
 | `SolvencySplitRegression.t.sol` | Bonding on an unrealised move; bond clamp and round close on the realised ratio; injection on a stale snapshot (2b) | 4 |
 | `SequencerGraceScopeRegression.t.sol` | The grace period after a sequencer outage blocked closes, liquidations, refreshes, withdrawals and `checkAndAct` (3) | 8 |
 | `DepositRuleRegression.t.sol` | Deposits frozen below 100% coverage with no rescue left; injection settled before minting; refused while bonding is open or due (3) | 6 |
+| `PauseFlagsRegression.t.sol` | One pause per contract: liquidations under the engine pause, withdrawals blocked with deposits, requests expired and funding accrued during a pause (3b) | 5 |
 
 Round 3 also added unit tests that failed before their change: `test_DeleteTrade_ClearsTradeFundingIndex`
 (`TradingStorage.t.sol`) and the three `*AboveUint128Reverts` tests of `TypecastBounds.t.sol`, and a fork test,
@@ -108,25 +114,30 @@ with 1,000,000 USDC. Two handlers:
   the keeper latency), `executeLimit` one whose TP or SL is triggered at the oracle price; for both, one call in
   five (a seed divisible by `RANDOM_PICK_ONE_IN` = 5) picks uniformly among open positions instead, to
   exercise the revert paths (a random liquidation pick still inside its latency is skipped). `closeTrade`
-  always picks uniformly among open positions. The three revert with `NotSettled` when there is no eligible
-  target (`closeTrade` and `executeLimit` also while the engine is paused), and otherwise with the engine's
-  own error (for example
-  `InsufficientVaultBalance` on a winning close the vault cannot pay), so in the metrics tables below calls
-  minus reverts is the number of settlements. At
+  always picks uniformly among open positions. While the engine's `PAUSE_SETTLE` is set, each of the three
+  still calls the engine on its target: the expected revert ends the call with `NotSettled`, and an
+  unexpected success is recorded in `ghostSettledWhileSettlePaused` and returns without reverting (a revert
+  would undo the record). The three also revert with `NotSettled` when there is no eligible target, and
+  otherwise with the engine's own error (for example `InsufficientVaultBalance` on a winning close the vault
+  cannot pay), so in the metrics tables below calls minus reverts is the number of settlements. `openTrade` is
+  skipped under `PAUSE_OPEN`; `updateTp` and `updateSl` run under any flag. At
   each refresh it rebuilds the open totals position by position and checks the snapshot against them
   (exact), and checks the conservativeness bound with the excess loss `E` as a ghost variable.
 - [`LiquidityHandler`](../../test/invariant/handlers/LiquidityHandler.sol): deposit, withdrawal request,
   execution and cancellation, epoch advance, warp (1 minute to 1 day), price moves of one pair up or down by
-  up to 5% per call within 60% to 140% of its start with a new confidence band of 0% to 2% of the price, pause
-  and unpause of the engine or the vault, `checkAndAct`, `bond`, `skim`. Each flow is modelled before the call
+  up to 5% per call within 60% to 140% of its start with a new confidence band of 0% to 2% of the price,
+  `togglePause` (sets or clears one of the four flags, engine `PAUSE_OPEN` or `PAUSE_SETTLE`, vault
+  `PAUSE_DEPOSIT` or `PAUSE_WITHDRAW`; a set flag is always cleared, a clear one is set one call in four),
+  `checkAndAct`, `bond`, `skim`. It keeps its own `PAUSE_WITHDRAW` clock in seconds and the funding indexes of
+  every pair when `PAUSE_SETTLE` is set. Each flow is modelled before the call
   and compared with the measured amount, including the AssistantFund injection a deposit makes. `deposit`,
   `executeWithdrawal` and `checkAndAct` take a mode seed: act on the current snapshot (possibly stale),
   refresh first, or go through the refresh-and-act entry point. A deposit or execution rejected for a
-  documented reason (paused, stale snapshot, bonding open or due, nothing to execute) ends with
+  documented reason (`PAUSE_DEPOSIT`, stale snapshot, bonding open or due, nothing to execute, `PAUSE_WITHDRAW`) ends with
   `NotExecuted`, so calls minus reverts is the number that went through; a deposit whose outcome differs from
   `maxDeposit`, or an unexpected revert, counts as a mismatch.
 
-`ProtocolKeeperLatencyInvariantTest` runs the same invariants with a keeper latency of one day: the handler
+`ProtocolKeeperLatencyInvariantTest` runs the same invariant properties in a second configuration, with a keeper latency of one day: the handler
 liquidates a position only one day after it first sees it liquidatable, and every pair starts with a 1,000
 USDC 100x long and short without TP or SL, so positions pass 100% loss before liquidation.
 
@@ -148,53 +159,60 @@ USDC 100x long and short without TP or SL, so positions pass 100% loss before li
 | `invariant_SnapshotMatchesBruteForceAndIsConservative` | at every refresh: snapshot = `toUsdcUp` of the sum over pairs of `pairPnl(price, conf, brute-force totals)` exactly, and L <= max(0, snapshot) + E, where L is the positive part of the sum of per-position PnL at the oracle price, capped at 8x collateral and floored at minus collateral, and E the excess loss of positions past 100% loss (tolerance 0) |
 | `invariant_DepositsFollowRescueRule` | no deposit on a stale snapshot or while a bonding round is open after the check; each deposit injects exactly the injection pending before it; minted shares are worth at most the assets paid in; no withdrawal execution on a stale snapshot (replaces round 2b's `NoDepositBelowParOrStaleAction`) |
 | `invariant_BondingNeverStartsAboveCriticalRealisedRatio` | no `checkAndAct` opened a bonding round with the realised ratio at or above 95% |
+| `invariant_NoSettlementWhileSettlePaused` | no close, TP/SL execution or liquidation succeeded while `PAUSE_SETTLE` was set (the handler calls the engine anyway) |
+| `invariant_WithdrawPauseDoesNotExpireRequests` | with `PAUSE_WITHDRAW` clear, every request inside its window by the handler's model (unlocked, before the unextended expiry plus the exact seconds paused since the request) can be executed (`canExecuteWithdrawal`) |
+| `invariant_NoFundingAccruesWhileSettlePaused` | while `PAUSE_SETTLE` is set, every pair's funding indexes equal those right after it was set; clearing it left them unchanged; no pair's `fundingLastUpdated` is before the last time it was cleared |
 
 Call distribution and revert rates for the `invariant_VaultBalanceMatchesModelledFlows` campaign of each suite
 (256 runs x 500 calls), from
 `FOUNDRY_INVARIANT_SHOW_METRICS=true forge test --match-contract "^ProtocolInvariantTest$" -vv` and the same
 command with `"^ProtocolKeeperLatencyInvariantTest$"` (forge runs one campaign per invariant function; the
-range over all 16 campaigns of each suite is given after the table):
+range over all 19 campaigns of each suite is given after the table):
 
 | Handler | Action | Calls (default / latency) | Reverts (default / latency) | Went through (default / latency) | Revert rate (default / latency) |
 | :------ | :----- | ----: | ------: | ------: | ----: |
-| ProtocolHandler | openTrade | 6,893 / 7,097 | 0 / 0 | | 0% / 0% |
-| ProtocolHandler | closeTrade | 7,201 / 7,010 | 3,370 / 2,109 | 3,831 / 4,901 | 46.8% / 30.1% |
-| ProtocolHandler | liquidate | 7,064 / 7,087 | 6,667 / 7,072 | 397 / 15 | 94.4% / 99.8% |
-| ProtocolHandler | executeLimit | 7,217 / 7,107 | 7,022 / 6,559 | 195 / 548 | 97.3% / 92.3% |
-| ProtocolHandler | updateTp / updateSl | 7,122 / 7,195 and 7,214 / 7,134 | 0 | | 0% |
-| ProtocolHandler | refreshSnapshot | 7,080 / 7,219 | 0 / 0 | 7,080 / 7,219 | 0% / 0% |
-| LiquidityHandler | deposit | 7,078 / 7,064 | 2,189 / 2,462 | 4,889 / 4,602 | 30.9% / 34.9% |
-| LiquidityHandler | executeWithdrawal | 7,039 / 7,078 | 6,859 / 6,935 | 180 / 143 | 97.4% / 98.0% |
-| LiquidityHandler | requestWithdrawal / cancelWithdrawal | 7,157 / 7,175 and 7,196 / 7,196 | 0 | | 0% |
-| LiquidityHandler | advanceEpoch / warp / movePrice / togglePause | 7,118, 7,200, 7,188, 7,087 / 7,078, 7,135, 7,180, 7,003 | 0 | | 0% |
-| LiquidityHandler | checkAndAct / bond / skim | 7,051, 7,153, 6,942 / 7,100, 6,986, 7,156 | 0 | | 0% |
+| ProtocolHandler | openTrade | 7,098 / 7,300 | 0 / 0 | 7,098 / 7,300 | 0.0% / 0.0% |
+| ProtocolHandler | closeTrade | 7,105 / 7,013 | 3,464 / 2,163 | 3,641 / 4,850 | 48.8% / 30.8% |
+| ProtocolHandler | liquidate | 7,185 / 7,100 | 6,801 / 7,095 | 384 / 5 | 94.7% / 99.9% |
+| ProtocolHandler | executeLimit | 6,990 / 7,006 | 6,784 / 6,564 | 206 / 442 | 97.1% / 93.7% |
+| ProtocolHandler | refreshSnapshot | 7,145 / 7,082 | 0 / 0 | 7,145 / 7,082 | 0.0% / 0.0% |
+| LiquidityHandler | deposit | 7,076 / 7,074 | 2,367 / 2,381 | 4,709 / 4,693 | 33.5% / 33.7% |
+| LiquidityHandler | executeWithdrawal | 7,042 / 7,161 | 6,895 / 7,008 | 147 / 153 | 97.9% / 97.9% |
+| both | updateTp, updateSl, requestWithdrawal, cancelWithdrawal, advanceEpoch, warp, movePrice, togglePause, checkAndAct, bond, skim | 6,958 to 7,306 each | 0 | | 0% |
 
-In the default suite, of the 4,423 settlements 397 (9.0%) were liquidations, 3,831 (86.6%) closes and 195
-(4.4%) TP/SL executions; with the one-day keeper latency, of 5,464 settlements 15 (0.3%) were liquidations,
-4,901 (89.7%) closes and 548 (10.0%) TP/SL executions. forge's metrics do not split reverts by reason. From
-the handler code, a `liquidate` or `executeLimit` call reverts when it finds no eligible target or its random
-pick is rejected by the engine; `closeTrade` while the engine is paused, with no open position, or on a
-winning close the vault cannot pay; `executeWithdrawal` when no request is in its execution window or the
-snapshot is stale. `deposit` went through in 69.1% of calls in the default suite; round 2b measured 2,238
-of 7,006 (31.9%) on its single-pair setup, under the rule that refused every deposit below 100% coverage.
+In the default suite, of the 4,231 settlements 384 (9.1%) were liquidations, 3,641 (86.1%) closes and 206
+(4.9%) TP/SL executions; with the one-day keeper latency, of 5,297 settlements 5 (0.1%) were liquidations,
+4,850 (91.6%) closes and 442 (8.3%) TP/SL executions. forge's metrics do not split reverts by reason. From
+the handler code, a `liquidate` or `executeLimit` call reverts when it finds no eligible target, when its
+random pick is rejected by the engine, or while `PAUSE_SETTLE` is set; `closeTrade` while `PAUSE_SETTLE` is
+set, with no open position, or on a winning close the vault cannot pay; `executeWithdrawal` when no request
+is in its execution window, while `PAUSE_WITHDRAW` is set, or when the snapshot is stale. `deposit` went
+through in 66.5% of calls in the default suite; round 3 measured 69.1% before the flags (the deposit pause is
+now one of four flags, each set one call in four when clear).
 
-Over the 16 campaigns of each suite (same logs), the calls that went through ranged as follows:
+Over the 19 campaigns of each suite (same logs), the calls that went through ranged as follows:
 
 | Action | Default suite | Keeper latency suite |
 | :----- | ------------: | -------------------: |
-| closeTrade | 3,775 to 3,869 | 4,770 to 4,901 |
-| liquidate | 397 to 435 | 15 to 33 |
-| executeLimit | 180 to 195 | 504 to 548 |
-| deposit | 4,831 to 4,893 | 4,530 to 4,685 |
-| executeWithdrawal | 155 to 182 | 133 to 166 |
+| closeTrade | 3,537 to 3,655 | 4,746 to 4,859 |
+| liquidate | 381 to 428 | 1 to 15 |
+| executeLimit | 189 to 218 | 407 to 478 |
+| deposit | 4,684 to 4,831 | 4,618 to 4,756 |
+| executeWithdrawal | 140 to 171 | 133 to 166 |
 
-**Excess loss with a slow keeper.** The last run of each of the 16 campaigns of
-`ProtocolKeeperLatencyInvariantTest` logged between 8 and 22 refreshes with `E > 0` out of 32, and a largest `E`
-between 6,588.21 and 24,765.98 USD (`refreshes / refreshes with E > 0 / max E` in the `-vv` logs), so the
-conservativeness bound held with tolerance 0 while positions were past 100% loss in every campaign. In the
-default suite, where the keeper liquidates as soon as a position qualifies, 14 of the 16 last runs logged no
-refresh with `E > 0` and 2 logged one. The one-day latency also leaves liquidatable payers open, which is what
-produces unpaid funding: the residual described in
+**Excess loss.** From the `refreshes / refreshes with E > 0 / max E` line of the `-vv` logs, last run of each
+campaign:
+
+- Keeper latency suite: all 19 campaigns logged refreshes with `E > 0`, between 9 and 19 out of 23, with a
+  largest `E` between 513.79 and 55,198.73 USD.
+- Default suite: all 19 campaigns also logged refreshes with `E > 0`, between 3 and 18 out of 28, with a
+  largest `E` between 2,462.02 and 27,776.33 USD. In round 3, 14 of 16 default campaigns logged none: the
+  difference is `PAUSE_SETTLE`, under which prices keep moving and no position can be liquidated, so
+  positions pass 100% loss even with an immediate keeper. This is the interaction described in
+  [Guide 8, section 5](../08-security.md#5-pause-flags).
+
+The conservativeness bound held with tolerance 0 in every campaign of both suites. Liquidatable payers left
+open also produce unpaid funding: the residual described in
 [Guide 2](../02-mathematics.md#residual-funding-a-payer-cannot-pay).
 
 Mutation checks: each of these temporary changes to `src/` made at least one invariant fail with 20 runs of
@@ -211,6 +229,24 @@ coverage check (`NoDepositBelowParOrStaleAction`, replaced in round 3: `deposit 
 NAV ratio (`BondingNeverStartsAboveCriticalRealisedRatio`: `1 != 0`), quantity removed with the short
 rounding for longs (`OpenTotalsMatchPositions`: `long quantity: 1 != 0`), and the snapshot halved
 (`SnapshotMatchesBruteForceAndIsConservative`: `snapshot differs from the brute-force valuation: 1 != 0`).
+
+Round 3 and 3b mutation checks, run on the final code of round 3b with the default configuration (256 runs
+of 500 calls). Each mutation was applied to `src/` alone, the command below was run, then `git checkout src`
+and `rm -rf cache/invariant/failures`; none was committed.
+
+```bash
+FORK_RPC_URL= forge test --match-contract "^ProtocolInvariantTest$" --match-test <invariant>
+```
+
+| Mutation (file) | Invariant | Failure |
+| :-------------- | :-------- | :------ |
+| Deposits check bonding without running the pending injection: `checkAndActBeforeDeposit()` replaced by `bondingRoundOpenAfterCheck()` (`Vault.sol`) | `invariant_DepositsFollowRescueRule` | `deposit did not settle the pending injection first: 1 != 0` |
+| The snapshot refresh skips pair 1 (`Vault._refreshPnlSnapshot`) | `invariant_SnapshotMatchesBruteForceAndIsConservative` | `snapshot differs from the brute-force valuation: 1 != 0` |
+| The snapshot prices at the mid price: `pairPnl(price, 0, totals)` (`Vault._refreshPnlSnapshot`) | `invariant_SnapshotMatchesBruteForceAndIsConservative` | `snapshot differs from the brute-force valuation: 1 != 0` |
+| `liquidate` without `whenNotPaused(PAUSE_SETTLE)` (`TradingEngine.sol`) | `invariant_NoSettlementWhileSettlePaused` | `settlement succeeded under PAUSE_SETTLE: 1 != 0` |
+| No expiry extension under `PAUSE_WITHDRAW`: `extension = paused * 0` (`Vault._expiryEpoch`) | `invariant_WithdrawPauseDoesNotExpireRequests` | `request expired by time spent under PAUSE_WITHDRAW` |
+| Extension rounded down instead of up: `extension = paused / EPOCH_LENGTH` (`Vault._expiryEpoch`) | `invariant_WithdrawPauseDoesNotExpireRequests` | `request expired by time spent under PAUSE_WITHDRAW` |
+| Funding accrues under `PAUSE_SETTLE`: `_activeFundingFactor()` returns `fundingFactor` (`TradingEngine.sol`) | `invariant_NoFundingAccruesWhileSettlePaused` | `funding index changed across a settlement pause: 2 != 0` |
 
 ### Bonding: [`Bonding.invariant.t.sol`](../../test/invariant/Bonding.invariant.t.sol)
 
@@ -291,15 +327,15 @@ Counts from `forge test --match-path "test/unit/*" --summary`.
 
 | Contract | Test file | Tests |
 | :------- | :-------- | ----: |
-| TradingEngine | [`TradingEngine.t.sol`](../../test/unit/TradingEngine.t.sol) | 161 |
+| TradingEngine | [`TradingEngine.t.sol`](../../test/unit/TradingEngine.t.sol) | 165 |
 | TradingStorage | [`TradingStorage.t.sol`](../../test/unit/TradingStorage.t.sol) | 119 |
-| Vault | [`Vault.t.sol`](../../test/unit/Vault.t.sol) | 71 |
+| Vault | [`Vault.t.sol`](../../test/unit/Vault.t.sol) | 76 |
 | Vault (NAV, snapshot, ratios) | [`VaultNav.t.sol`](../../test/unit/VaultNav.t.sol) | 35 |
 | Vault (ERC-4626 conformity at the NAV, sUSDC with escrow) | [`VaultErc4626.t.sol`](../../test/unit/VaultErc4626.t.sol) | 7 |
 | Vault (snapshot refresh with a nonzero Pyth fee, 3 pairs) | [`VaultRefreshFee.t.sol`](../../test/unit/VaultRefreshFee.t.sol) | 6 |
 | Vault (deposit rule with the `SolvencyManager` wired) | [`VaultDepositRule.t.sol`](../../test/unit/VaultDepositRule.t.sol) | 3 |
 | SpreadManager | [`SpreadManager.t.sol`](../../test/unit/SpreadManager.t.sol) | 48 |
-| BondDepository | [`BondDepository.t.sol`](../../test/unit/BondDepository.t.sol) | 44 |
+| BondDepository | [`BondDepository.t.sol`](../../test/unit/BondDepository.t.sol) | 49 |
 | PythChainlinkOracle | [`PythChainlinkOracle.t.sol`](../../test/unit/PythChainlinkOracle.t.sol) | 37 |
 | SolvencyManager | [`SolvencyManager.t.sol`](../../test/unit/SolvencyManager.t.sol) | 29 |
 | SynthToken | [`SynthToken.t.sol`](../../test/unit/SynthToken.t.sol) | 20 |
@@ -309,7 +345,7 @@ Counts from `forge test --match-path "test/unit/*" --summary`.
 | Downcasts at their bounds | [`TypecastBounds.t.sol`](../../test/unit/TypecastBounds.t.sol) | 8 |
 | Griefing paths and edge cases on the wired protocol | [`EdgeCases.t.sol`](../../test/unit/EdgeCases.t.sol) | 7 |
 
-Total: 645.
+Total: 659.
 
 ### Mocks: [`test/mocks/`](../../test/mocks/)
 
@@ -382,23 +418,28 @@ snapshot refresh that is not measured. The build uses the optimizer with 200 run
 
 | Call | Gas (`FOUNDRY_PROFILE=gas forge test`, `snapshots/*.json`) |
 | :--- | --: |
-| `TradingEngine.openTrade` (with TP and SL) | 300,311 |
-| `TradingEngine.closeTrade` (profit) | 129,691 |
-| `TradingEngine.liquidate` | 127,133 |
-| `TradingEngine.executeLimit` (TP) | 158,896 |
-| `Vault.deposit` (runs `SolvencyManager.checkAndActBeforeDeposit`, nothing to inject) | 65,737 |
-| `Vault.refreshAndDeposit` | 187,346 |
-| `Vault.requestWithdrawal` | 61,818 |
-| `Vault.executeWithdrawal` | 33,073 |
-| `Vault.refreshAndExecuteWithdrawal` | 156,611 |
-| `Vault.refreshPnlSnapshot`, 1 pair | 126,647 |
-| `Vault.refreshPnlSnapshot`, 20 pairs (`MAX_PAIRS`), a long and a short on each | 640,759 |
-| `SolvencyManager.checkAndAct` (injects the reserve and opens a bonding round) | 66,606 |
-| `SolvencyManager.refreshAndCheckAndAct` (same path) | 199,375 |
-| `BondDepository.bond` | 137,037 |
+| `TradingEngine.openTrade` (with TP and SL) | 300,422 |
+| `TradingEngine.closeTrade` (profit) | 129,992 |
+| `TradingEngine.liquidate` | 127,387 |
+| `TradingEngine.executeLimit` (TP) | 159,046 |
+| `Vault.deposit` (runs `SolvencyManager.checkAndActBeforeDeposit`, nothing to inject) | 65,782 |
+| `Vault.refreshAndDeposit` | 187,280 |
+| `Vault.requestWithdrawal` | 64,293 |
+| `Vault.executeWithdrawal` | 34,384 |
+| `Vault.refreshAndExecuteWithdrawal` | 157,878 |
+| `Vault.refreshPnlSnapshot`, 1 pair | 126,603 |
+| `Vault.refreshPnlSnapshot`, 20 pairs (`MAX_PAIRS`), a long and a short on each | 640,715 |
+| `SolvencyManager.checkAndAct` (injects the reserve and opens a bonding round) | 64,396 |
+| `SolvencyManager.refreshAndCheckAndAct` (same path) | 197,121 |
+| `BondDepository.bond` | 139,037 |
 
-`Vault.deposit` went from 49,605 in round 2b to 65,737: it now calls the `SolvencyManager` set on the vault
-before minting (`checkAndActBeforeDeposit`), which reads the reserve and the bonding state. The `gas` job in
+`Vault.deposit` went from 49,605 in round 2b to 65,737 in round 3: it calls the `SolvencyManager` set on the
+vault before minting (`checkAndActBeforeDeposit`), which reads the reserve and the bonding state. Round 3b
+moved the other rows by the pause flags: `requestWithdrawal` (61,818 to 64,293) and `executeWithdrawal`
+(33,073 to 34,384) read the withdrawal pause clock, and the engine's settlement calls read the flags.
+`checkAndAct` fell from 66,606 to 64,396 because `activateBonding` no longer reads `referencePrice`, and
+`bond` rose from 137,037 to 139,037 because its benchmark runs `checkAndAct` first in the same transaction,
+so `bond` now reads `referencePrice` cold (on a live chain the two calls are separate transactions). The `gas` job in
 [`.github/workflows/test.yml`](../../.github/workflows/test.yml) runs `FOUNDRY_PROFILE=gas forge test` as a
 pass/fail check: every benchmark must succeed, and the gas values are not compared with the committed
 snapshots (forge compares them only when `FORGE_SNAPSHOT_CHECK` is set). To compare locally:
@@ -411,106 +452,102 @@ FORGE_SNAPSHOT_CHECK=true FOUNDRY_PROFILE=gas forge test
 
 ## Coverage
 
-From `FORK_RPC_URL= FOUNDRY_PROFILE=coverage forge coverage --report summary` at commit `2dd5562` (coverage
-builds disable the optimizer; the profile excludes `test/gas`). The run executed 793 tests: 772 passed, 21
+From `FORK_RPC_URL= FOUNDRY_PROFILE=coverage forge coverage --report summary` at commit `47d848f` (coverage
+builds disable the optimizer; the profile excludes `test/gas`). The run executed 818 tests: 797 passed, 21
 skipped (the fork suite).
 
 | Contract | Lines | Statements | Branches | Functions |
 | :------- | :---- | :--------- | :------- | :-------- |
 | AssistantFund | 100% (33/33) | 100% (37/37) | 100% (6/6) | 100% (9/9) |
-| BondDepository | 100% (93/93) | 94.92% (112/118) | 75.00% (18/24) | 100% (18/18) |
+| BondDepository | 100% (92/92) | 100% (116/116) | 100% (23/23) | 100% (18/18) |
 | PythChainlinkOracle | 100% (56/56) | 100% (89/89) | 100% (16/16) | 100% (8/8) |
 | SolvencyManager | 100% (57/57) | 100% (82/82) | 100% (13/13) | 100% (9/9) |
 | SpreadManager | 100% (54/54) | 100% (58/58) | 100% (13/13) | 100% (12/12) |
 | SynthToken | 100% (23/23) | 100% (18/18) | 100% (4/4) | 100% (9/9) |
-| TradingEngine | 100% (281/281) | 99.49% (394/396) | 97.06% (66/68) | 100% (41/41) |
+| TradingEngine | 100% (281/281) | 100% (412/412) | 100% (69/69) | 100% (38/38) |
 | TradingStorage | 100% (153/153) | 100% (159/159) | 100% (34/34) | 100% (34/34) |
-| Vault | 100% (203/203) | 99.59% (245/246) | 96.67% (29/30) | 100% (51/51) |
+| Vault | 100% (213/213) | 100% (284/284) | 100% (34/34) | 100% (50/50) |
 | FundingLib | 100% (16/16) | 100% (28/28) | 100% (4/4) | 100% (3/3) |
 | OpenPnlLib | 100% (21/21) | 100% (32/32) | 100% (5/5) | 100% (4/4) |
 
-The branches never taken are listed by the `BRDA` entries with 0 hits in
-`FORK_RPC_URL= FOUNDRY_PROFILE=coverage forge coverage --report lcov`; each is a revert with no test:
-
-| Contract | Line | Revert |
-| :------- | ---: | :----- |
-| BondDepository | 135 | `SolvencyManagerNotSet` |
-| BondDepository | 187 | `ReferencePriceUnset` in `activateBonding`, which cannot happen: `referencePrice` starts at 2 USDC and `setReferencePrice` rejects 0 |
-| BondDepository | 300, 308 | `InvalidBondId` in the two per-bond views |
-| BondDepository | 322 | `ZeroAddress` in `setSolvencyManager` |
-| BondDepository | 347 | `EffectivePriceZero` in `setDiscountBps` |
-| TradingEngine | 784 | `TpAlreadyTriggered` in `updateTp` for a short |
-| TradingEngine | 805 | `SlAlreadyTriggered` in `updateSl` for a short |
-| Vault | 661 | `ZeroAddress` in `setSolvencyManager` (added in round 3) |
-
-The `maxWithdraw` and `maxRedeem` bodies are now empty, so round 2b's two uncovered `return 0` lines are
-gone. The `FeeExceedsCollateral` check, which could not be reached while `MAX_LEVERAGE` is 100, was removed
-in `0dcdd6c`. The "Total" row of the report (87.19% lines) also counts `node_modules/`, `script/` and
-`test/`. Line coverage says a line ran, not that its result was checked.
+Round 3 listed nine branches never taken, all reverts. Eight now have tests (commit `1a7442c`: in
+`BondDepository.t.sol` `test_ActivateBonding_RevertWhenSolvencyManagerNotSet`, `test_BondAt_InvalidIdReverts`,
+`test_Claimable_InvalidIdReverts`, `test_SetSolvencyManager_ZeroAddressReverts`,
+`test_SetDiscountBps_EffectivePriceZeroReverts`; in `TradingEngine.t.sol`
+`test_UpdateTp_RevertWhenAlreadyTriggeredForShort`, `test_UpdateSl_RevertWhenAlreadyTriggeredForShort`; in
+`Vault.t.sol` `test_SetSolvencyManager_ZeroAddressReverts`). The ninth, `ReferencePriceUnset` in
+`activateBonding`, could not be reached and was removed (commit `b5e0f1a`). The "Total" row of the report
+also counts `node_modules/`, `script/` and `test/`. Line coverage says a line ran, not that its result was
+checked.
 
 ---
 
 ## Static analysis
 
-Run at commit `2dd5562`. The later commits change only comments, with the same line count, so the lines cited
-below are unchanged.
+Run at commit `47d848f`. The later commits change documentation and cast comments with the same line count,
+so the lines cited below are unchanged.
 
 | Tool | Command | Raw result |
 | :--- | :------ | :--------- |
-| Slither 0.11.6 | `slither . --filter-paths "lib\|node_modules\|test" --json <file>` | 196 results: 4 High, 15 Medium, 41 Low, 136 Informational |
-| Aderyn 0.6.8 | `aderyn --src src -o <file>.md` | 3 High issues (11 instances), 8 Low issues (57 instances) |
+| Slither 0.11.6 | `slither . --filter-paths "lib\|node_modules\|test" --json <file>` | 199 results: 4 High, 15 Medium, 46 Low, 134 Informational |
+| Aderyn 0.6.8 | `aderyn --src src -o <file>.md` | 3 High issues (11 instances), 8 Low issues (53 instances) |
 
 Slither counts by detector come from
 `jq -r '.results.detectors[] | "\(.impact) \(.check)"' <file> | sort | uniq -c`; Aderyn counts from the
-"Found Instances" line of each issue in the report. At the start of round 3 (commit `c3d552a`; `src/` is the
-same at the branch point `defb06d`, `git diff --stat c3d552a defb06d -- src` is empty) the same commands gave Slither 197 results (4 High, 16 Medium, 43 Low, 134 Informational) and Aderyn 3 High issues
-(14 instances) and 6 Low issues (53 instances).
+"Found Instances" line of each issue in the report. Earlier baselines with the same commands: at `c3d552a`
+(start of round 3) Slither 197 and Aderyn 3 High (14 instances) and 6 Low (53); at `2dd5562` (end of round 3)
+Slither 196 and Aderyn 3 High (11) and 8 Low (57).
+
+Changes in round 3b, from a line-by-line diff of the two JSON reports: Slither `calls-loop` 17 to 22 (the
+`setPauseFlags` loop in `TradingEngine` calls `_updateFundingIndex` for every pair, 5 call sites),
+`naming-convention` 123 to 125 (the `_flags` parameter of the two `setPauseFlags`), and
+`unindexed-event-address` 4 to 0 (the `Paused(address)` and `Unpaused(address)` events were removed). Aderyn
+L-1 36 to 34 and L-5 5 to 3 (`pause`, `unpause` and the `whenPaused` modifiers were removed).
 
 ### Triage
 
 Verdicts: **fixed** (the code changed and the result is gone), **false positive** (the pattern the detector
 looks for is not there), **accepted by design** (the pattern is there and is intended; the reason says why).
-Instances are those of the final run; fixed rows give the count at `c3d552a` or when the result appeared.
+Instances are those of the final run; fixed rows give the count when the result was present.
 
 | Tool | Detector | Instances | Verdict | Reason | Commit |
 | :--- | :------- | --------: | :------ | :----- | :----- |
-| Slither | `reentrancy-no-eth` (Medium) | 0 (1 at `c3d552a`) | fixed | `TradingEngine.setFundingFactor` wrote the factor after the calls to TradingStorage that accrue each pair; it now keeps the old factor in a local, writes and emits first, then accrues at the old factor | `52d7c2b` |
+| Slither | `reentrancy-no-eth` (Medium) | 0 (1 at `c3d552a`) | fixed | `TradingEngine.setFundingFactor` wrote the factor after the calls to TradingStorage that accrue each pair; it now writes and emits first, then accrues at the old factor | `52d7c2b` |
 | Slither | `reentrancy-events` (Low), `setFundingFactor` | 0 (1 at `c3d552a`) | fixed | same change: `FundingFactorUpdated` is emitted before the loop | `52d7c2b` |
-| Slither | `msg-value-loop` (High) | 4 | false positive | one line, `Vault.sol:263`, reported once per caller of `_refreshPnlSnapshot`; `msg.value` goes only to the first priced pair, and the `pythUpdated` flag sends later pairs through `getPrice` without value (`Vault.sol:260`). `test/unit/VaultRefreshFee.t.sol` checks the ETH accounting with a nonzero fee on three pairs | `2d88c2d` (test) |
-| Slither | `incorrect-equality` (Medium) | 6 | false positive | equality with values no one can steer by sending tokens: `deltaTime == 0` (`TradingEngine.sol:338`), `supply == 0` (`Vault.sol:566`, `Vault.sol:576`), `shares == 0` of the caller's request (`Vault.sol:462`), `claimed == 0` (`BondDepository.sol:248`) and the position nonce (`Vault.sol:597`), which must match exactly | |
+| Slither | `unindexed-event-address` (Informational) | 0 (4 at `2dd5562`) | removed with the code | `Paused(address)` and `Unpaused(address)` no longer exist; `PauseFlagsUpdated(uint8)` has no address | `3422f8e` |
+| Slither | `msg-value-loop` (High) | 4 | false positive | one line, `Vault.sol:290`, reported once per caller of `_refreshPnlSnapshot`; `msg.value` goes only to the first priced pair, and the `pythUpdated` flag sends later pairs through `getPrice` without value (`Vault.sol:287`). `test/unit/VaultRefreshFee.t.sol` checks the ETH accounting with a nonzero fee on three pairs | `2d88c2d` (test) |
+| Slither | `incorrect-equality` (Medium) | 6 | false positive | equality with values no one can steer by sending tokens: `deltaTime == 0` (`TradingEngine.sol:339`), `supply == 0` (`Vault.sol:609`, `619`), `shares == 0` of the caller's request (`Vault.sol:494`), `claimed == 0` (`BondDepository.sol:247`) and the position nonce (`Vault.sol:640`), which must match exactly | |
 | Slither | `pyth-unchecked-confidence` (Medium) | 1 | false positive | the confidence is checked against 2% of the price at `PythChainlinkOracle.sol:154` (`ConfidenceTooWide`) | |
-| Slither | `uninitialized-local` (Medium) | 3 | false positive | `noUpdate`, `pythUpdated` and `netWad` in `_refreshPnlSnapshot` (`Vault.sol:252` to `254`) start at their default values on purpose: an empty update, no update sent yet, zero sum | |
-| Slither | `unused-return` (Medium) | 5 | accepted by design | the ignored fields are not needed: Chainlink round ids and times the checks do not use (`PythChainlinkOracle.sol:199`, `209`), the confidence outside liquidations (`TradingEngine.sol:185`), and the half of `getPositionState` a caller does not need (`Vault.sol:237`, `268`) | |
+| Slither | `uninitialized-local` (Medium) | 3 | false positive | `noUpdate`, `pythUpdated` and `netWad` in `_refreshPnlSnapshot` (`Vault.sol:279` to `281`) start at their default values on purpose: an empty update, no update sent yet, zero sum | |
+| Slither | `unused-return` (Medium) | 5 | accepted by design | the ignored fields are not needed: Chainlink round ids and times the checks do not use (`PythChainlinkOracle.sol:202`, `210`), the confidence outside liquidations (`TradingEngine.sol:186`), and the half of `getPositionState` a caller does not need (`Vault.sol:264`, `295`) | |
 | Slither | `timestamp` (Low) | 18 | accepted by design | staleness, sequencer grace, epochs, vesting and funding use `block.timestamp`; a timestamp shifted by a few seconds moves these by the same few seconds | |
-| Slither | `calls-loop` (Low) | 17 | accepted by design | loops over pairs, at most `MAX_PAIRS` (20): funding accrual in `setFundingFactor` and the snapshot refresh; the callees are TradingStorage and the owner-set oracle, and a revert on any pair is meant to revert the whole call (the snapshot needs every priced pair) | |
+| Slither | `calls-loop` (Low) | 22 | accepted by design | loops over pairs, at most `MAX_PAIRS` (20): funding accrual in `setFundingFactor` and `setPauseFlags`, and the snapshot refresh; the callees are TradingStorage and the owner-set oracle, and a revert on any pair is meant to revert the whole call | |
 | Slither | `reentrancy-events` (Low) | 5 | accepted by design | events after calls to protocol contracts set at deploy (`SynthToken.mint` in `bond`, `AssistantFund` and `BondDepository` in `_checkAndAct`); those contracts do not call back | |
-| Slither | `reentrancy-benign` (Low) | 1 | accepted by design | `_refreshPnlSnapshot` writes the snapshot after the oracle calls; every caller is `nonReentrant` (`Vault.sol:605` and the `refreshAnd*` entry points) | |
-| Slither | `assembly` (Informational) | 4 | accepted by design | `tstore`/`tload` of the ETH baseline in `_recordEthBaseline`/`_refundEth` of TradingEngine and Vault (transient storage, Solidity 0.8.24 has no high-level syntax for it) | |
-| Slither | `missing-inheritance` (Informational) | 5 | accepted by design | the interfaces in `src/interfaces/` declare only what a caller uses; the contracts do not inherit them. Up from 4: `ISolvencyManager` is new in round 3 | |
-| Slither | `unindexed-event-address` (Informational) | 4 | accepted by design | `Paused(address)` and `Unpaused(address)` in TradingEngine and Vault keep the OpenZeppelin signature, which does not index the account | |
-| Slither | `naming-convention` (Informational) | 123 | accepted by design | 103 parameters with a leading underscore and 20 immutables in upper case, both project conventions ([Guide 5](../05-implementation.md)) | |
+| Slither | `reentrancy-benign` (Low) | 1 | accepted by design | `_refreshPnlSnapshot` writes the snapshot (`Vault.sol:298`) after the oracle calls; every caller is `nonReentrant` (`Vault.sol:648` and the `refreshAnd*` entry points) | |
+| Slither | `assembly` (Informational) | 4 | accepted by design | `tstore`/`tload` of the ETH baseline in `_recordEthBaseline`/`_refundEth` of TradingEngine and Vault (transient storage has no high-level syntax in Solidity 0.8.24) | |
+| Slither | `missing-inheritance` (Informational) | 5 | accepted by design | the interfaces in `src/interfaces/` declare only what a caller uses; the contracts do not inherit them | |
+| Slither | `naming-convention` (Informational) | 125 | accepted by design | 105 parameters with a leading underscore and 20 immutables in upper case, both project conventions ([Guide 5](../05-implementation.md)) | |
 | Aderyn | H-2 Reentrancy: state change after external call, `setFundingFactor` | 0 (1 at `c3d552a`) | fixed | same change as the Slither row above | `52d7c2b` |
 | Aderyn | H-3 Unsafe casting of integers, `BondDepository` `synthOut` and the oracle's normalized price | 0 (2 at `c3d552a`) | fixed | both use `SafeCastLib` and revert instead of truncating; `test/unit/TypecastBounds.t.sol` tests each at its bound | `4145744` |
-| Aderyn | L "Public function not used internally", `Vault.collateralizationRatio` | 0 (1 after `21d9361`) | fixed | it was `public` for the round 2b deposit check, which `21d9361` removed; it is `external` again | `2dd5562` |
+| Aderyn | L "Public function not used internally", `Vault.collateralizationRatio` | 0 (1 after `21d9361`) | fixed | `external` again | `2dd5562` |
 | Aderyn | H-1 Contract locks Ether without a withdraw function | 9 | accepted by design | every contract inherits Solady's `Ownable`, whose ownership functions are `payable`; ETH sent with them stays in the contract. The fee paths (engine, vault, `SolvencyManager`, oracle) refund what the oracle does not use (`test/regression/EthRefundRegression.t.sol`, `test/unit/VaultRefreshFee.t.sol`) | |
-| Aderyn | H-2 Reentrancy: state change after external call | 1 | false positive | `BondDepository.sol:208` is a `view` call (STATICCALL) to the vault's `realisedCollateralizationDeficit` before `remainingCap` is written | |
-| Aderyn | H-3 Unsafe casting of integers | 1 | false positive | `Vault.sol:293` casts the constant 60 to `uint32` | |
-| Aderyn | L-1 Centralization risk | 36 | accepted by design | owner-set parameters and wiring; the trust assumptions are in [Guide 8](../08-security.md) | |
-| Aderyn | L-2 Empty block | 2 | accepted by design | `maxWithdraw` and `maxRedeem` (`Vault.sol:429`, `431`) return the default 0: `withdraw` and `redeem` are disabled in favour of the 3-epoch queue | `120adca` |
-| Aderyn | L-3 Large numeric literal | 5 | accepted by design | `10_000` in the four `BPS_DENOMINATOR` constants and in the slippage check (`TradingEngine.sol:301`) | |
-| Aderyn | L-4 Literal instead of constant | 6 | accepted by design | `10 ** _decimalsOffset()` in the Vault ratios (`Vault.sol:567`, `577`, `584`, `617`) and `1e12` in the quantity updates (`TradingStorage.sol:233`, `243`), each a unit conversion next to its use | |
-| Aderyn | L-5 Modifier invoked only once | 5 | accepted by design | the project's modifier-to-internal-check pattern is applied to every access check, including those used once | |
+| Aderyn | H-2 Reentrancy: state change after external call | 1 | false positive | `BondDepository.sol:207` is a `view` call (STATICCALL) to the vault's `realisedCollateralizationDeficit` before `remainingCap` is written | |
+| Aderyn | H-3 Unsafe casting of integers | 1 | false positive | `Vault.sol:320` casts the constant 60 to `uint32` | |
+| Aderyn | L-1 Centralization risk | 34 | accepted by design | owner-set parameters, wiring and pause flags; the trust assumptions are in [Guide 8](../08-security.md) | |
+| Aderyn | L-2 Empty block | 2 | accepted by design | `maxWithdraw` and `maxRedeem` (`Vault.sol:456`, `458`) return the default 0: `withdraw` and `redeem` are disabled in favour of the 3-epoch queue | `120adca` |
+| Aderyn | L-3 Large numeric literal | 5 | accepted by design | `10_000` in the four `BPS_DENOMINATOR` constants and in the slippage check (`TradingEngine.sol:302`) | |
+| Aderyn | L-4 Literal instead of constant | 6 | accepted by design | `10 ** _decimalsOffset()` in the Vault ratios (`Vault.sol:610`, `620`, `627`, `660`) and `1e12` in the quantity updates (`TradingStorage.sol:233`, `243`), each a unit conversion next to its use | |
+| Aderyn | L-5 Modifier invoked only once | 3 | accepted by design | the project's modifier-to-internal-check pattern is applied to every access check, including those used once | |
 | Aderyn | L-6 State change without event | 1 | accepted by design | `TradingStorage.setTradeFundingIndex` (`TradingStorage.sol:441`) is called only by the engine while opening a trade, which emits `TradeOpened`; the index is readable with `getTradeFundingIndex` | |
 | Aderyn | L-7 Unchecked return | 1 | accepted by design | `getPrice` calls `_checkSequencerUp()` (`PythChainlinkOracle.sol:130`) only for its revert while the sequencer is down; the returned `startedAt` is used by `checkOpenAllowed` | `16baf19` |
-| Aderyn | L-8 Uninitialized local variable | 1 | false positive | `noUpdate` at `Vault.sol:252`, the intended empty update (same as the Slither row) | |
+| Aderyn | L-8 Uninitialized local variable | 1 | false positive | `noUpdate` at `Vault.sol:279`, the intended empty update (same as the Slither row) | |
 
-By verdict: of the 196 Slither results of the final run, 14 are false positives (4 + 6 + 1 + 3) and 182
-accepted by design (5 + 18 + 17 + 5 + 1 + 4 + 5 + 4 + 123), and 2 results of the start-of-round run were
-fixed. Of the 68 Aderyn instances of the final run, 3 are false positives (1 + 1 + 1) and 65 accepted by
-design (9 + 36 + 2 + 5 + 6 + 5 + 1 + 1), and 4 instances were fixed (1 H-2, 2 H-3, 1 Low). The other count
-changes since `c3d552a` (Slither `timestamp` 19 to 18, `missing-inheritance` 4 to 5, `naming-convention` 122
-to 123; Aderyn L-1 35 to 36, L-2, L-7) come from code added or moved in round 3, not from fixes. This triage
-is the author's; a result marked accepted or false positive here has not been checked by anyone else.
+By verdict: of the 199 Slither results of the final run, 14 are false positives (4 + 6 + 1 + 3) and 185
+accepted by design (5 + 18 + 22 + 5 + 1 + 4 + 5 + 125); 2 results of the round 3 baseline were fixed and 4
+disappeared with the removed pause events. Of the 64 Aderyn instances of the final run, 3 are false positives
+(1 + 1 + 1) and 61 accepted by design (9 + 34 + 2 + 5 + 6 + 3 + 1 + 1); 4 instances were fixed in round 3.
+This triage is the author's; a result marked accepted or false positive here has not been checked by anyone
+else.
 
 ---
 

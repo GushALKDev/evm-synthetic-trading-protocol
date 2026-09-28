@@ -114,7 +114,7 @@ Counted with `awk '/^## Phase/{p=$3} /^- \[x\] \*\*[0-9]+\.[0-9]+\*\*/{c[p]++} E
     - [x] 2.9.1 Validate new TP against current price (not already reached)
 - [x] **2.10** Function `updateSL()` - Update Stop Loss
     - [x] 2.10.1 Validate new SL against current price (not already reached)
-- [x] **2.11** Pausable (emergency)
+- [x] **2.11** Pausable (emergency); round 3b replaced the single pause with independent flags (`PAUSE_OPEN`, `PAUSE_SETTLE` on the engine, `PAUSE_DEPOSIT`, `PAUSE_WITHDRAW` on the vault)
 - [x] **2.12** Trading engine unit tests
 
 **Deliverables:**
@@ -389,16 +389,16 @@ Counted with `awk '/^## Phase/{p=$3} /^- \[x\] \*\*[0-9]+\.[0-9]+\*\*/{c[p]++} E
 >
 > **Dependencies:** Phases 1-11
 
-- [x] **12.1** Test coverage at commit `2dd5562` (`FORK_RPC_URL= FOUNDRY_PROFILE=coverage forge coverage --report summary`): lines 100% on every `src/` file; branches 75.00% on `BondDepository`, 97.06% on `TradingEngine` and 96.67% on `Vault`, 100% elsewhere; full table in [tests/README.md](./tests/README.md#coverage)
-- [x] **12.2** Fuzz tests (54 `testFuzz_*` functions at commit `2dd5562`: PnL, funding, spread, vesting, payouts, opening guard, open PnL math, ERC-4626 conformity, deposit rule)
-- [x] **12.3** Invariant tests: 45 `invariant_*` functions at commit `2dd5562` (round 2b added five on the open PnL aggregates, the snapshot, the NAV, deposits and bonding; round 3 moved the protocol suite to three pairs with a confidence band and added a keeper latency suite of 16), 128,000 calls each with Foundry defaults; call summaries in `afterInvariant` hooks (round 2 replaced the items below with modelled vault, reserve and funding accounting, see [tests/README.md](./tests/README.md#invariant-suites))
+- [x] **12.1** Test coverage at commit `47d848f` (`FORK_RPC_URL= FOUNDRY_PROFILE=coverage forge coverage --report summary`): 100% of lines, statements, branches and functions on every `src/` file; full table in [tests/README.md](./tests/README.md#coverage)
+- [x] **12.2** Fuzz tests (54 `testFuzz_*` functions at commit `47d848f`: PnL, funding, spread, vesting, payouts, opening guard, open PnL math, ERC-4626 conformity, deposit rule)
+- [x] **12.3** Invariant tests: 32 distinct invariant properties run as 51 campaigns at commit `47d848f` (round 2b added five on the open PnL aggregates, the snapshot, the NAV, deposits and bonding; round 3 moved the protocol suite to three pairs with a confidence band and added a keeper latency suite that reruns the protocol properties; round 3b added three on the pause flags), 128,000 calls each with Foundry defaults; call summaries in `afterInvariant` hooks (round 2 replaced the items below with modelled vault, reserve and funding accounting, see [tests/README.md](./tests/README.md#invariant-suites))
     - [x] 12.3.1 `totalAssets` always backed by the real USDC balance
     - [x] 12.3.2 Per pair, long OI and short OI each `<= maxOI` (the contract enforces long + short `<= maxOI`)
     - [x] 12.3.3 `sharePrice > 0`
     - [x] 12.3.4 Custody: TradingStorage always covers open-trade collateral
     - [x] 12.3.5 Bonding: escrow always covers unclaimed vesting positions
 - [x] **12.4** Fork tests against Arbitrum One at a pinned block (21 tests, no Hermes call, `ffi = false`; round 2 replaced the HyperEVM suite that fetched Hermes updates through `ffi`)
-- [x] **12.5** Static analysis at commit `2dd5562` (Slither 0.11.6: 196 results; Aderyn 0.6.8: 3 High and 8 Low issues, 68 instances), every result triaged in [tests/README.md](./tests/README.md#triage)
+- [x] **12.5** Static analysis at commit `47d848f` (Slither 0.11.6: 199 results; Aderyn 0.6.8: 3 High and 8 Low issues, 64 instances), every result triaged in [tests/README.md](./tests/README.md#triage)
 - [x] **12.6** Internal code review (findings reviewed and remediated, see below)
 - [x] **12.7** Deployment script and integration suite (`script/Deploy.s.sol` with shared `DeployLib`; 17 integration tests and 8 invariant functions over the wired solvency contracts)
 
@@ -453,6 +453,7 @@ Counted with `awk '/^## Phase/{p=$3} /^- \[x\] \*\*[0-9]+\.[0-9]+\*\*/{c[p]++} E
 
 | Date       | Changes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | :--------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-09-29 | Round 3b (branch `fix/pause-flags`): independent pause flags per contract, `liquidate` under `PAUSE_SETTLE` with closes and no funding accrual while it is set, withdrawal expiry clock stopped under `PAUSE_WITHDRAW`, incident playbook in the security guide, tests for the reverts coverage never took, unreachable `ReferencePriceUnset` removed, mutation checks for the round 3 and 3b invariants. See the root README, "Review notes" 26 to 28 |
 | 2026-09-29 | Round 3 hardening (branch `hardening/final`): sequencer grace period limited to openings (`IOracle.checkOpenAllowed`), deposits settle the pending AssistantFund injection first and revert only while a bonding round is open or due, `setFundingFactor` writes before its external calls, unreachable `FeeExceedsCollateral` removed, entry funding index cleared on delete, `SafeCastLib` or a bound comment on every downcast, protocol invariants on three pairs with a confidence band plus a keeper latency suite, ERC-4626 conformity and edge case tests, Solhint removed, CI on Node 22 with a gas job, static analysis triaged. See the root README, "Review notes" 17 to 25 |
 | 2026-09-28 | Review round 2b (branch `fix/open-pnl-nav`): optimizer on (200 runs, `cancun`) with a `coverage` profile, open PnL aggregates per pair and side in `TradingStorage` with `MAX_PAIRS = 20`, PnL snapshot with a maximum age and refresh-and-act entry points, share price at a conservative NAV, deposits blocked below 100% coverage, injection on the NAV ratio and bonding on the realised ratio, 17 more regression tests and five invariants. See the root README, "Review notes" 15 and 16 |
 | 2026-09-28 | Review round 2 (branch `fix/review-findings`): funding made a capped zero-sum transfer between traders, withdrawal escrow and expiry, ERC-4626 `max*` fixed, 5 s Pyth price age and `PriceFromFuture`, L2 sequencer uptime check, fork suite on Arbitrum One at a pinned block, global `MAX_LEVERAGE = 100`, opening guard at the liquidation price, liquidator reward floor, O(1) `deleteTrade`, ETH refund limited to the call's surplus, `nonReentrant` on `updateTp`/`updateSl`, bonding round closed at 100% CR, 33 regression tests, modelled invariants, gas benchmarks. See the root README, "Review notes" |

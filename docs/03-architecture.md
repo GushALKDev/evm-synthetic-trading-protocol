@@ -154,42 +154,45 @@ Holds LP USDC, issues sUSDC at a conservative NAV, keeps the PnL snapshot, pays 
 
 | Function | Access | Description |
 | :------- | :----- | :---------- |
-| `deposit(assets, receiver)` / `mint(shares, receiver)` | Anyone, when not paused | ERC-4626 entry at the NAV after the pending AssistantFund injection; reverts with `StalePnlSnapshot` or `BondingRoundOpen` |
-| `refreshAndDeposit` / `refreshAndMint(..., priceUpdate)` | Anyone, when not paused, payable | Refresh the snapshot, then deposit or mint; refund the ETH surplus |
+| `deposit(assets, receiver)` / `mint(shares, receiver)` | Anyone, unless `PAUSE_DEPOSIT` | ERC-4626 entry at the NAV after the pending AssistantFund injection; reverts with `StalePnlSnapshot` or `BondingRoundOpen` |
+| `refreshAndDeposit` / `refreshAndMint(..., priceUpdate)` | Anyone, unless `PAUSE_DEPOSIT`, payable | Refresh the snapshot, then deposit or mint; refund the ETH surplus |
 | `refreshPnlSnapshot(priceUpdate)` | Anyone, payable | Value every pair with open interest and store `(netPnl, timestamp, nonce)` |
 | `totalAssets()` | View | USDC balance minus the positive net trader PnL of the latest snapshot; never reverts |
 | `withdraw(...)` / `redeem(...)` | Anyone | Always revert with `UseRequestWithdrawalFlow` |
-| `requestWithdrawal(shares)` | Share holder, when not paused | Moves `shares` into escrow in the vault and records the current epoch; a new request returns the previous escrow first |
-| `executeWithdrawal()` | Requester | During the epoch after the 3-epoch delay, burns the escrowed shares at the current NAV and sends USDC; needs a fresh snapshot; later it reverts with `WithdrawalExpired` |
-| `refreshAndExecuteWithdrawal(priceUpdate)` | Requester, payable | Refresh the snapshot, then execute the request |
-| `cancelWithdrawal()` | Requester | Deletes the request and returns the escrowed shares (also after expiry) |
+| `requestWithdrawal(shares)` | Share holder, unless `PAUSE_WITHDRAW` | Moves `shares` into escrow in the vault and records the current epoch; a new request returns the previous escrow first |
+| `executeWithdrawal()` | Requester, unless `PAUSE_WITHDRAW` | During the epoch after the 3-epoch delay (extended by the time spent under `PAUSE_WITHDRAW` since the request, in whole epochs rounded up), burns the escrowed shares at the current NAV and sends USDC; needs a fresh snapshot; later it reverts with `WithdrawalExpired` |
+| `refreshAndExecuteWithdrawal(priceUpdate)` | Requester, unless `PAUSE_WITHDRAW`, payable | Refresh the snapshot, then execute the request |
+| `cancelWithdrawal()` | Requester, never paused | Deletes the request and returns the escrowed shares (also after expiry) |
 | `sendPayout(receiver, amount)` | `tradingEngine` only | Sends USDC; reverts if `amount` is above the USDC balance |
 | `collateralizationRatio()` / `collateralizationDeficit()` | View | NAV ratio and deficit (LP principal coverage); injection trigger in `SolvencyManager` |
 | `realisedCollateralizationRatio()` / `realisedCollateralizationDeficit()` | View | Balance-only ratio and deficit; bonding trigger and `bond` clamp |
 | `isPnlSnapshotFresh()` | View | No open trade, or snapshot within `maxPnlSnapshotAge` with no open or close since |
-| `setTradingEngine`, `setSolvencyManager`, `setMaxPnlSnapshotAge`, `pause`, `unpause` | Owner | |
+| `setTradingEngine`, `setSolvencyManager`, `setMaxPnlSnapshotAge`, `setPauseFlags` | Owner | |
 
 `maxWithdraw` and `maxRedeem` return 0 because `withdraw` and `redeem` always revert; `maxDeposit` and
-`maxMint` return 0 while the vault is paused, with a stale snapshot or while a bonding round is open or due
+`maxMint` return 0 under `PAUSE_DEPOSIT`, with a stale snapshot or while a bonding round is open or due
 ([Guide 7](./07-vault-ssl.md#erc-4626-max-functions)).
 
 ### 4.2 `TradingEngine.sol`
 
 | Function | Access | Description |
 | :------- | :----- | :---------- |
-| `openTrade(pairIndex, isLong, collateral, leverage, expectedPrice, slippageBps, tp, sl, priceUpdate)` | Anyone, when not paused | Opens a position |
-| `closeTrade(tradeId, expectedPrice, slippageBps, priceUpdate)` | Trade owner, when not paused | Closes and settles |
-| `updateTp(tradeId, newTp, priceUpdate)` / `updateSl(...)` | Trade owner, when not paused | Changes TP or SL; 0 clears it |
-| `liquidate(tradeId, priceUpdate)` | Anyone, also while paused | Liquidates when the loss reaches 90% |
-| `executeLimit(tradeId, priceUpdate)` | Anyone, when not paused | Closes when TP or SL is crossed |
-| `setTreasury`, `setFundingFactor`, `pause`, `unpause` | Owner | |
+| `openTrade(pairIndex, isLong, collateral, leverage, expectedPrice, slippageBps, tp, sl, priceUpdate)` | Anyone, unless `PAUSE_OPEN` | Opens a position |
+| `closeTrade(tradeId, expectedPrice, slippageBps, priceUpdate)` | Trade owner, unless `PAUSE_SETTLE` | Closes and settles |
+| `updateTp(tradeId, newTp, priceUpdate)` / `updateSl(...)` | Trade owner, never paused | Changes TP or SL; 0 clears it |
+| `liquidate(tradeId, priceUpdate)` | Anyone, unless `PAUSE_SETTLE` | Liquidates when the loss reaches 90% |
+| `executeLimit(tradeId, priceUpdate)` | Anyone, unless `PAUSE_SETTLE` | Closes when TP or SL is crossed |
+| `setTreasury`, `setFundingFactor`, `setPauseFlags` | Owner | |
+
+The pause flags, the funding freeze under `PAUSE_SETTLE` and the incident playbook are in
+[Guide 8, sections 5 and 6](./08-security.md#5-pause-flags).
 
 Checks in `openTrade`: collateral at least 10 USDC, leverage non-zero, at most `MAX_LEVERAGE` (100) and at
 most the pair's `maxLeverage`, pair active, TP/SL not already crossed at the oracle price, execution price
 within the caller's slippage tolerance, the opening guard (the position must not be liquidatable at an
 unchanged price in the same block, [Guide 2](./02-mathematics.md#opening-guard-_validatenotpreliquidatable)),
-open fee below the collateral (unreachable while `MAX_LEVERAGE` is 100), and pair OI cap (in
-`TradingStorage`).
+and pair OI cap (in `TradingStorage`). No check is needed for the open fee: at `MAX_LEVERAGE` (100) it is at
+most 8% of the collateral.
 
 TP/SL rules, checked against the oracle price in the engine and against the open price in storage:
 
@@ -200,8 +203,8 @@ TP/SL rules, checked against the oracle price in the engine and against the open
 
 **`liquidate` design:**
 
-- Not gated by `whenNotPaused`, so liquidations continue while trading is paused. Closing and TP/SL
-  execution are paused, so traders cannot exit while liquidations run.
+- Blocked by `PAUSE_SETTLE` together with `closeTrade` and `executeLimit`, so no position is liquidated
+  while its owner cannot close it; no funding accrues while the flag is set.
 - The loss includes funding, like `closeTrade`.
 - The caller funds the Pyth fee through `msg.value`.
 - If the oracle reverts (stale, wide confidence, deviation), `liquidate` reverts too.
@@ -219,7 +222,7 @@ TP/SL rules, checked against the oracle price in the engine and against the open
 - Settlement uses the close-direction spread, funding, the close fee and the same payout branches as
   `closeTrade`. The payout goes to the trade owner.
 - The caller receives 0.1% of notional, taken from the trader's payout and capped at it.
-- Gated by `whenNotPaused`.
+- Blocked by `PAUSE_SETTLE`, like `closeTrade`.
 
 ### 4.3 `TradingStorage.sol`
 
@@ -403,8 +406,8 @@ close reverts. A pull ("claim") pattern is not used.
 
 ### 6.4 Contract size
 
-`TradingEngine` runtime size is 17,500 bytes, 7,076 bytes under the 24,576 byte limit
-(`forge build --sizes` at commit `2dd5562`, optimizer on with 200 runs, as in `foundry.toml` since round
+`TradingEngine` runtime size is 17,701 bytes, 6,875 bytes under the 24,576 byte limit
+(`forge build --sizes` at commit `47d848f`, optimizer on with 200 runs, as in `foundry.toml` since round
 2b). Without the optimizer it was 24,563 bytes after round 2, 13 bytes under the limit. CI runs
 `forge build --sizes`, which fails if a contract passes the limit. No proxy or diamond pattern is used;
 contracts are not upgradeable.

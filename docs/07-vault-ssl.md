@@ -34,7 +34,7 @@
 `deposit(assets, receiver)` and `mint(shares, receiver)` follow ERC-4626 and price shares at the
 conservative NAV (section 2). They revert:
 
-- while the vault is paused (`EnforcedPause`);
+- while the vault's `PAUSE_DEPOSIT` flag is set (`EnforcedPause(1)`);
 - with a stale PnL snapshot (`StalePnlSnapshot`), section 2;
 - while a bonding round is open or due (`BondingRoundOpen`).
 
@@ -76,19 +76,21 @@ sequenceDiagram
 escrow (`src/Vault.sol`):
 
 ```solidity
-function requestWithdrawal(uint256 shares) external nonReentrant whenNotPaused {
+function requestWithdrawal(uint256 shares) external nonReentrant whenNotPaused(PAUSE_WITHDRAW) {
     uint256 escrowed = withdrawalRequests[msg.sender].shares;
     uint256 balance = balanceOf(msg.sender) + escrowed;
     if (balance < shares) revert InsufficientShares(shares, balance);
     uint256 epoch = currentEpoch();
     uint256 unlockEpoch = epoch + WITHDRAWAL_DELAY_EPOCHS;
-    withdrawalRequests[msg.sender] = WithdrawalRequest({shares: shares, requestEpoch: epoch});
+    uint128 requestEpoch = uint128(epoch);
+    uint128 pausedAtRequest = uint128(_withdrawPausedSeconds());
+    withdrawalRequests[msg.sender] = WithdrawalRequest({shares: shares, requestEpoch: requestEpoch, withdrawPausedAtRequest: pausedAtRequest});
     if (escrowed != 0) _transfer(address(this), msg.sender, escrowed);
     _transfer(msg.sender, address(this), shares);
     emit WithdrawalRequested(msg.sender, shares, epoch, unlockEpoch);
 }
 
-function executeWithdrawal() external nonReentrant {
+function executeWithdrawal() external nonReentrant whenNotPaused(PAUSE_WITHDRAW) {
     _requireFreshPnlSnapshot();
     _executeWithdrawal();
 }
@@ -120,19 +122,22 @@ function _executeWithdrawal() internal {
   be transferred. A new request returns the previous escrow before escrowing the new amount;
   `cancelWithdrawal` returns it at any time, including after expiry; `executeWithdrawal` burns it.
 - A request can be executed only during the epoch after it unlocks (from `unlockEpoch` to
-  `unlockEpoch + 1`). Later it reverts with `WithdrawalExpired`; its shares stay in escrow until the owner
-  cancels or makes a new request. Nothing moves on its own at expiry.
+  `unlockEpoch + 1`), extended by the time the vault spent under `PAUSE_WITHDRAW` since the request, in whole
+  epochs rounded up (`getWithdrawalExpiryEpoch`). Later it reverts with `WithdrawalExpired`; its shares stay
+  in escrow until the owner cancels or makes a new request. Nothing moves on its own at expiry.
 - The payout uses the share price at execution, not at request, at the conservative NAV. It needs a fresh
   PnL snapshot; `refreshAndExecuteWithdrawal` takes one in the same transaction.
 - Withdrawals are allowed below 100% coverage: the NAV already carries the loss, so the leaving LP takes it
   with them.
-- `executeWithdrawal` and `cancelWithdrawal` are not blocked by the pause.
+- `PAUSE_WITHDRAW` blocks `requestWithdrawal`, `executeWithdrawal` and `refreshAndExecuteWithdrawal`, and stops
+  the expiry clock; `cancelWithdrawal` is never blocked. `PAUSE_DEPOSIT` does not affect withdrawals
+  ([Guide 8, section 5](./08-security.md#5-pause-flags)).
 
 ### ERC-4626 max functions
 
 | Function | Returns | Why |
 |:---|:---|:---|
-| `maxDeposit`, `maxMint` | 0 while paused, with a stale snapshot, or while a bonding round is open or due (`SolvencyManager.bondingRoundOpenAfterCheck`); otherwise Solady's default (`type(uint256).max`) | `deposit` and `mint` revert in those states (`test/unit/VaultDepositRule.t.sol` checks each against its action over those states) |
+| `maxDeposit`, `maxMint` | 0 under `PAUSE_DEPOSIT`, with a stale snapshot, or while a bonding round is open or due (`SolvencyManager.bondingRoundOpenAfterCheck`); otherwise Solady's default (`type(uint256).max`) | `deposit` and `mint` revert in those states (`test/unit/VaultDepositRule.t.sol` checks each against its action over those states) |
 | `maxWithdraw`, `maxRedeem` | 0 | `withdraw` and `redeem` always revert |
 
 `test/unit/Vault.t.sol` checks each of them against its action (`test_MaxDeposit_MatchesDeposit`,
@@ -181,8 +186,8 @@ trade count and the positions nonce packed into the slot of `tradingEngine` and 
 `IOracle.getPrice` with the same checks as a trade (age, confidence, Chainlink deviation and heartbeat,
 sequencer). The update data and `msg.value` go to the first priced pair; one Pyth update can carry every
 feed, and the later pairs read the prices it stored. Only `msg.value` minus the fee paid is refunded. Gas
-at the bound, 20 pairs each with a long and a short: 640,759 (`refreshPnlSnapshot_20pairs` in
-`snapshots/Vault.json`, `FOUNDRY_PROFILE=gas forge test`, commit `2dd5562`); one pair: 126,647 (`refreshPnlSnapshot_1pair`).
+at the bound, 20 pairs each with a long and a short: 640,715 (`refreshPnlSnapshot_20pairs` in
+`snapshots/Vault.json`, `FOUNDRY_PROFILE=gas forge test`, commit `47d848f`); one pair: 126,603 (`refreshPnlSnapshot_1pair`).
 
 **Freshness.** `deposit`, `mint` and `executeWithdrawal` revert with `StalePnlSnapshot` unless no trade is
 open, or the snapshot is at most `maxPnlSnapshotAge` old and no position was opened or closed since it was

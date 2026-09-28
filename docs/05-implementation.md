@@ -130,19 +130,23 @@ struct PnlSnapshot {
 ```
 
 `netPnl` is USDC (6 decimals), positive when traders are in profit. `maxPnlSnapshotAge` (`uint32`) shares a
-slot with `tradingEngine` and `_paused`.
+slot with `tradingEngine`, `pauseFlags` (`uint8`) and `_withdrawPausedSince` (`uint48`); `_withdrawPausedTotal`
+(`uint64`) shares a slot with `solvencyManager`.
 
 ### WithdrawalRequest (`Vault.sol`), 2 slots
 
 ```solidity
 struct WithdrawalRequest {
-    uint256 shares;
-    uint256 requestEpoch;
+    uint256 shares; //                  32 bytes -── Slot 0 (full)
+    uint128 requestEpoch; //            16 bytes -┐  Slot 1 (full)
+    uint128 withdrawPausedAtRequest; // 16 bytes -┘
 }
 ```
 
 One request per address. The requested shares are held by the vault (escrow); a new request returns the
-previous escrow and replaces the request.
+previous escrow and replaces the request. `withdrawPausedAtRequest` is the number of seconds the vault had
+spent under `PAUSE_WITHDRAW` when the request was made; the time paused since then extends the request's
+expiry ([Guide 8, section 5](./08-security.md#5-pause-flags)).
 
 ### BondPosition (`BondDepository.sol`), 2 slots
 
@@ -232,8 +236,10 @@ short the reverse).
 
   Gates: `TradingStorage.onlyTradingEngine`, `Vault.sendPayout` (inline check), `SpreadManager.onlyKeeper`,
   `AssistantFund.onlySolvencyManager`, `BondDepository.onlySolvencyManager`, `SynthToken.onlyMinter`.
-- **Pause:** `TradingEngine` and `Vault` have their own `_paused` flag with `whenNotPaused`/`whenPaused`.
-  `TradingStorage` has no pause so collateral can always move for `liquidate`.
+- **Pause:** `TradingEngine` (`PAUSE_OPEN`, `PAUSE_SETTLE`) and `Vault` (`PAUSE_DEPOSIT`, `PAUSE_WITHDRAW`)
+  each keep a `uint8 pauseFlags` set by `setPauseFlags`; `whenNotPaused(flag)` calls `_requireNotPaused(flag)`,
+  which reverts with `EnforcedPause(flag)`. `TradingStorage` has no pause: the engine's flags decide when
+  collateral moves.
 - **Reentrancy:** Solady `ReentrancyGuard` on `TradingEngine.openTrade`, `closeTrade`, `liquidate`,
   `executeLimit`, `updateTp`, `updateSl` and on `Vault.deposit`, `mint`, `requestWithdrawal`,
   `executeWithdrawal`, `sendPayout`.
@@ -289,7 +295,7 @@ State of the items usually checked before a deployment, as of this review:
 | Item | State |
 |:---|:---|
 | Admin keys in a multisig, timelock on parameter changes | Not in code; single `Ownable` owner per contract |
-| Pausable trading | `TradingEngine.pause` (liquidations stay active) and `Vault.pause` |
+| Pausable trading | Independent flags: engine `PAUSE_OPEN`, `PAUSE_SETTLE` (closes, TP/SL and liquidations together, funding frozen); vault `PAUSE_DEPOSIT`, `PAUSE_WITHDRAW` (expiry clock stopped); playbook in [Guide 8](./08-security.md#6-incident-playbook) |
 | Reentrancy guards | See section 4 |
 | Oracle validation | Price age (5 s), future timestamp, confidence, Chainlink deviation and heartbeat, L2 sequencer uptime |
 | Circuit breakers | Not implemented |
