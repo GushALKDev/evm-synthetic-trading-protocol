@@ -111,7 +111,6 @@ contract BondDepository is Ownable {
     error SolvencyManagerNotSet();
     error DiscountTooHigh(uint256 discountBps);
     error VestingPeriodTooLong(uint256 vestingPeriod);
-    error ReferencePriceUnset();
     error EffectivePriceZero(uint256 referencePrice, uint256 discountBps);
     error NoActiveRound();
     error RoundAlreadyActive();
@@ -178,13 +177,13 @@ contract BondDepository is Ownable {
 
     /**
      * @notice Open a bonding round to raise up to `_neededUsdc` for the Vault
-     * @dev Only the SolvencyManager may call. Reverts if a round is already active or price is unset.
+     * @dev Only the SolvencyManager may call. Reverts if a round is already active.
+     *      No check on referencePrice: it starts at 2 USDC and setReferencePrice rejects 0.
      * @param _neededUsdc Target USDC to raise in this round (the round cap)
      */
     function activateBonding(uint256 _neededUsdc) external onlySolvencyManager {
         if (_neededUsdc == 0) revert ZeroAmount();
         if (remainingCap != 0) revert RoundAlreadyActive();
-        if (referencePrice == 0) revert ReferencePriceUnset();
 
         remainingCap = _neededUsdc;
         emit BondingActivated(_neededUsdc);
