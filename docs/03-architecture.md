@@ -28,6 +28,7 @@ flowchart TD
     Engine -->|getPrice, fee in msg.value| Oracle[PythChainlinkOracle]
     Oracle -->|updatePriceFeeds, getPriceUnsafe| Pyth[(Pyth contract)]
     Oracle -->|latestRoundData, decimals| Chainlink[(Chainlink aggregator)]
+    Oracle -->|latestRoundData| Sequencer[(Chainlink L2 sequencer uptime feed)]
     Engine -->|getSpreadBps| Spread[SpreadManager]
     Keeper([Keeper]) -->|updateVolatility| Spread
     Storage -->|collateral returned, rewards| Trader
@@ -40,7 +41,7 @@ flowchart TD
     SM -->|reads collateralizationRatio, collateralizationDeficit| Vault
     SM -->|injectFunds| AF
     AF -->|USDC| Vault
-    SM -->|activateBonding| BD[BondDepository]
+    SM -->|activateBonding, closeBonding| BD[BondDepository]
     Bonder([Bonder]) -->|bond, claim| BD
     BD -->|bonder USDC sent to the Vault| Vault
     BD -->|mint| Synth[SynthToken]
@@ -48,9 +49,12 @@ flowchart TD
 
 Notes:
 
-- The Pyth update data is fetched off-chain by the caller (for example from the Pyth Hermes API) and passed
-  as `bytes[]` calldata. The engine forwards `msg.value` to the oracle, which pays the Pyth fee and refunds
-  the surplus to the engine; the engine sends any ETH it holds back to the caller at the end of the call.
+- The Pyth update data is fetched off-chain by the caller (for example from the Pyth Hermes API, which
+  requires an API key since the Pyth Core upgrade of 2026-08-26) and passed as `bytes[]` calldata. The
+  engine forwards `msg.value` to the oracle, which pays the Pyth fee and refunds the surplus to the engine.
+  At the end of the call the engine returns what the call added to its balance (`msg.value` minus the fee
+  paid; the `refundsEthSurplus` modifier keeps the balance at entry in transient storage), so ETH
+  force-sent to the engine is not paid out.
 - The treasury is a `TradingEngine` constructor argument, changeable by the owner. `script/Deploy.s.sol`
   sets it to the `AssistantFund`.
 - All trader collateral sits in `TradingStorage`. Liquidator and TP/SL executor rewards are paid from it.
@@ -73,8 +77,9 @@ never falls back to the Chainlink answer.
 | Step | Check | Error |
 | :--- | :---- | :---- |
 | 1 | Pair feed configured (`active`) | `PairFeedNotSet` |
-| 2 | `msg.value >= PYTH.getUpdateFee(priceData)`, then `PYTH.updatePriceFeeds{value: fee}(priceData)` | `InsufficientFee` |
-| 3 | `PYTH.getPriceUnsafe(feedId)` and `block.timestamp - publishTime <= 30` | `StalePrice` |
+| 2 | Sequencer uptime feed (if set): `answer == 0`, `startedAt != 0`, and more than `SEQUENCER_GRACE_PERIOD` (3600 s) since `startedAt` | `SequencerDown`, `SequencerGracePeriodNotOver` |
+| 3 | `msg.value >= PYTH.getUpdateFee(priceData)`, then `PYTH.updatePriceFeeds{value: fee}(priceData)` | `InsufficientFee` |
+| 3b | `PYTH.getPriceUnsafe(feedId)`: `publishTime <= block.timestamp` and `block.timestamp - publishTime <= maxPriceAge` (5 s by default, owner-set up to `MAX_STALENESS` = 30 s) | `PriceFromFuture`, `StalePrice` |
 | 4 | `price > 0` | `ZeroPrice` |
 | 5 | `conf * 10000 <= price * 200` (confidence at most 2% of price) | `ConfidenceTooWide` |
 | 6 | Normalise price and conf to 18 decimals (`PythUtils.convertToUint`) | |
@@ -85,13 +90,25 @@ never falls back to the Chainlink answer.
 Behaviour to be aware of:
 
 - `updatePriceFeeds` only stores an update newer than the one already on-chain, and `getPriceUnsafe`
-  returns the newest stored price. A caller can therefore pick any signed update in the last 30 seconds
-  that is newer than the stored one, or pass no update and use the stored price if it is fresh enough.
-- If `publishTime` is ahead of `block.timestamp`, step 3 underflows and reverts.
+  returns the newest stored price. A caller can therefore pick any signed update from the last
+  `maxPriceAge` seconds that is newer than the stored one, or pass no update and use the stored price if
+  it is fresh enough. This is the remaining latency window ([Guide 4](./04-tradeoffs.md#1-latency-arbitrage)).
+- The same age limit applies to every `getPrice` call: open, close, TP/SL execution, liquidation, and the
+  TP/SL validation in `updateTp`/`updateSl`.
+- A `publishTime` after `block.timestamp` reverts with `PriceFromFuture` instead of an arithmetic
+  underflow. No such update was seen on Arbitrum One: in 787 Pyth `PriceFeedUpdate` events (265
+  transactions, 60 windows of 10,000 blocks, 86,400 blocks apart, ending at block 509,770,836), the age at
+  inclusion was 0 s (345 events), 1 s (426) or 2 s (16), and never negative
+  (`python3 script/analysis/pyth_update_age.py --rpc https://arb1.arbitrum.io/rpc --head 509770836 --window 10000 --step 86400 --count 60`).
+  These are updates pushed by bots, not wallet transactions.
+- The sequencer uptime feed is a constructor parameter (`address(0)` disables the check, for chains
+  without one). While the sequencer is down, and for one hour after it comes back, every price read
+  reverts, including liquidations, so positions are not settled before traders could react.
 - Any failed check reverts the whole call. `closeTrade`, `executeLimit`, `liquidate`, `openTrade`, and
   `updateTp`/`updateSl` with a non-zero value all revert while Pyth is stale, its confidence is wide,
-  Chainlink is stale, or the two disagree by more than 3%.
-- There is no L2 sequencer uptime check.
+  Chainlink is stale, the two disagree by more than 3%, or the sequencer check fails.
+- Arbitrum One charged no Pyth update fee at the pinned fork block (`test_Fork_UpdateFee_IsZero`), so the
+  refund path is only exercised with a non-zero fee by the MockPyth tests.
 
 ### How the confidence band is used
 
@@ -131,16 +148,15 @@ Holds LP USDC, issues sUSDC, pays trader profits.
 | :------- | :----- | :---------- |
 | `deposit(assets, receiver)` / `mint(shares, receiver)` | Anyone, when not paused | Standard ERC-4626 entry |
 | `withdraw(...)` / `redeem(...)` | Anyone | Always revert with `UseRequestWithdrawalFlow` |
-| `requestWithdrawal(shares)` | Share holder, when not paused | Records `shares` and the current epoch; overwrites an earlier request |
-| `executeWithdrawal()` | Requester | After 3 epochs, burns the requested shares at the current price and sends USDC |
-| `cancelWithdrawal()` | Requester | Deletes the request |
+| `requestWithdrawal(shares)` | Share holder, when not paused | Moves `shares` into escrow in the vault and records the current epoch; a new request returns the previous escrow first |
+| `executeWithdrawal()` | Requester | During the epoch after the 3-epoch delay, burns the escrowed shares at the current price and sends USDC; later it reverts with `WithdrawalExpired` |
+| `cancelWithdrawal()` | Requester | Deletes the request and returns the escrowed shares (also after expiry) |
 | `sendPayout(receiver, amount)` | `tradingEngine` only | Sends USDC; reverts if `amount > totalAssets()` |
 | `collateralizationRatio()` / `collateralizationDeficit()` | View | Used by `SolvencyManager` |
 | `setTradingEngine`, `pause`, `unpause` | Owner | |
 
-The requested shares are not locked: they stay transferable, and a request does not expire. `maxWithdraw`
-and `maxRedeem` still return the Solady defaults although `withdraw` and `redeem` always revert, and
-`maxDeposit`/`maxMint` do not reflect the pause.
+`maxWithdraw` and `maxRedeem` return 0 because `withdraw` and `redeem` always revert; `maxDeposit` and
+`maxMint` return 0 while the vault is paused ([Guide 7](./07-vault-ssl.md#erc-4626-max-functions)).
 
 ### 4.2 `TradingEngine.sol`
 
@@ -151,12 +167,14 @@ and `maxRedeem` still return the Solady defaults although `withdraw` and `redeem
 | `updateTp(tradeId, newTp, priceUpdate)` / `updateSl(...)` | Trade owner, when not paused | Changes TP or SL; 0 clears it |
 | `liquidate(tradeId, priceUpdate)` | Anyone, also while paused | Liquidates when the loss reaches 90% |
 | `executeLimit(tradeId, priceUpdate)` | Anyone, when not paused | Closes when TP or SL is crossed |
-| `setTreasury`, `pause`, `unpause` | Owner | |
+| `setTreasury`, `setFundingFactor`, `pause`, `unpause` | Owner | |
 
-Checks in `openTrade`: collateral at least 10 USDC, leverage non-zero and at most the pair's
-`maxLeverage`, pair active, TP/SL not already crossed at the oracle price, execution price within the
-caller's slippage tolerance, open spread not already at the liquidation threshold, open fee below the
-collateral, and pair OI cap (in `TradingStorage`).
+Checks in `openTrade`: collateral at least 10 USDC, leverage non-zero, at most `MAX_LEVERAGE` (100) and at
+most the pair's `maxLeverage`, pair active, TP/SL not already crossed at the oracle price, execution price
+within the caller's slippage tolerance, the opening guard (the position must not be liquidatable at an
+unchanged price in the same block, [Guide 2](./02-mathematics.md#opening-guard-_validatenotpreliquidatable)),
+open fee below the collateral (unreachable while `MAX_LEVERAGE` is 100), and pair OI cap (in
+`TradingStorage`).
 
 TP/SL rules, checked against the oracle price in the engine and against the open price in storage:
 
@@ -172,9 +190,9 @@ TP/SL rules, checked against the oracle price in the engine and against the open
 - The loss includes funding, like `closeTrade`.
 - The caller funds the Pyth fee through `msg.value`.
 - If the oracle reverts (stale, wide confidence, deviation), `liquidate` reverts too.
-- The reward is 10% of the collateral left after the loss: at most 1% of collateral, and zero once the loss
-  reaches the full collateral. `MIN_COLLATERAL = 10 USDC` bounds the smallest position, so the largest
-  reward on the smallest position is about 0.1 USDC.
+- The reward is `max(10% of the collateral left after the loss, 0.5% of the collateral)`: 1% of the
+  collateral at the threshold, never below 0.5%, also past a 100% loss, and never more than the collateral,
+  so the vault never funds it.
 - The vault is paid before the liquidator, so a liquidator blocked by the token can only block its own
   reward.
 - PnL rounding favours the vault (longs floor, shorts ceil `exitValue`).
@@ -198,20 +216,22 @@ mapping(uint256 => Trade) private _trades;
 mapping(address => uint256[]) private _userTrades;
 mapping(uint256 => uint256) private _openInterestLong;   // pairIndex => OI (18 decimals)
 mapping(uint256 => uint256) private _openInterestShort;
-mapping(uint256 => int256) private _cumulativeFundingIndex; // per pair
-mapping(uint256 => uint256) private _fundingLastUpdated;    // per pair
-mapping(uint256 => int256) private _tradeFundingIndex;      // per trade, entry index
+mapping(uint256 => int256) private _cumulativeFundingIndexLong;  // per pair, long side
+mapping(uint256 => int256) private _cumulativeFundingIndexShort; // per pair, short side
+mapping(uint256 => uint256) private _fundingLastUpdated;         // per pair
+mapping(uint256 => int256) private _tradeFundingIndex;           // per trade, entry index of its side
 Pair[] private _pairs;
 ```
 
-`increaseOpenInterest` enforces `long + short <= maxOI` per pair. `deleteTrade` removes the ID from the
-user's array with a linear search, so the gas cost of closing or liquidating grows with the number of open
-trades of that user.
+`increaseOpenInterest` enforces `long + short <= maxOI` per pair. `addPair` and `updatePair` reject a
+`maxLeverage` above `MAX_LEVERAGE`. `deleteTrade` removes the ID from the user's array in constant time:
+`Trade.userIndex` holds the trade's position in the array and the last entry is swapped into it.
 
 ### 4.4 `PythChainlinkOracle.sol`
 
-See section 2. Owner functions: `setPairFeed(pairIndex, pythFeedId, chainlinkFeed, heartbeat)`. `setPairFeed`
-always marks the feed active; there is no function to deactivate a feed.
+See section 2. Owner functions: `setPairFeed(pairIndex, pythFeedId, chainlinkFeed, heartbeat)` and
+`setMaxPriceAge(seconds)`. `setPairFeed` always marks the feed active; there is no function to deactivate a
+feed. The sequencer uptime feed is immutable.
 
 ### 4.5 `SpreadManager.sol`
 
@@ -223,7 +243,7 @@ keeper.
 
 | Function | Access | Action |
 | :------- | :----- | :----- |
-| `checkAndAct()` | Anyone | Below 100% CR, injects `min(reserve, deficit)` from the AssistantFund; below 95%, also opens a bonding round for the remaining shortfall if none is active |
+| `checkAndAct()` | Anyone | At or above 100% CR, closes an open bonding round. Below 100% CR, injects `min(reserve, deficit)` from the AssistantFund; below 95%, also opens a bonding round for the remaining shortfall if none is active |
 | `deficitToTarget()` | View | `Vault.collateralizationDeficit()` |
 
 It holds no funds. There is no buyback function.
@@ -244,13 +264,15 @@ It receives fees as plain USDC transfers when it is set as the engine treasury.
 | Function | Access | Description |
 | :------- | :----- | :---------- |
 | `activateBonding(neededUsdc)` | SolvencyManager | Opens a round with a USDC cap |
-| `bond(usdcAmount)` | Anyone, during a round | Sends USDC from the caller to the vault, mints $SYNTH into the depository and records a linear vesting position |
+| `closeBonding()` | SolvencyManager | Closes the open round (called by `checkAndAct` at CR >= 100%) |
+| `bond(usdcAmount)` | Anyone, during a round | Takes `min(usdcAmount, remainingCap, vault deficit)` from the caller into the vault, mints $SYNTH into the depository and records a linear vesting position; reverts `NoActiveRound` when nothing is available |
 | `claim(bondId)` | Bonder | Transfers vested $SYNTH |
 | `setReferencePrice`, `setDiscountBps` (max 10%), `setVestingPeriod` (max 7 days), `setSolvencyManager` | Owner | |
 | `SynthToken.mint` | Minter (set by owner) | |
 | `SynthToken.burn` / `burnFrom` | Holder / approved spender | |
 
-A round stays open until its cap is used; it does not close when the vault recovers.
+A round closes when its cap is used, when a bond restores the vault to 100% CR, or when `checkAndAct`
+finds CR back at 100%.
 
 ---
 
@@ -349,10 +371,10 @@ sequenceDiagram
 
 ### 6.1 Checks, effects, interactions
 
-`openTrade`, `closeTrade`, `liquidate` and `executeLimit` are `nonReentrant` (`updateTp`/`updateSl` are
-not). They call the oracle (an external, owner-configured contract) and update the funding state in
+`openTrade`, `closeTrade`, `liquidate`, `executeLimit`, `updateTp` and `updateSl` are `nonReentrant`.
+They call the oracle (an external, owner-configured contract) and update the funding state in
 `TradingStorage` before the trade is deleted; the trade deletion and OI change happen before any USDC
-transfer.
+transfer, and the ETH refund to the caller is the last interaction.
 
 ### 6.2 Access-control helpers
 
@@ -366,8 +388,10 @@ close reverts. A pull ("claim") pattern is not used.
 
 ### 6.4 Contract size
 
-`TradingEngine` runtime size is 22,911 bytes, 1,665 bytes under the 24,576 byte limit
-(`forge build --sizes`). No proxy or diamond pattern is used; contracts are not upgradeable.
+`TradingEngine` runtime size is 24,563 bytes, 13 bytes under the 24,576 byte limit
+(`forge build --sizes`, optimizer off). The round 2 fixes added 1,652 bytes (from 22,911). Any further
+logic in the engine needs the optimizer or an extraction (a settlement library or a satellite contract)
+first. No proxy or diamond pattern is used; contracts are not upgradeable.
 
 ---
 

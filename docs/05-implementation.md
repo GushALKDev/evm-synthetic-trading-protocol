@@ -30,11 +30,23 @@ has been replaced by the actual structures.
 | Foundry | forge 1.7.1 used in this review; CI installs the `stable` toolchain | `.github/workflows/test.yml` |
 | Solady | v0.1.26 (git submodule) | `foundry.lock`, `.gitmodules` |
 | forge-std | v1.14.0 (git submodule) | `foundry.lock`, `.gitmodules` |
-| Pyth SDK | `@pythnetwork/pyth-sdk-solidity` `^4.3.1` (npm), remapped from `node_modules/` | `package.json`, `foundry.toml` |
+| Pyth SDK | `@pythnetwork/pyth-sdk-solidity` `^4.3.1` (npm), remapped from `node_modules/`; `npm ci` is required before `forge build` | `package.json`, `foundry.toml` |
 | Formatter | `forge fmt`, `line_length = 160` | `foundry.toml` `[fmt]` |
 
-`foundry.toml` sets `ffi = true` (needed by the fork tests) and does not set `solc`, the optimizer or
-`via_ir`, so forge defaults apply.
+`foundry.toml` sets `ffi = false`, excludes `test/gas` from the default profile (a `gas` profile runs only
+the gas benchmarks) and does not set `solc`, the optimizer or `via_ir`, so forge defaults apply (optimizer
+off, EVM version `cancun` for solc 0.8.24).
+
+The Pyth SDK stays on npm because there is no tagged Solidity SDK repository to use as a submodule:
+
+- `pyth-network/pyth-sdk-solidity` is archived (last commit 2025-05-06, "Add deprecation notices"); its
+  newest tag, `v2.2.0`, has no `PythUtils.sol`, which `PythChainlinkOracle` uses
+  (`gh api repos/pyth-network/pyth-sdk-solidity --jq .archived`,
+  `gh api "repos/pyth-network/pyth-sdk-solidity/contents/PythUtils.sol?ref=v2.2.0"` returns 404).
+- The SDK now lives in the `pyth-network/pyth-crosschain` monorepo, none of whose 1,037 tags is a
+  Solidity SDK tag
+  (`gh api --paginate 'repos/pyth-network/pyth-crosschain/git/matching-refs/tags/' --jq '.[].ref' | grep -ciE "solidity"`
+  prints 0).
 
 Solady modules used: `ERC4626`, `ERC20`, `Ownable`, `ReentrancyGuard`, `SafeTransferLib`. OpenZeppelin
 is not a dependency.
@@ -53,7 +65,8 @@ struct Trade {
     uint16 leverage; //    2 bytes  │
     uint48 timestamp; //   6 bytes -┘
     uint32 index; //       4 bytes -┐
-    uint64 collateral; //  8 bytes  │  Slot 1 (28/32)
+    uint32 userIndex; //   4 bytes  │  Slot 1 (full)
+    uint64 collateral; //  8 bytes  │
     uint128 openPrice; // 16 bytes -┘
     uint128 tp; //        16 bytes -┐  Slot 2 (full)
     uint128 sl; //        16 bytes -┘
@@ -64,7 +77,9 @@ struct Trade {
 - `openPrice`, `tp`, `sl` are 18-decimal prices; `openPrice` includes the open spread.
 - `user == address(0)` marks a deleted or nonexistent trade. Trade IDs come from a `uint32` counter and
   are never reused.
-- The entry funding index is stored separately in `mapping(uint256 => int256) _tradeFundingIndex`.
+- `userIndex` is the trade's position in its user's list, so `deleteTrade` removes it in constant time.
+- The entry funding index (of the trade's side) is stored separately in
+  `mapping(uint256 => int256) _tradeFundingIndex`.
 
 ### Pair (`TradingStorage.sol`), 2 slots
 
@@ -97,7 +112,8 @@ struct WithdrawalRequest {
 }
 ```
 
-One request per address; a new request overwrites the old one. Shares are not escrowed.
+One request per address. The requested shares are held by the vault (escrow); a new request returns the
+previous escrow and replaces the request.
 
 ### BondPosition (`BondDepository.sol`), 2 slots
 
@@ -130,9 +146,9 @@ requires a new engine deployment.
 
 ### ISolvency (`ISolvencyVault`, `IAssistantFund`, `IBondDepository`)
 
-Minimal views and calls used by `SolvencyManager`: `collateralizationRatio()`,
+Minimal views and calls used by `SolvencyManager` and `BondDepository`: `collateralizationRatio()`,
 `collateralizationDeficit()`, `totalAssets()`, `balance()`, `injectFunds(uint256)`, `isActive()`,
-`activateBonding(uint256)`.
+`activateBonding(uint256)`, `closeBonding()`.
 
 ### ISynthToken
 
@@ -185,7 +201,10 @@ short the reverse).
 - **Pause:** `TradingEngine` and `Vault` have their own `_paused` flag with `whenNotPaused`/`whenPaused`.
   `TradingStorage` has no pause so collateral can always move for `liquidate`.
 - **Reentrancy:** Solady `ReentrancyGuard` on `TradingEngine.openTrade`, `closeTrade`, `liquidate`,
-  `executeLimit` and on `Vault.deposit`, `mint`, `requestWithdrawal`, `executeWithdrawal`, `sendPayout`.
+  `executeLimit`, `updateTp`, `updateSl` and on `Vault.deposit`, `mint`, `requestWithdrawal`,
+  `executeWithdrawal`, `sendPayout`.
+- **ETH refunds:** the `refundsEthSurplus` modifier stores `balance - msg.value` in transient storage at
+  entry (`tstore`, EVM `cancun`) and refunds `balance - baseline` at the end of the call.
   `TradingStorage` has none: all its mutating functions are restricted to the engine.
 - **Ordering:** in the engine, the trade is deleted and OI reduced before USDC is transferred. The oracle
   and the funding-state update in `TradingStorage` are called before that.
@@ -201,7 +220,7 @@ short the reverse).
 | sUSDC shares | 18 | `_decimalsOffset() = 12` |
 | Prices (oracle, open, TP, SL) | 18 | Pyth normalised with `PythUtils.convertToUint`; Chainlink scaled by `10 ** (18 - decimals)` |
 | Open interest, position size for OI | 18 | `collateral * leverage * 1e12` |
-| Funding index | 18 (signed) | `FundingLib` |
+| Funding index | 18 (signed), one per side | `FundingLib`; funding owed is `size x delta / 1e30` in USDC units |
 | Volatility | 18 | 3% = `3e16` |
 | Collateralization ratio | 18 | 1e18 = 100% |
 | Percentages | BPS | 10,000 = 100% |
@@ -222,9 +241,8 @@ if (_isLong) {
 }
 ```
 
-Rounding directions for every formula are listed in [Guide 2](./02-mathematics.md). Funding rounds toward
-zero in both directions, so it is the one place where rounding can favour the trader, by at most 1 USDC
-unit per trade.
+Rounding directions for every formula are listed in [Guide 2](./02-mathematics.md). Funding rounds up for
+payers and down for receivers, so it also favours the protocol, by at most 1 USDC unit per position.
 
 ---
 
@@ -237,11 +255,11 @@ State of the items usually checked before a deployment, as of this review:
 | Admin keys in a multisig, timelock on parameter changes | Not in code; single `Ownable` owner per contract |
 | Pausable trading | `TradingEngine.pause` (liquidations stay active) and `Vault.pause` |
 | Reentrancy guards | See section 4 |
-| Oracle validation | Staleness, confidence, Chainlink deviation and heartbeat |
+| Oracle validation | Price age (5 s), future timestamp, confidence, Chainlink deviation and heartbeat, L2 sequencer uptime |
 | Circuit breakers | Not implemented |
 | Emergency withdrawal for LPs | Not implemented |
-| Unit, fuzz, invariant, fork tests | Present; fork suite not reproducible in this review ([test docs](./tests/README.md)) |
-| Invariant tying vault assets, open collateral, open PnL and fees | Not present |
+| Unit, fuzz, invariant, fork tests | Present; fork suite on Arbitrum One at a pinned block ([test docs](./tests/README.md)) |
+| Invariant tying vault assets, open collateral and fees | Present (`invariant_VaultBalanceMatchesModelledFlows`); open PnL is not in it |
 | Static analysis | Slither and Aderyn run; findings not triaged in this round |
 | External audit | Not done |
 | Bug bounty | None |

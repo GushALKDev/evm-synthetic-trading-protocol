@@ -45,17 +45,19 @@ sequenceDiagram
 
 ### Withdrawal
 
-`withdraw` and `redeem` always revert with `UseRequestWithdrawalFlow`. LPs use a two-step flow (source:
-`src/Vault.sol` at commit `f89ca0c`):
+`withdraw` and `redeem` always revert with `UseRequestWithdrawalFlow`. LPs use a two-step flow with
+escrow (`src/Vault.sol`):
 
 ```solidity
 function requestWithdrawal(uint256 shares) external nonReentrant whenNotPaused {
-    uint256 balance = balanceOf(msg.sender);
+    uint256 escrowed = withdrawalRequests[msg.sender].shares;
+    uint256 balance = balanceOf(msg.sender) + escrowed;
     if (balance < shares) revert InsufficientShares(shares, balance);
     uint256 epoch = currentEpoch();
     uint256 unlockEpoch = epoch + WITHDRAWAL_DELAY_EPOCHS;
-    // Overwrites any existing request (no need to cancel first)
     withdrawalRequests[msg.sender] = WithdrawalRequest({shares: shares, requestEpoch: epoch});
+    if (escrowed != 0) _transfer(address(this), msg.sender, escrowed);
+    _transfer(msg.sender, address(this), shares);
     emit WithdrawalRequested(msg.sender, shares, epoch, unlockEpoch);
 }
 
@@ -63,33 +65,51 @@ function executeWithdrawal() external nonReentrant {
     WithdrawalRequest storage req = withdrawalRequests[msg.sender];
     if (req.shares == 0) revert NoWithdrawalRequest();
     uint256 unlockEpoch = req.requestEpoch + WITHDRAWAL_DELAY_EPOCHS;
-    if (currentEpoch() < unlockEpoch) revert WithdrawalLocked(unlockEpoch);
+    uint256 epoch = currentEpoch();
+    if (epoch < unlockEpoch) revert WithdrawalLocked(unlockEpoch);
+    if (epoch >= unlockEpoch + WITHDRAWAL_WINDOW_EPOCHS) revert WithdrawalExpired(unlockEpoch + WITHDRAWAL_WINDOW_EPOCHS);
     uint256 sharesToBurn = req.shares;
-    // Assets calculated at execution time (price per share may have changed since request)
     uint256 assets = previewRedeem(sharesToBurn);
     delete withdrawalRequests[msg.sender];
-    _burn(msg.sender, sharesToBurn);
+    _burn(address(this), sharesToBurn);
     emit WithdrawalExecuted(msg.sender, sharesToBurn, assets);
     ASSET.safeTransfer(msg.sender, assets);
 }
 ```
 
-- `EPOCH_LENGTH = 1 days`, `WITHDRAWAL_DELAY_EPOCHS = 3`. Epoch 0 starts at deployment.
+- `EPOCH_LENGTH = 1 days`, `WITHDRAWAL_DELAY_EPOCHS = 3`, `WITHDRAWAL_WINDOW_EPOCHS = 1`. Epoch 0 starts at
+  deployment.
+- The requested shares move into the vault (escrow). They keep their share of the vault's PnL but cannot
+  be transferred. A new request returns the previous escrow before escrowing the new amount;
+  `cancelWithdrawal` returns it at any time, including after expiry; `executeWithdrawal` burns it.
+- A request can be executed only during the epoch after it unlocks (from `unlockEpoch` to
+  `unlockEpoch + 1`). Later it reverts with `WithdrawalExpired`; its shares stay in escrow until the owner
+  cancels or makes a new request. Nothing moves on its own at expiry.
 - The payout uses the share price at execution, not at request.
 - `executeWithdrawal` and `cancelWithdrawal` are not blocked by the pause.
+
+### ERC-4626 max functions
+
+| Function | Returns | Why |
+|:---|:---|:---|
+| `maxDeposit`, `maxMint` | 0 while paused, otherwise Solady's default (`type(uint256).max`) | `deposit` and `mint` revert while paused |
+| `maxWithdraw`, `maxRedeem` | 0 | `withdraw` and `redeem` always revert |
+
+`test/unit/Vault.t.sol` checks each of them against its action (`test_MaxDeposit_MatchesDeposit`,
+`test_MaxMint_MatchesMint`, `testFuzz_MaxWithdraw_MatchesWithdraw`, `testFuzz_MaxRedeem_MatchesRedeem`).
 
 ### What the lock does and does not do
 
 The lock is meant to stop LPs from exiting just before a known trader payout. As implemented:
 
-- The requested shares are not escrowed; they remain transferable.
-- A request does not expire. After the first 3 epochs an LP can keep a request open and execute it at any
-  later moment, so the delay applies once rather than to each exit.
-- Deposits are not delayed, so a new LP can enter just before a known trader loss is realised.
-- `maxWithdraw`, `maxRedeem`, `maxDeposit` and `maxMint` return Solady's defaults: they do not reflect
-  that `withdraw`/`redeem` always revert or that deposits are paused.
-
-These are current behaviour and are flagged for review.
+- Every exit needs a request made at least 3 epochs earlier, and the request lapses one epoch after it
+  unlocks. An LP who splits shares across addresses and staggers requests can keep at most
+  `WINDOW / (DELAY + WINDOW) = 1 / 4` of them executable at any moment.
+- Requested shares are escrowed and cannot be moved to another address while the request is pending.
+- Current limitation: deposits have no lock, so a new LP can enter just before a known trader loss or a
+  reserve injection is realised.
+- Current limitation: the share price and the collateralization ratio ignore unrealised trader PnL, which
+  makes the timing above visible from public state. Including open PnL is planned for a later round (2b).
 
 ---
 
@@ -134,33 +154,27 @@ function.
 
 ## 3. Solvency Layers
 
-### Layer 1: preventive controls
+### Layer 1: preventive
 
-What exists in code:
+Preventive: payout cap, static OI cap and dynamic spread; volatility-adaptive OI caps are designed only.
 
-- **Payout cap.** `TradingEngine._calculatePayout` caps the payout at 9x collateral (source:
-  `src/TradingEngine.sol` at commit `f89ca0c`):
+- **Payout cap.** `TradingEngine._calculatePayout` caps collateral plus price PnL at 9x the collateral
+  (`src/TradingEngine.sol`):
 
   ```solidity
   uint256 public constant MAX_PROFIT_MULTIPLIER = 9;
 
-  function _calculatePayout(uint64 _collateral, int256 _pnlUsdc) internal pure returns (uint256 payoutUsdc) {
-      if (_pnlUsdc >= 0) {
-          payoutUsdc = uint256(_pnlUsdc) + uint256(_collateral);
-          uint256 maxPayout = uint256(_collateral) * MAX_PROFIT_MULTIPLIER;
-          if (payoutUsdc > maxPayout) payoutUsdc = maxPayout;
-      } else {
-          uint256 loss = uint256(-_pnlUsdc);
-          if (loss >= uint256(_collateral)) {
-              payoutUsdc = 0;
-          } else {
-              payoutUsdc = uint256(_collateral) - loss;
-          }
-      }
+  function _calculatePayout(uint64 _collateral, int256 _pnlUsdc, int256 _fundingOwedUsdc) internal pure returns (uint256 payoutUsdc) {
+      int256 maxProfit = int256(uint256(_collateral) * (MAX_PROFIT_MULTIPLIER - 1));
+      int256 cappedPnl = _pnlUsdc > maxProfit ? maxProfit : _pnlUsdc;
+      int256 net = int256(uint256(_collateral)) + cappedPnl - _fundingOwedUsdc;
+      payoutUsdc = net > 0 ? uint256(net) : 0;
   }
   ```
 
-  The cap applies to collateral plus profit, so the largest profit is 8x collateral (800%).
+  The largest price profit is 8x collateral (800%). Funding is settled after the cap, in both directions
+  ([Guide 2](./02-mathematics.md#2-pnl-and-payout)).
+- **Leverage ceiling.** `MAX_LEVERAGE = 100`, enforced when a pair is configured and when a trade opens.
 - **Static open interest cap.** `TradingStorage.increaseOpenInterest` reverts when long + short OI on a
   pair exceeds `maxOI`, a value the owner sets per pair.
 - **Dynamic spread.** Section 5.
@@ -224,11 +238,13 @@ sequenceDiagram
 |:---|:---|
 | `discountBps` | owner-set, at most 1000 (10%); 500 in `script/Deploy.s.sol` |
 | `vestingPeriod` | owner-set, at most 7 days; 48 h by default |
-| Round cap | the shortfall passed by `SolvencyManager` |
+| Round cap | the shortfall passed by `SolvencyManager`; each bond also stops at the vault's current deficit |
 | `referencePrice` | owner-set USDC per SYNTH, 2 USDC by default; no market price feed |
 
-A round stays open until its cap is used, even if the vault recovers. `SynthToken` supply comes only from
-the minter, which the owner sets and can change.
+A round closes when the vault is back at 100% CR: the bond that takes the whole remaining deficit closes
+it, and `checkAndAct` closes it (`closeBonding`) when CR has recovered through other inflows. While it is
+open, `bond` takes at most `min(remainingCap, collateralizationDeficit)` and reverts when that is 0.
+`SynthToken` supply comes only from the minter, which the owner sets and can change.
 
 ---
 
@@ -238,7 +254,10 @@ Implemented order: reserve first, then bonding.
 
 ```mermaid
 flowchart TD
-    A[checkAndAct] --> B{CR >= 110%?}
+    A[checkAndAct] --> Z{CR >= 100% and round open?}
+    Z -->|Yes| Y[closeBonding]
+    Z -->|No| B
+    Y --> B{CR >= 110%?}
     B -->|Yes| H[Emit Healthy]
     B -->|No| C{CR >= 100%?}
     C -->|Yes| W[Emit Warning]
@@ -258,6 +277,7 @@ uint256 public constant CRITICAL_CR = 95e16; // 95%
   (share price above 1.1) large losses can occur without triggering any action; the ratio does not
   include open trader PnL.
 - The deficit is `Vault.collateralizationDeficit()`, the USDC needed to bring the share price back to 1.0.
+- At CR >= 100% an open bonding round is closed before the healthy and warning checks.
 - There is no buyback above 110% and no "growth phase" ordering that prefers bonding over the reserve;
   both were described in earlier designs.
 
@@ -299,8 +319,8 @@ function getSpreadBps(uint256 _pairIndex, uint256 _currentOI) external view retu
 |:---|:---|
 | `Vault.sol` | LP funds, sUSDC shares, trader profit payouts, CR views |
 | `TradingEngine.sol` | Trading logic, spread, fees, funding, liquidation, TP/SL |
-| `TradingStorage.sol` | Trades, pairs, OI, funding state, trader collateral |
-| `PythChainlinkOracle.sol` | Pyth price with Chainlink deviation check (`IOracle`) |
+| `TradingStorage.sol` | Trades, pairs, OI, per-side funding indexes, trader collateral |
+| `PythChainlinkOracle.sol` | Pyth price with age limit, Chainlink deviation check and L2 sequencer check (`IOracle`) |
 | `SpreadManager.sol` | Spread from OI and keeper-set volatility |
 | `FundingLib.sol` | Funding index math |
 | `AssistantFund.sol` | Layer 2 USDC reserve |

@@ -77,12 +77,15 @@ Both roundings make the trader's result smaller by at most 1 USDC unit, in favou
 
 ### Payout (`_calculatePayout`)
 
-With `adjPnl = PnL - fundingOwed` (section 6):
+With `fundingOwed` from section 6 (positive when the trader pays):
 
-$$payout = \begin{cases} \min(collateral + adjPnl,\ 9 \times collateral) & adjPnl \ge 0 \\ \max(collateral - |adjPnl|,\ 0) & adjPnl < 0 \end{cases}$$
+$$payout = \max\left(collateral + \min(PnL,\ 8 \times collateral) - fundingOwed,\ 0\right)$$
 
-`MAX_PROFIT_MULTIPLIER = 9` caps the payout, not the profit: the largest profit a trade can realise is
-8x its collateral. The close fee (section 3) is then subtracted from the payout, down to zero.
+`MAX_PROFIT_MULTIPLIER = 9` caps collateral plus price PnL at 9x the collateral, so the largest price
+profit is 8x the collateral. Funding is applied after the cap in both directions: a payer whose price
+profit is capped still pays its funding, and a receiver's credit is not cut by the cap, so a payout can
+exceed 9x the collateral by the funding credit. The close fee (section 3) is then subtracted from the
+payout, down to zero.
 
 ---
 
@@ -142,7 +145,8 @@ negligible.
 
 ## 5. Liquidations
 
-`LIQUIDATION_THRESHOLD_BPS = 9000`, `LIQUIDATOR_REWARD_BPS = 1000` (`TradingEngine.liquidate`).
+`LIQUIDATION_THRESHOLD_BPS = 9000`, `LIQUIDATOR_REWARD_BPS = 1000`, `LIQUIDATOR_MIN_REWARD_BPS = 50`
+(`TradingEngine.liquidate`).
 
 1. Conservative price from the oracle's confidence band: long `price + conf`, short `max(price - conf, 0)`.
 2. Close-direction spread applied to that price.
@@ -153,10 +157,13 @@ $$loss = \max(-adjPnl, 0) \ge \left\lfloor \frac{collateral \times 9000}{10000} 
 
 5. Distribution:
 
-$$remaining = \max(collateral - loss, 0), \qquad reward = \left\lfloor \frac{remaining \times 1000}{10000} \right\rfloor$$
+$$remaining = \max(collateral - loss, 0), \qquad reward = \max\left(\left\lfloor \frac{remaining \times 1000}{10000} \right\rfloor,\ \left\lfloor \frac{collateral \times 50}{10000} \right\rfloor\right)$$
 
-The caller receives `reward`; the vault receives `collateral - reward`. The reward is at most 1% of the
-collateral and is 0 once the loss reaches the full collateral.
+The caller receives `reward`; the vault receives `collateral - reward`. At the 90% threshold the reward is
+1% of the collateral; it falls with the remaining collateral and never below 0.5% of the collateral, also
+when the loss reaches or exceeds the collateral. `MIN_COLLATERAL = 10 USDC` keeps the floor above zero
+(at least 0.046 USDC on a 10 USDC deposit at 100x). The reward never exceeds the collateral, so the vault
+never funds it.
 
 ### Approximate liquidation price
 
@@ -170,10 +177,16 @@ liquidation price.
 
 ### Opening guard (`_validateNotPreLiquidatable`)
 
-An open reverts if the loss between the spread-adjusted open price and the raw oracle price already
-reaches 90% of the deposited collateral. The guard uses the deposited collateral (before the open fee)
-and does not include the close spread that `liquidate` applies, so with a large spread and high leverage a
-position can pass the guard and be liquidatable in the same block.
+An open reverts with `NotLiquidatable(0, loss, threshold)` if `liquidate` would accept the position in
+the same block at an unchanged oracle price. The guard evaluates the loss exactly as `liquidate` does in
+that situation: stored collateral (deposit minus open fee), open price against the oracle price moved by
+the close-direction spread, with the spread computed at the pair OI after the open (which includes the
+new position), no funding, and no confidence band (the band only makes liquidation harder).
+
+$$loss_{guard} = \max\left(-PnL(collateral_{stored},\ openPrice,\ closeSpread(oraclePrice, OI + size)),\ 0\right) \ge \left\lfloor \frac{collateral_{stored} \times 9000}{10000} \right\rfloor \Rightarrow revert$$
+
+At 100x with a constant spread `s` on both sides, the loss is about `100 x 2s` of the stored collateral,
+so any spread of about 45 BPS or more is rejected at 100x.
 
 ### Example distribution
 
@@ -184,42 +197,77 @@ vault.
 
 ## 6. Funding
 
-`FundingLib.FUNDING_FACTOR = 1e10`. The index is updated before any OI change on the pair
-(`TradingEngine._updateFundingIndex`), using the OI that was in place since the last update.
+Funding is a transfer between the traders of a pair. The heavier side pays, the lighter side receives the
+same total, and the vault is not a party to it except through the residual described below
+(`FundingLib`, `TradingEngine._updateFundingIndex`).
 
-$$\Delta index = trunc\left(\frac{(OI_{long} - OI_{short}) \times 10^{10} \times \Delta t}{10^{18}}\right)$$
+### Rate
 
-$$raw = trunc\left(\frac{size_{wad} \times (index_{now} - index_{entry})}{10^{18}}\right), \qquad fundingOwed = \begin{cases} trunc(raw / 10^{12}) & long \\ trunc(-raw / 10^{12}) & short \end{cases}$$
+$$skew = \frac{|OI_{long} - OI_{short}|}{OI_{long} + OI_{short}}, \qquad rate_{hour} = \min\left(\left\lfloor \frac{fundingFactor \times |OI_{long} - OI_{short}|}{OI_{long} + OI_{short}} \right\rfloor,\ MAX\_FUNDING\_RATE\_PER\_HOUR\right)$$
 
-A positive `fundingOwed` is paid by the trader (subtracted from PnL); a negative one is received.
+- `rate_hour` is the fraction of the heavier side's notional paid per hour (WAD, 1e18 = 100%).
+- `MAX_FUNDING_RATE_PER_HOUR = 1e14` (0.01% per hour) is an immutable constant in `FundingLib`.
+- `fundingFactor` is the rate at 100% skew. It is stored in `TradingEngine`, starts at
+  `DEFAULT_FUNDING_FACTOR = 1e14` and the owner can set it with `setFundingFactor` within
+  `[MIN_FUNDING_FACTOR, MAX_FUNDING_FACTOR] = [1e12, 1e15]` (0.0001% to 0.1% per hour at 100% skew; at the
+  maximum factor the rate reaches the ceiling at 10% skew). A change accrues every pair at the old factor
+  first.
+- If either side has zero OI, nothing accrues.
 
-### Magnitude
+### Indexes
 
-The index moves by `1e10` per second per USD of imbalance, so a position pays or receives `1e-8` of its
-size per second, or `3.6e-5` per hour, for each USD of imbalance. The rate is not normalised by open
-interest or vault size:
+Each pair keeps one cumulative index per side (WAD per unit of notional, positive = paid). Over an interval
+`dt` with constant OI (the indexes are updated before every OI change):
 
-| Imbalance (long OI - short OI) | Funding per hour, as a share of position size |
-|:---|:---|
-| 1,000 USD | 3.6% |
-| 10,000 USD | 36% |
-| 100,000 USD | 360% |
+$$\Delta index_{heavy} = \left\lceil \frac{rate_{hour} \times dt}{3600} \right\rceil, \qquad \Delta index_{light} = -\left\lfloor \frac{\Delta index_{heavy} \times OI_{heavy}}{OI_{light}} \right\rfloor$$
 
-With realistic imbalances, positions on the heavier side reach the liquidation threshold within minutes,
-and positions on the lighter side receive funding up to the 9x payout cap. This is current behaviour and
-is flagged for review.
+so `OI_light x |Δindex_light| <= OI_heavy x Δindex_heavy`: the light side is credited at most what the
+heavy side is charged. The per-unit rate on the light side is `rate_hour x OI_heavy / OI_light`, which is
+large when the light side is small, but its total is bounded by what the heavy side pays.
 
-### Who pays
+### Amount owed by a position
 
-Funding is settled with the vault, not between traders. Longs and shorts owe opposite amounts per unit of
-size, so when OI is balanced the index does not move. When OI is unbalanced, the heavier side pays on a
-larger size than the lighter side receives on, and the vault keeps the difference, except when a
-paying position's loss is capped at its collateral.
+$$\Delta = index_{side,now} - index_{side,entry}, \qquad fundingOwed = \begin{cases} \left\lceil \frac{size_{wad} \times \Delta}{10^{30}} \right\rceil & \Delta \ge 0 \\ -\left\lfloor \frac{size_{wad} \times |\Delta|}{10^{30}} \right\rfloor & \Delta < 0 \end{cases}$$
 
-### Rounding
+Payers round up and receivers round down, so the sum of `fundingOwed` over all positions of a pair is
+between 0 and one unit per position. `fundingOwed` enters the payout after the price cap (section 2) and
+the liquidation loss (section 5).
 
-`trunc` rounds toward zero in both directions, so a paying trader pays up to 1 USDC unit less and a
-receiving trader receives up to 1 unit less.
+### Example
+
+A 1,000 USDC x100 long (92,000 USD notional) against a 10 USDC x100 short (920 USD notional), default
+factor: `rate_hour = floor(1e14 x 91,080 / 92,920)`, about 0.0098% of the long notional per hour. After 60
+seconds at an unchanged price the short closes with 7.693836 USDC for its 10 USDC deposit: its funding
+credit is smaller than the spread and fees of the round trip. Before round 2 the same short closed with
+57.819699 USDC, credited by the vault. Both values come from
+`forge test --match-test test_Regression_Funding_SmallShortCannotProfitAtFlatPrice -vv` (after and before
+the fix).
+
+### Residual: funding a payer cannot pay
+
+Receivers are credited as funding accrues and can close at any time; a payer settles only when it closes
+or is liquidated. The vault fronts a credit until the payer settles. If the payer ends with a loss above
+what its collateral covers, the unpaid part stays with the vault:
+
+$$unpaid = \max\left(0,\ fundingOwed - \max\left(0,\ collateral + \min(PnL,\ 8 \times collateral) - reward\right)\right)$$
+
+with `reward = 0` for a close or TP/SL execution and the liquidator reward for a liquidation (the reward
+is taken first, then the price loss, then funding).
+
+Worst case with the deployed parameters (ceiling 0.01% per hour, `MAX_LEVERAGE = 100`, liquidation at 90%
+of the stored collateral `C`, reward floor 0.5% of `C`): a payer accrues funding at most at
+`0.0001 x L x C` per hour, 1% of `C` per hour at 100x. Funding counts toward the liquidation loss, so at a
+flat price the position becomes liquidatable with about 10% of `C` left; unpaid funding appears only if
+nobody liquidates it for longer than
+
+$$t_0 = \frac{0.1 - 0.005}{0.0001 \times L} \text{ hours} = 9.5 \text{ h at } L = 100$$
+
+after it crosses the threshold, and then grows by at most `0.0001 x L x C` per hour (1% of `C` per hour at
+100x). If the price gaps past a 100% loss, the whole accrued `fundingOwed` of that payer is unpaid; since
+funding alone would have made it liquidatable, that amount is at most `0.9 x C` plus what accrued during
+the liquidation delay. The protocol invariant suite tracks this amount (`ghostFundingBadDebt`) and checks
+that the vault's net funding result plus the funding still owed by open positions is never below minus
+that amount ([test suite](./tests/README.md)).
 
 ---
 
@@ -253,7 +301,8 @@ $$deficit = \max\left(\left\lfloor \frac{totalSupply}{10^{12}} \right\rfloor - t
 | Deficit | CR < 100% | Inject `min(reserve, deficit)` from the AssistantFund |
 | Critical | CR < 95% and deficit not covered and no active round | Also open a bonding round for the shortfall |
 
-No action is taken above 110% (no buyback).
+At CR >= 100% an open bonding round is closed (`closeBonding`, event `BondingClosed`). No other action is
+taken above 110% (no buyback).
 
 ---
 
@@ -264,7 +313,9 @@ No action is taken above 110% (no buyback).
 $$effectivePrice = \left\lfloor \frac{referencePrice \times (10000 - discountBps)}{10000} \right\rfloor, \qquad synthOut = \left\lfloor \frac{usdcIn \times 10^{18}}{effectivePrice} \right\rfloor$$
 
 - `referencePrice` is USDC (6 decimals) per 1 SYNTH, set by the owner (default 2 USDC).
-- `discountBps <= 1000`; `usdcIn` is clamped to the round's remaining cap.
+- `discountBps <= 1000`; `usdcIn = min(amount, remainingCap, collateralizationDeficit)`, and `bond`
+  reverts with `NoActiveRound` when the last two are not both above zero. The bond that takes all that is
+  available closes the round, so a round never raises more than the deficit at the time of each bond.
 - Vesting is linear: `vested = floor(totalSynth x elapsed / duration)` until the end, then `totalSynth`.
 
 Example: `referencePrice = 1e6` (1 USDC), discount 10%: `effectivePrice = 900,000`, and 1,000 USDC buys
@@ -282,20 +333,25 @@ Example: `referencePrice = 1e6` (1 USDC), discount 10%: `effectivePrice = 900,00
 | `FEE_VAULT_SPLIT_BPS` | 8000 (80% vault, 20% treasury) | `TradingEngine` constant |
 | `LIQUIDATION_THRESHOLD_BPS` | 9000 | `TradingEngine` constant |
 | `LIQUIDATOR_REWARD_BPS` | 1000 (of remaining collateral) | `TradingEngine` constant |
+| `LIQUIDATOR_MIN_REWARD_BPS` | 50 (of collateral, reward floor) | `TradingEngine` constant |
+| `MAX_LEVERAGE` | 100 | `TradingEngine` and `TradingStorage` constants |
 | `EXEC_REWARD_BPS` | 10 (0.1% of notional) | `TradingEngine` constant |
-| `maxLeverage` | per pair, `uint16` | `TradingStorage.addPair` (owner); tests use 100 |
+| `maxLeverage` | per pair, 1 to `MAX_LEVERAGE` | `TradingStorage.addPair` / `updatePair` (owner) |
 | `maxOI` | per pair | `TradingStorage.addPair` (owner) |
-| `FUNDING_FACTOR` | 1e10 | `FundingLib` constant |
+| `MAX_FUNDING_RATE_PER_HOUR` | 1e14 (0.01% per hour) | `FundingLib` constant |
+| `fundingFactor` | 1e14 by default, owner-set within 1e12 to 1e15 | `TradingEngine.setFundingFactor` |
 | `baseSpreadBps` | 5 | `script/Deploy.s.sol` |
 | `impactFactor` | 3e5 | `script/Deploy.s.sol` |
 | `volFactor` | 100 | `script/Deploy.s.sol` |
 | `maxSpreadBps` | 100 | `script/Deploy.s.sol` |
 | `maxVolatilityChangeBps` | 5000 (relative) | `script/Deploy.s.sol` |
-| `MAX_STALENESS` | 30 s | `PythChainlinkOracle` constant |
+| `MAX_STALENESS` | 30 s, ceiling for `maxPriceAge` | `PythChainlinkOracle` constant |
+| `maxPriceAge` | 5 s by default, owner-set within 1 to 30 s | `PythChainlinkOracle.setMaxPriceAge` |
+| `SEQUENCER_GRACE_PERIOD` | 3600 s | `PythChainlinkOracle` constant |
 | `MAX_CONFIDENCE_BPS` | 200 | `PythChainlinkOracle` constant |
 | `MAX_DEVIATION_BPS` | 300 | `PythChainlinkOracle` constant |
 | `SAFE_CR`, `DEFICIT_CR`, `CRITICAL_CR` | 110%, 100%, 95% | `SolvencyManager` constants |
-| `EPOCH_LENGTH`, `WITHDRAWAL_DELAY_EPOCHS` | 1 day, 3 | `Vault` constants |
+| `EPOCH_LENGTH`, `WITHDRAWAL_DELAY_EPOCHS`, `WITHDRAWAL_WINDOW_EPOCHS` | 1 day, 3, 1 | `Vault` constants |
 | `targetCap` | 1,000,000 USDC | `script/Deploy.s.sol` |
 | `discountBps` | 500 | `script/Deploy.s.sol` (max 1000) |
 | `vestingPeriod` | 48 h | `BondDepository` constructor (max 7 days) |
