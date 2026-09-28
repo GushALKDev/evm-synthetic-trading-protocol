@@ -2,7 +2,6 @@
 pragma solidity 0.8.24;
 
 import {CommonBase} from "forge-std/Base.sol";
-import {StdCheats} from "forge-std/StdCheats.sol";
 import {StdUtils} from "forge-std/StdUtils.sol";
 import {TradingEngine} from "../../../src/TradingEngine.sol";
 import {Vault} from "../../../src/Vault.sol";
@@ -11,6 +10,7 @@ import {SolvencyManager} from "../../../src/SolvencyManager.sol";
 import {BondDepository} from "../../../src/BondDepository.sol";
 import {MockOracle} from "../../mocks/MockOracle.sol";
 import {ERC20} from "solady/tokens/ERC20.sol";
+import {IMintableUSDC} from "./IMintableUSDC.sol";
 
 /**
  * @title LiquidityHandler
@@ -21,7 +21,7 @@ import {ERC20} from "solady/tokens/ERC20.sol";
  * @dev Each flow into or out of the Vault is modelled before the call from the documented rules and recorded
  *      in a ghost variable; the measured amount is compared with the model (ghostMismatches).
  */
-contract LiquidityHandler is CommonBase, StdCheats, StdUtils {
+contract LiquidityHandler is CommonBase, StdUtils {
     TradingEngine public immutable ENGINE;
     Vault public immutable VAULT;
     MockOracle public immutable ORACLE;
@@ -83,7 +83,7 @@ contract LiquidityHandler is CommonBase, StdCheats, StdUtils {
         if (VAULT.paused()) return;
         address lp = _actor(_actorSeed);
         uint256 assets = bound(_assets, 1 * 10 ** 6, 100_000 * 10 ** 6);
-        deal(address(USDC), lp, assets);
+        IMintableUSDC(address(USDC)).mint(lp, assets);
         vm.prank(lp);
         USDC.approve(address(VAULT), assets);
         vm.prank(lp);
@@ -202,7 +202,7 @@ contract LiquidityHandler is CommonBase, StdCheats, StdUtils {
         uint256 crBefore = VAULT.collateralizationRatio();
         uint256 vaultBefore = USDC.balanceOf(address(VAULT));
 
-        deal(address(USDC), bonder, amount);
+        IMintableUSDC(address(USDC)).mint(bonder, amount);
         vm.prank(bonder);
         USDC.approve(address(BOND_DEPOSITORY), amount);
         vm.prank(bonder);

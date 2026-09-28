@@ -2,7 +2,6 @@
 pragma solidity 0.8.24;
 
 import {CommonBase} from "forge-std/Base.sol";
-import {StdCheats} from "forge-std/StdCheats.sol";
 import {StdUtils} from "forge-std/StdUtils.sol";
 import {TradingEngine} from "../../../src/TradingEngine.sol";
 import {TradingStorage} from "../../../src/TradingStorage.sol";
@@ -10,6 +9,7 @@ import {Vault} from "../../../src/Vault.sol";
 import {FundingLib} from "../../../src/libraries/FundingLib.sol";
 import {MockOracle} from "../../mocks/MockOracle.sol";
 import {ERC20} from "solady/tokens/ERC20.sol";
+import {IMintableUSDC} from "./IMintableUSDC.sol";
 
 /**
  * @title ProtocolHandler
@@ -25,7 +25,7 @@ import {ERC20} from "solady/tokens/ERC20.sol";
  *      position, not liquidatable, not triggered, or a winning close the Vault cannot pay), so in the forge
  *      metrics table calls - reverts is the number of settlements of each kind.
  */
-contract ProtocolHandler is CommonBase, StdCheats, StdUtils {
+contract ProtocolHandler is CommonBase, StdUtils {
     TradingEngine public immutable ENGINE;
     TradingStorage public immutable TRADING_STORAGE;
     Vault public immutable VAULT;
@@ -133,7 +133,7 @@ contract ProtocolHandler is CommonBase, StdCheats, StdUtils {
         OpenParams memory p = _openParams(_actorSeed, _collateral, _leverage, _isLong, _tpSeed, _slSeed);
         if (TRADING_STORAGE.getOpenInterest(PAIR_INDEX) + p.sizeWad > MAX_OI) return;
 
-        deal(address(USDC), p.trader, p.collateral);
+        IMintableUSDC(address(USDC)).mint(p.trader, p.collateral);
         vm.prank(p.trader);
         USDC.approve(address(ENGINE), p.collateral);
         vm.prank(p.trader);
