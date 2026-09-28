@@ -4,8 +4,9 @@ pragma solidity 0.8.24;
 /**
  * @title IOracle
  * @notice Technology-agnostic oracle interface for the Synthetic Trading Protocol.
- *         Any oracle implementation (Pyth+Chainlink, Chainlink-only, custom DON, etc.)
- *         conforms to this interface. Swapping providers = deploy new contract + update address.
+ *         The protocol uses PythChainlinkOracle (Pyth pull prices anchored to Chainlink); another
+ *         implementation, pull- or push-based, can replace it by deploying a new contract and pointing
+ *         TradingEngine at it. A custom oracle network was considered early on and dropped.
  * @dev `priceData` is opaque calldata for pull-based oracles (e.g. Pyth signed updates).
  *      Push-based oracles can ignore it. The caller funds any required fee via msg.value;
  *      the oracle refunds the surplus to msg.sender.

@@ -15,7 +15,8 @@ import {SpreadManager} from "./SpreadManager.sol";
  * @author GushALKDev
  * @notice Main controller for opening/closing leveraged trades in the Synthetic Trading Protocol
  * @dev Orchestrates IOracle (prices), TradingStorage (state + collateral custody), and Vault (LP liquidity + payouts).
- *      Applies a fixed base spread on execution price and validates TP/SL against live oracle prices.
+ *      Applies the dynamic spread from SpreadManager (base, OI and volatility terms) to execution prices
+ *      and validates TP/SL against live oracle prices.
  */
 contract TradingEngine is Ownable, ReentrancyGuard {
     using SafeTransferLib for address;
