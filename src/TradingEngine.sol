@@ -319,8 +319,9 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     /**
      * @dev Accrue funding on both side indexes of a pair for the time elapsed at the current OI.
      *      Called before any OI change (open/close/liquidate/executeLimit) so each interval uses constant OI.
+     *      The factor is a parameter so setFundingFactor can write the new factor first and accrue at the old one.
      */
-    function _updateFundingIndex(uint256 _pairIndex) internal {
+    function _updateFundingIndex(uint256 _pairIndex, uint256 _fundingFactor) internal {
         uint256 lastUpdated = TRADING_STORAGE.getFundingLastUpdated(_pairIndex);
         if (lastUpdated == 0) {
             // First interaction: initialize timestamp, indexes stay at 0
@@ -332,7 +333,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
 
         uint256 oiLong = TRADING_STORAGE.getOpenInterestLong(_pairIndex);
         uint256 oiShort = TRADING_STORAGE.getOpenInterestShort(_pairIndex);
-        (int256 longDelta, int256 shortDelta) = FundingLib.calculateIndexDeltas(oiLong, oiShort, deltaTime, fundingFactor);
+        (int256 longDelta, int256 shortDelta) = FundingLib.calculateIndexDeltas(oiLong, oiShort, deltaTime, _fundingFactor);
         TRADING_STORAGE.updateFundingState(
             _pairIndex,
             TRADING_STORAGE.getCumulativeFundingIndex(_pairIndex, true) + longDelta,
@@ -521,7 +522,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         oraclePrice = _computeOpenPrice(_pairIndex, _isLong, _collateral, _leverage, oraclePrice, _expectedPrice, _slippageBps);
 
         // --- EFFECTS ---
-        _updateFundingIndex(_pairIndex);
+        _updateFundingIndex(_pairIndex, fundingFactor);
 
         // --- INTERACTIONS ---
         tradeId = _executeOpen(msg.sender, _pairIndex, _isLong, _collateral, _leverage, oraclePrice, _tp, _sl);
@@ -554,7 +555,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         _validateSlippage(executionPrice, _expectedPrice, _slippageBps);
 
         // Update funding index before computing funding owed
-        _updateFundingIndex(trade.pairIndex);
+        _updateFundingIndex(trade.pairIndex, fundingFactor);
 
         int256 pnlUsdc = _calculatePnl(trade.collateral, trade.leverage, trade.openPrice, executionPrice, trade.isLong);
         uint256 positionSize = _positionSizeWad(trade.collateral, trade.leverage);
@@ -623,7 +624,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         uint128 conservativePrice = _getConservativeLiqPrice(trade.pairIndex, priceUpdate, trade.isLong);
         uint128 executionPrice = _applySpread(conservativePrice, trade.isLong, false, trade.pairIndex);
 
-        _updateFundingIndex(trade.pairIndex);
+        _updateFundingIndex(trade.pairIndex, fundingFactor);
 
         int256 pnlUsdc = _calculatePnl(trade.collateral, trade.leverage, trade.openPrice, executionPrice, trade.isLong);
         uint256 positionSize = _positionSizeWad(trade.collateral, trade.leverage);
@@ -689,7 +690,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
 
         uint128 executionPrice = _applySpread(oraclePrice, trade.isLong, false, trade.pairIndex);
 
-        _updateFundingIndex(trade.pairIndex);
+        _updateFundingIndex(trade.pairIndex, fundingFactor);
 
         _executeLimit(trade, _tradeId, executionPrice, isTp);
     }
@@ -808,18 +809,21 @@ contract TradingEngine is Ownable, ReentrancyGuard {
 
     /**
      * @notice Set the funding rate per hour at 100% skew (WAD)
-     * @dev Accrues every pair at the old factor first, so the new factor never applies to time already elapsed.
+     * @dev Writes the new factor first, then accrues every pair at the old factor passed as a parameter, so the
+     *      new factor never applies to time already elapsed and no state is written after the external calls.
      */
     function setFundingFactor(uint256 _fundingFactor) external onlyOwner {
         if (_fundingFactor < FundingLib.MIN_FUNDING_FACTOR || _fundingFactor > FundingLib.MAX_FUNDING_FACTOR) {
             revert FundingFactorOutOfBounds(_fundingFactor);
         }
-        uint256 pairsCount = TRADING_STORAGE.getPairsCount();
-        for (uint256 i; i < pairsCount; ++i) {
-            _updateFundingIndex(i);
-        }
+        uint256 oldFactor = fundingFactor;
         fundingFactor = uint64(_fundingFactor);
         emit FundingFactorUpdated(_fundingFactor);
+
+        uint256 pairsCount = TRADING_STORAGE.getPairsCount();
+        for (uint256 i; i < pairsCount; ++i) {
+            _updateFundingIndex(i, oldFactor);
+        }
     }
 
     function pause() external onlyOwner whenNotPaused {
