@@ -6,7 +6,7 @@ import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 
 /**
  * @title MockOracle
- * @notice Simplified IOracle mock for TradingEngine tests — returns preset prices without Pyth encoding.
+ * @notice Simplified IOracle mock for TradingEngine tests: returns preset prices without Pyth encoding.
  *         Charges a configurable fee (default 0) from msg.value and refunds the surplus, mirroring the
  *         real oracle's payable fee flow.
  */

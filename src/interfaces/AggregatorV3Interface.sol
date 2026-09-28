@@ -14,6 +14,6 @@ interface AggregatorV3Interface {
     /// @return answer The price answer
     /// @return startedAt Timestamp when the round started
     /// @return updatedAt Timestamp when the answer was last updated
-    /// @return answeredInRound Deprecated — included for interface compatibility
+    /// @return answeredInRound Deprecated, included for interface compatibility
     function latestRoundData() external view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound);
 }

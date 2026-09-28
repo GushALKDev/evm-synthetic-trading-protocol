@@ -28,7 +28,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
 
     uint256 public constant MAX_PROFIT_MULTIPLIER = 9;
     uint16 public constant MAX_LEVERAGE = 100; // global ceiling, also enforced on pair configuration in TradingStorage
-    uint256 public constant MIN_COLLATERAL = 10e6; // 10 USDC — floor keeps the liquidator reward above L2 gas
+    uint256 public constant MIN_COLLATERAL = 10e6; // 10 USDC, a floor that keeps the liquidator reward above L2 gas
     uint256 public constant BPS_DENOMINATOR = 10_000;
     uint256 public constant OPEN_FEE_BPS = 8; // 0.08% of position size
     uint256 public constant CLOSE_FEE_BPS = 8; // 0.08% of position size
@@ -622,7 +622,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
      *
      *      Not gated by whenNotPaused: liquidation is the protocol's solvency valve and must stay live
      *      even while trading is paused. During a Pyth outage the oracle reverts (stale/deviation), so
-     *      liquidation is unavailable by design — see docs/03-architecture.md for the accepted risk.
+     *      liquidation is unavailable by design; see docs/03-architecture.md for the accepted risk.
      * @param _tradeId The trade ID to liquidate
      * @param priceUpdate Pyth price update data
      */
@@ -684,7 +684,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
      *      Settlement mirrors closeTrade (funding-adjusted PnL, close direction spread, close fee,
      *      same 3-branch payout), but the payout goes to the trade owner (not the caller). The caller
      *      earns a fixed reward (EXEC_REWARD_BPS of notional) carved out of the trader's payout, capped
-     *      so the trader is never pushed negative — on a full-loss stop the executor simply earns 0.
+     *      so the trader is never pushed negative: on a full-loss stop the executor simply earns 0.
      *      Reverts NoLimitSet if neither TP nor SL is set, LimitNotTriggered if not yet crossed.
      *      Collateral flow: same as closeTrade, plus payout split (trader gets payout - reward, executor
      *      gets reward). Gated by whenNotPaused like closeTrade.

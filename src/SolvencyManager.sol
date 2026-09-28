@@ -200,7 +200,7 @@ contract SolvencyManager is Ownable {
     /**
      * @dev Delegated to the Vault, which derives it from the nominal deposit basis. Computing it as
      *      `totalAssets * (WAD - cr) / cr` is equivalent while the Vault holds assets, but panics on
-     *      a fully drained Vault (totalAssets == 0 with shares outstanding makes CR == 0) — exactly
+     *      a fully drained Vault (totalAssets == 0 with shares outstanding makes CR == 0), exactly
      *      the total-insolvency case the rescue must remain callable in.
      */
     function _deficitToTarget() internal view returns (uint256) {

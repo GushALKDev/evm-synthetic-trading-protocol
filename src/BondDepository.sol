@@ -22,8 +22,8 @@ import {ISolvencyVault} from "./interfaces/ISolvency.sol";
  *      priced off an owner-set referencePrice (USDC per SYNTH, a stand-in for a TWAP) with a capped discount.
  *
  *      Vesting rationale (PoC): the sell-side discount makes an instant "bond → dump on market" a
- *      near risk-free arbitrage that pushes the token price down, and — since bonds re-price against
- *      that same referencePrice — can feed on itself (the classic OlympusDAO bond-and-dump). Linear
+ *      near risk-free arbitrage that pushes the token price down, and, since bonds re-price against
+ *      that same referencePrice, can feed on itself (the classic OlympusDAO bond-and-dump). Linear
  *      vesting over VESTING_PERIOD breaks the *atomic* arbitrage (buy and sell in one tx) and spreads
  *      any sell pressure across time instead of a single dump, at the cost of making bonds less
  *      attractive during an acute crisis. VESTING_PERIOD is owner-configurable (default 48h, capped at

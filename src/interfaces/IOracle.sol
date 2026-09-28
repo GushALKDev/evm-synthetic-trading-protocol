@@ -17,7 +17,7 @@ interface IOracle {
      * @dev conf18 is the price uncertainty (publisher disagreement for Pyth) normalized to 18 decimals.
      *      Push-based oracles that do not expose a confidence interval should return conf18 = 0.
      *      Callers use conf18 for conservative pricing (e.g. liquidation checks): the trader-favorable
-     *      band edge — price + conf for longs, price - conf for shorts — to avoid unfair liquidation
+     *      band edge (price + conf for longs, price - conf for shorts) to avoid unfair liquidation
      *      during volatility.
      * @param pairIndex The pair index to get price for
      * @param priceData Opaque price update data (used by pull-based oracles, ignored by push-based)

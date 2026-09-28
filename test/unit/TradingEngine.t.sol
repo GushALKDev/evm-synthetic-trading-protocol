@@ -492,7 +492,7 @@ contract TradingEngineTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
-                        CLOSE TRADE TESTS — PROFIT
+                        CLOSE TRADE TESTS: PROFIT
     //////////////////////////////////////////////////////////////*/
 
     function test_CloseTrade_LongProfit() public {
@@ -584,7 +584,7 @@ contract TradingEngineTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
-                        CLOSE TRADE TESTS — LOSS
+                        CLOSE TRADE TESTS: LOSS
     //////////////////////////////////////////////////////////////*/
 
     function test_CloseTrade_LongPartialLoss() public {
@@ -691,7 +691,7 @@ contract TradingEngineTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
-                        CLOSE TRADE TESTS — PROFIT CAP
+                        CLOSE TRADE TESTS: PROFIT CAP
     //////////////////////////////////////////////////////////////*/
 
     function test_CloseTrade_ProfitCapped() public {
@@ -713,13 +713,13 @@ contract TradingEngineTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
-                      CLOSE TRADE TESTS — BREAKEVEN
+                      CLOSE TRADE TESTS: BREAKEVEN
     //////////////////////////////////////////////////////////////*/
 
     function test_CloseTrade_SpreadCausesSmallLoss() public {
         uint32 tradeId = _openDefaultTrade(alice);
 
-        // Close at same oracle price — spread on both sides causes a small loss
+        // Close at same oracle price: spread on both sides causes a small loss
         uint128 closeExec = _longClosePrice(DEFAULT_ORACLE_PRICE);
 
         uint256 aliceBefore = usdc.balanceOf(alice);
@@ -736,7 +736,7 @@ contract TradingEngineTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
-                      CLOSE TRADE TESTS — REVERTS
+                      CLOSE TRADE TESTS: REVERTS
     //////////////////////////////////////////////////////////////*/
 
     function test_CloseTrade_RevertOnTradeNotFound() public {
@@ -1244,7 +1244,7 @@ contract TradingEngineTest is Test {
     function test_Fee_CloseFeeDeductedFromPayout() public {
         uint32 tradeId = _openDefaultTrade(alice);
 
-        // Close at slight profit (50.5k) — treasury should receive close fee share
+        // Close at slight profit (50.5k): treasury should receive close fee share
         uint128 closeOracle = 50_500 * 1e18;
         mockOracle.setPrice(DEFAULT_PAIR_INDEX, closeOracle);
         uint128 closeExec = _longClosePrice(closeOracle);
@@ -1604,7 +1604,7 @@ contract TradingEngineTest is Test {
             DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, shortTp, shortSl, EMPTY_UPDATE
         );
 
-        // Warp time — more longs than shorts (but now both sides exist, long OI from alice + short OI from bob)
+        // Warp time: more longs than shorts (but now both sides exist, long OI from alice + short OI from bob)
         // Both opened with same collateral/leverage, but long OI was first (timestamp set before short)
         // After second open, long and short OI are equal. Need to create a long-heavier scenario.
         // Open another long for alice to make longs heavier
@@ -1793,7 +1793,7 @@ contract TradingEngineTest is Test {
 
         vm.warp(block.timestamp + 3600);
 
-        // Close short — funding should be zero since OI is balanced
+        // Close short: funding should be zero since OI is balanced
         uint128 closeExec = _shortClosePrice(DEFAULT_ORACLE_PRICE);
 
         uint256 bobBefore = usdc.balanceOf(bob);
@@ -2276,7 +2276,7 @@ contract TradingEngineTest is Test {
     function test_Liquidate_RevertWhenNotLiquidatable() public {
         uint32 tradeId = _openDefaultTrade(alice);
 
-        // Only 50% loss — below the 90% threshold
+        // Only 50% loss, below the 90% threshold
         uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 5000);
         mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
 
@@ -2379,7 +2379,7 @@ contract TradingEngineTest is Test {
     }
 
     function test_OpenTrade_AllowsNormalSpread() public {
-        // Default 5 bps spread at 10x = 0.05% instant loss, far below threshold — must succeed
+        // Default 5 bps spread at 10x = 0.05% instant loss, far below threshold, must succeed
         uint32 tradeId = _openDefaultTrade(alice);
         assertEq(tradingStorage.getTrade(tradeId).user, alice);
     }
@@ -2582,7 +2582,7 @@ contract TradingEngineTest is Test {
 
     function test_Liquidate_RevertOnOracleOutage() public {
         // A stale / high-deviation oracle makes getPrice revert; liquidation must revert too
-        // (no liquidating at an unverified price) — the accepted outage behavior.
+        // (no liquidating at an unverified price), the accepted outage behavior.
         uint32 tradeId = _openDefaultTrade(alice);
         uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 9200);
         mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);

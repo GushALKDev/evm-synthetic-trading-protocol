@@ -30,7 +30,7 @@ contract MockUSDC is ERC20 {
  * @author GushALKDev
  * @notice Invariants over the FULL wired protocol: properties that only exist once the Vault, the
  *         AssistantFund, the BondDepository and the SolvencyManager operate together.
- * @dev The per-contract invariant suites cannot see these — `SolvencyManager` is unit-tested against
+ * @dev The per-contract invariant suites cannot see these: `SolvencyManager` is unit-tested against
  *      a MockVault, and trading and bonding live in separate suites. Here a single sequence can
  *      interleave payouts, rescues, bonding, claims and skims against the real deployment.
  */
@@ -121,7 +121,7 @@ contract SolvencyIntegrationInvariantTest is StdInvariant, Test {
     /**
      * @notice The bonding escrow always covers every unclaimed vesting position
      * @dev Same property as the isolated bonding suite, but asserted while rescues, payouts and
-     *      skims are interleaved — the escrow must survive the whole system moving around it.
+     *      skims are interleaved; the escrow must survive the whole system moving around it.
      */
     function invariant_EscrowSolventUnderFullSystem() public view {
         assertGe(d.synth.balanceOf(address(d.bondDepository)), handler.outstandingSynth(), "escrow cannot cover unclaimed");
@@ -154,7 +154,7 @@ contract SolvencyIntegrationInvariantTest is StdInvariant, Test {
     /**
      * @notice The rescue path is always callable, including from total insolvency
      * @dev Total insolvency (shares outstanding, zero assets) is a state the protocol must survive,
-     *      not one it can prevent — a large enough payout run reaches it. What must never break is
+     *      not one it can prevent: a large enough payout run reaches it. What must never break is
      *      the ability to recapitalize: `deficitToTarget` must stay well-defined and `checkAndAct`
      *      must not revert, no matter how drained the Vault is. (A prior implementation divided by
      *      the CR here and panicked at exactly this point.)

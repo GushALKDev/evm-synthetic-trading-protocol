@@ -201,7 +201,7 @@ contract SpreadManagerTest is Test {
     function test_UpdateVolatility_FirstTimeSkipsBoundsCheck() public {
         // First update can set any value (no bounds check)
         vm.prank(keeper);
-        sm.updateVolatility(0, 50e16); // 50% — would fail bounds if current was non-zero
+        sm.updateVolatility(0, 50e16); // 50%, would fail bounds if current was non-zero
         assertEq(sm.getPairVolatility(0), 50e16);
     }
 

@@ -13,7 +13,7 @@ import {ERC20} from "solady/tokens/ERC20.sol";
  * @notice Stateful handler driving the full solvency system: LP flows, trader payouts draining the
  *         Vault, fee income, permissionless rescues, bonding and claims.
  * @dev Unlike the per-contract handlers, this one operates the REAL wired deployment, so a sequence
- *      can interleave a rescue with new deposits, further payouts and vesting claims — the ordering
+ *      can interleave a rescue with new deposits, further payouts and vesting claims; the ordering
  *      that unit tests never reach.
  */
 contract SolvencyHandler is CommonBase, StdCheats, StdUtils {

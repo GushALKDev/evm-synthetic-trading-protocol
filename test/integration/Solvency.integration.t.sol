@@ -237,7 +237,7 @@ contract SolvencyIntegrationTest is Test {
     /**
      * @dev Regression: a fully drained Vault (totalAssets == 0 with shares outstanding) makes CR == 0.
      *      The deficit used to be computed as `totalAssets * (WAD - cr) / cr`, which panicked (0x12)
-     *      on that exact state — the rescue was uncallable precisely when it was most needed.
+     *      on that exact state: the rescue was uncallable precisely when it was most needed.
      */
     function test_TotalInsolvency_RescueStillCallable() public {
         _drain(usdc.balanceOf(address(d.vault))); // drain everything
@@ -305,7 +305,7 @@ contract SolvencyIntegrationTest is Test {
 
     /// @dev Bonding a full round always restores the Vault to at least 100%
     function testFuzz_Bonding_AlwaysRestoresToTarget(uint256 _drainAmount) public {
-        // Lower bound puts CR at 94% — always under CRITICAL_CR (95%), so bonding always opens
+        // Lower bound puts CR at 94%, always under CRITICAL_CR (95%), so bonding always opens
         uint256 drainAmount = bound(_drainAmount, 60_000 * 10 ** 6, LP_DEPOSIT / 2);
         _drain(drainAmount);
 

@@ -376,7 +376,7 @@ contract TradingStorageTest is Test {
         _storeTrade(alice); // id 1
         _storeTrade(alice); // id 2
 
-        // Delete middle trade (id 1) — should swap with last (id 2) and pop
+        // Delete middle trade (id 1): should swap with last (id 2) and pop
         tradingStorage.deleteTrade(1);
         vm.stopPrank();
 
@@ -1101,7 +1101,7 @@ contract TradingStorageTest is Test {
         _storeTrade(bob);
         uint32 counter2 = tradingStorage.getTradeCounter();
 
-        // Delete a trade — counter should NOT decrease
+        // Delete a trade: counter should NOT decrease
         tradingStorage.deleteTrade(0);
         uint32 counter3 = tradingStorage.getTradeCounter();
 

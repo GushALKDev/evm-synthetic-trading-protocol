@@ -15,7 +15,7 @@ import {IOracle} from "./interfaces/IOracle.sol";
  * @author GushALKDev
  * @notice IOracle implementation: Pyth Network (primary) with Chainlink as deviation anchor
  * @dev Pyth is pull-based: callers submit signed priceData bytes, verified on-chain.
- *      Chainlink is ONLY used as a deviation anchor — if Pyth is stale, we REVERT (no fallback).
+ *      Chainlink is ONLY used as a deviation anchor: if Pyth is stale, we REVERT (no fallback).
  *      Validation pipeline: Feed active → Sequencer up → Pyth age → Non-zero → Confidence → Normalize → Chainlink staleness → Deviation
  *      Sequencer up: on L2s with a Chainlink sequencer uptime feed, prices are refused while the sequencer is
  *      down. For SEQUENCER_GRACE_PERIOD after it comes back, checkOpenAllowed reverts, so no new position opens

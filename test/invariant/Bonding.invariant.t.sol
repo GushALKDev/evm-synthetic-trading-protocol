@@ -30,7 +30,7 @@ contract MockUSDC is ERC20 {
 /**
  * @title BondingInvariantTest
  * @author GushALKDev
- * @notice Roadmap 12.3 — properties of the bonding / vesting accounting that must hold after any
+ * @notice Roadmap 12.3: properties of the bonding / vesting accounting that must hold after any
  *         sequence of rounds, purchases, claims and admin re-pricing.
  * @dev The critical property is solvency of the vesting escrow: $SYNTH is minted into the
  *      depository's custody at bond time, so it must always hold enough to pay every unclaimed
@@ -70,7 +70,7 @@ contract BondingInvariantTest is StdInvariant, Test {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Escrow solvency — the depository can always honour every unclaimed vesting position
+     * @notice Escrow solvency: the depository can always honour every unclaimed vesting position
      * @dev $SYNTH is minted into the depository at bond time and released as it vests. Its balance
      *      must therefore cover everything promised but not yet claimed; below that, a bonder's
      *      claim would revert on transfer and their USDC would have bought nothing.
@@ -81,7 +81,7 @@ contract BondingInvariantTest is StdInvariant, Test {
     }
 
     /**
-     * @notice Supply integrity — $SYNTH is only ever created by bonding
+     * @notice Supply integrity: $SYNTH is only ever created by bonding
      * @dev Total supply must equal everything the depository promised: minting is minter-gated and
      *      the only minter is the depository. A larger supply would mean an unaccounted mint path.
      */
@@ -90,7 +90,7 @@ contract BondingInvariantTest is StdInvariant, Test {
     }
 
     /**
-     * @notice Vesting monotonicity — nobody can claim more than they were promised
+     * @notice Vesting monotonicity: nobody can claim more than they were promised
      * @dev Guards the per-position accounting: claimedSynth must never exceed totalSynth, otherwise
      *      linear vesting would be paying out beyond the bond.
      */
