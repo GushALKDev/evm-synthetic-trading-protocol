@@ -37,8 +37,10 @@ contract LiquidityHandler is CommonBase, StdUtils {
     BondDepository public immutable BOND_DEPOSITORY;
     address public immutable OWNER;
 
-    uint16 internal constant PAIR_INDEX = 0;
-    uint128 public constant INITIAL_PRICE = 50_000 * 1e18;
+    uint256 public constant PAIRS = 3;
+    uint256 internal constant MAX_CONF_BPS = 200; // the real oracle rejects a confidence band above 2% of the price
+    /// @notice Oracle price of each pair when the handler was deployed; moves stay within 60% to 140% of it
+    uint128[PAIRS] public initialPrices;
     uint256 internal constant DEFICIT_CR = 1e18;
     uint256 internal constant CRITICAL_CR = 95e16;
 
@@ -100,6 +102,9 @@ contract LiquidityHandler is CommonBase, StdUtils {
         BOND_DEPOSITORY = _bondDepository;
         OWNER = _owner;
         actors = _actors;
+        for (uint256 i; i < PAIRS; ++i) {
+            initialPrices[i] = _oracle.peekPrice(i);
+        }
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -224,19 +229,22 @@ contract LiquidityHandler is CommonBase, StdUtils {
     }
 
     /**
-     * @notice Move the oracle price up or down by up to 5% per call, kept within 60% to 140% of the start
+     * @notice Move one pair's oracle price up or down by up to 5% per call, kept within 60% to 140% of its start,
+     *         and set its confidence band to 0% to 2% of the new price
      * @dev Steps up to 5% are larger than the 0.9% move that liquidates a 100x position, so some positions
-     *      gap through 100% loss and exercise the bad-debt paths.
+     *      gap through 100% loss and exercise the bad-debt paths. The 2% band cap is the real oracle's.
      */
-    function movePrice(uint256 _stepBps, bool _up) external countCall("movePrice") {
-        uint256 price = ORACLE.peekPrice(PAIR_INDEX);
+    function movePrice(uint256 _pairSeed, uint256 _stepBps, bool _up, uint256 _confBps) external countCall("movePrice") {
+        uint256 pair = bound(_pairSeed, 0, PAIRS - 1);
+        uint256 price = ORACLE.peekPrice(pair);
         uint256 step = (price * bound(_stepBps, 1, 500)) / 10_000;
         price = _up ? price + step : price - step;
-        uint256 lower = (uint256(INITIAL_PRICE) * 60) / 100;
-        uint256 upper = (uint256(INITIAL_PRICE) * 140) / 100;
+        uint256 lower = (uint256(initialPrices[pair]) * 60) / 100;
+        uint256 upper = (uint256(initialPrices[pair]) * 140) / 100;
         if (price < lower) price = lower;
         if (price > upper) price = upper;
-        ORACLE.setPrice(PAIR_INDEX, uint128(price));
+        ORACLE.setPrice(pair, uint128(price));
+        ORACLE.setConf(pair, uint128((price * bound(_confBps, 0, MAX_CONF_BPS)) / 10_000));
     }
 
     /**

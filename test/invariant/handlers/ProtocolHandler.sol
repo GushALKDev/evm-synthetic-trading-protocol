@@ -15,17 +15,22 @@ import {IMintableUSDC} from "./IMintableUSDC.sol";
 /**
  * @title ProtocolHandler
  * @author GushALKDev
- * @notice Trading side of the protocol invariant suite: opens, closes, liquidations, TP/SL execution and
- *         TP/SL updates, with an independent model of every settlement, and refreshes of the Vault's PnL
- *         snapshot checked against a brute-force valuation of every open position.
+ * @notice Trading side of the protocol invariant suite over PAIRS pairs: opens, closes, liquidations, TP/SL
+ *         execution and TP/SL updates, with an independent model of every settlement, and refreshes of the
+ *         Vault's PnL snapshot checked against a brute-force valuation of every open position.
  * @dev The model recomputes each settlement from the documented formulas (spread, PnL rounding, 9x cap on
- *      price PnL, funding after the cap, close fee, executor reward, liquidator reward) and the funding the
- *      engine reports for the position, then records the Vault's side of it in ghost variables. The suite
- *      compares those ghosts with the real balances, so a settlement that deviates from the model breaks an
- *      invariant. The trader and keeper payouts are also compared one by one (ghostMismatches).
- *      closeTrade, liquidate and executeLimit revert whenever they settle nothing (engine paused, no open
- *      position, not liquidatable, not triggered, or a winning close the Vault cannot pay), so in the forge
- *      metrics table calls - reverts is the number of settlements of each kind.
+ *      price PnL, funding after the cap, close fee, executor reward, liquidator reward at the conservative
+ *      price + conf for longs and price - conf for shorts) and the funding the engine reports for the position,
+ *      then records the Vault's side of it in ghost variables. The suite compares those ghosts with the real
+ *      balances, so a settlement that deviates from the model breaks an invariant. The trader and keeper
+ *      payouts are also compared one by one (ghostMismatches).
+ *      Target selection: liquidate picks a position the model sees as liquidatable, executeLimit one whose TP or
+ *      SL is triggered at the oracle price, closeTrade any open position. One call in RANDOM_PICK_ONE_IN picks
+ *      uniformly among open positions instead, to exercise the revert paths.
+ *      Keeper latency: liquidate only acts on a position KEEPER_LATENCY seconds after the handler first saw it
+ *      liquidatable (0 in the default suite). A positive latency lets positions pass 100% loss before liquidation.
+ *      closeTrade, liquidate and executeLimit revert with NotSettled whenever they settle nothing, so in the
+ *      forge metrics table calls - reverts is the number of settlements of each kind.
  */
 contract ProtocolHandler is CommonBase, StdUtils {
     TradingEngine public immutable ENGINE;
@@ -34,9 +39,10 @@ contract ProtocolHandler is CommonBase, StdUtils {
     MockOracle public immutable ORACLE;
     ERC20 public immutable USDC;
 
-    uint16 public constant PAIR_INDEX = 0;
-    uint256 public constant MAX_OI = 50_000_000 * 1e18;
+    uint256 public constant PAIRS = 3;
+    uint256 public constant MAX_OI = 50_000_000 * 1e18; // per pair, as configured in the suite
     address public constant KEEPER = address(uint160(uint256(keccak256("keeper"))));
+    uint256 public constant RANDOM_PICK_ONE_IN = 5; // 20% of settlement calls pick at random
 
     // Documented protocol parameters, restated so the model does not read them from the code under test
     uint256 internal constant SPREAD_BPS = 5; // MockSpreadManager(5)
@@ -45,6 +51,7 @@ contract ProtocolHandler is CommonBase, StdUtils {
     uint256 internal constant CLOSE_FEE_BPS = 8;
     uint256 internal constant VAULT_FEE_SHARE_BPS = 8000;
     uint256 internal constant EXEC_REWARD_BPS = 10;
+    uint256 internal constant LIQ_THRESHOLD_BPS = 9000;
     uint256 internal constant LIQ_REWARD_BPS = 1000;
     uint256 internal constant LIQ_MIN_REWARD_BPS = 50;
     uint256 internal constant MAX_PROFIT_MULTIPLE = 8; // payout cap 9x collateral = collateral + 8x profit
@@ -56,6 +63,11 @@ contract ProtocolHandler is CommonBase, StdUtils {
     bytes[] internal EMPTY_UPDATE;
     address[] public actors;
     uint256[] internal openTradeIds;
+
+    /// @notice Seconds a position must have been seen liquidatable before the handler liquidates it
+    uint256 public immutable KEEPER_LATENCY;
+    /// @notice First time the handler saw each position liquidatable (0 = not seen)
+    mapping(uint256 => uint256) public liquidatableSince;
 
     struct Settlement {
         uint256 traderGets;
@@ -79,8 +91,8 @@ contract ProtocolHandler is CommonBase, StdUtils {
     uint256 public ghostMismatches;
 
     uint256 public ghostOpenCollateral;
-    uint256 public ghostOpenLongSize;
-    uint256 public ghostOpenShortSize;
+    mapping(uint256 => uint256) public ghostOpenLongSize;
+    mapping(uint256 => uint256) public ghostOpenShortSize;
 
     uint256 public ghostVaultFees; // Vault share of open and close fees
     uint256 public ghostTreasuryFees; // treasury share of open and close fees
@@ -97,6 +109,8 @@ contract ProtocolHandler is CommonBase, StdUtils {
     uint256 public ghostSnapshotMismatches;
     /// @notice Refreshes where the brute-force liability exceeded max(0, snapshot) by more than the excess loss
     uint256 public ghostSnapshotNotConservative;
+    /// @notice Refreshes that found at least one position past 100% loss (excess loss E > 0)
+    uint256 public ghostExcessStates;
     /// @notice Largest excess loss (losses beyond each position's collateral, 18 decimals) seen at a refresh
     uint256 public ghostMaxExcessLoss;
 
@@ -111,7 +125,8 @@ contract ProtocolHandler is CommonBase, StdUtils {
         _;
     }
 
-    constructor(TradingEngine _engine, TradingStorage _storage, Vault _vault, MockOracle _oracle, ERC20 _usdc) {
+    constructor(TradingEngine _engine, TradingStorage _storage, Vault _vault, MockOracle _oracle, ERC20 _usdc, uint256 _keeperLatency) {
+        KEEPER_LATENCY = _keeperLatency;
         ENGINE = _engine;
         TRADING_STORAGE = _storage;
         VAULT = _vault;
@@ -128,6 +143,7 @@ contract ProtocolHandler is CommonBase, StdUtils {
 
     struct OpenParams {
         address trader;
+        uint16 pair;
         uint64 collateral;
         uint16 leverage;
         uint256 fee;
@@ -137,42 +153,43 @@ contract ProtocolHandler is CommonBase, StdUtils {
         uint128 sl;
     }
 
-    /// @notice A trader opens a position, with a TP and an SL when the seeds ask for one
-    function openTrade(uint256 _actorSeed, uint256 _collateral, uint256 _leverage, bool _isLong, uint256 _tpSeed, uint256 _slSeed)
-        external
+    /// @notice A trader opens a position on one of the pairs, with a TP and an SL when the seeds ask for one
+    function openTrade(uint256 _actorSeed, uint256 _pairSeed, uint256 _collateral, uint256 _leverage, bool _isLong, uint256 _tpSeed, uint256 _slSeed)
+        public
         countCall("openTrade")
     {
         if (ENGINE.paused()) return;
-        OpenParams memory p = _openParams(_actorSeed, _collateral, _leverage, _isLong, _tpSeed, _slSeed);
-        if (TRADING_STORAGE.getOpenInterest(PAIR_INDEX) + p.sizeWad > MAX_OI) return;
+        OpenParams memory p = _openParams(_actorSeed, _pairSeed, _collateral, _leverage, _isLong, _tpSeed, _slSeed);
+        if (TRADING_STORAGE.getOpenInterest(p.pair) + p.sizeWad > MAX_OI) return;
 
         IMintableUSDC(address(USDC)).mint(p.trader, p.collateral);
         vm.prank(p.trader);
         USDC.approve(address(ENGINE), p.collateral);
         vm.prank(p.trader);
-        uint32 tradeId = ENGINE.openTrade(PAIR_INDEX, _isLong, p.collateral, p.leverage, p.exec, 1, p.tp, p.sl, EMPTY_UPDATE);
+        uint32 tradeId = ENGINE.openTrade(p.pair, _isLong, p.collateral, p.leverage, p.exec, 1, p.tp, p.sl, EMPTY_UPDATE);
 
         uint256 vaultFee = (p.fee * VAULT_FEE_SHARE_BPS) / BPS;
         ghostVaultFees += vaultFee;
         ghostTreasuryFees += p.fee - vaultFee;
         ghostOpenCollateral += p.collateral - p.fee;
-        if (_isLong) ghostOpenLongSize += p.sizeWad;
-        else ghostOpenShortSize += p.sizeWad;
+        if (_isLong) ghostOpenLongSize[p.pair] += p.sizeWad;
+        else ghostOpenShortSize[p.pair] += p.sizeWad;
         openTradeIds.push(tradeId);
         ghostOpened++;
     }
 
-    function _openParams(uint256 _actorSeed, uint256 _collateral, uint256 _leverage, bool _isLong, uint256 _tpSeed, uint256 _slSeed)
+    function _openParams(uint256 _actorSeed, uint256 _pairSeed, uint256 _collateral, uint256 _leverage, bool _isLong, uint256 _tpSeed, uint256 _slSeed)
         internal
         view
         returns (OpenParams memory p)
     {
         p.trader = actors[bound(_actorSeed, 0, actors.length - 1)];
+        p.pair = uint16(bound(_pairSeed, 0, PAIRS - 1));
         p.collateral = uint64(bound(_collateral, 10 * 10 ** 6, 5_000 * 10 ** 6));
         p.leverage = uint16(bound(_leverage, 1, 100));
         p.fee = (uint256(p.collateral) * p.leverage * OPEN_FEE_BPS) / BPS;
         p.sizeWad = (p.collateral - p.fee) * p.leverage * 1e12;
-        uint128 oracle = ORACLE.peekPrice(PAIR_INDEX);
+        uint128 oracle = ORACLE.peekPrice(p.pair);
         p.exec = uint128((uint256(oracle) * (_isLong ? BPS + SPREAD_BPS : BPS - SPREAD_BPS)) / BPS);
         p.tp = _limitPrice(_isLong, true, oracle, p.exec, _tpSeed);
         p.sl = _limitPrice(_isLong, false, oracle, p.exec, _slSeed);
@@ -181,10 +198,10 @@ contract ProtocolHandler is CommonBase, StdUtils {
     /// @notice The owner of an open position closes it at the oracle price
     function closeTrade(uint256 _tradeSeed) external countCall("closeTrade") {
         if (ENGINE.paused()) revert NotSettled();
-        (uint256 tradeId, TradingStorage.Trade memory trade) = _pick(_tradeSeed);
+        (uint256 tradeId, TradingStorage.Trade memory trade) = _pickRandom(_tradeSeed);
         if (trade.user == address(0)) revert NotSettled();
 
-        uint128 exec = _closeExec(ORACLE.peekPrice(PAIR_INDEX), trade.isLong);
+        uint128 exec = _closeExec(ORACLE.peekPrice(trade.pairIndex), trade.isLong);
         uint256 traderBefore = USDC.balanceOf(trade.user);
 
         _entryFundingIndex = TRADING_STORAGE.getTradeFundingIndex(tradeId);
@@ -194,13 +211,16 @@ contract ProtocolHandler is CommonBase, StdUtils {
         _record(tradeId, trade, exec, CLOSE, USDC.balanceOf(trade.user) - traderBefore, 0);
     }
 
-    /// @notice A keeper liquidates a position; reverts (and is discarded) when it is not liquidatable
+    /**
+     * @notice A keeper liquidates a position it has seen liquidatable for KEEPER_LATENCY seconds
+     * @dev Scans open positions, records when each is first seen liquidatable, and picks among those whose
+     *      latency has elapsed (or at random, one call in RANDOM_PICK_ONE_IN, still subject to the latency).
+     */
     function liquidate(uint256 _tradeSeed) external countCall("liquidate") {
-        (uint256 tradeId, TradingStorage.Trade memory trade) = _pick(_tradeSeed);
+        (uint256 tradeId, TradingStorage.Trade memory trade) = _pickLiquidation(_tradeSeed);
         if (trade.user == address(0)) revert NotSettled();
 
-        // MockOracle conf is 0, so the conservative liquidation price is the oracle price
-        uint128 exec = _closeExec(ORACLE.peekPrice(PAIR_INDEX), trade.isLong);
+        uint128 exec = _closeExec(_liqPrice(trade.pairIndex, trade.isLong), trade.isLong);
         uint256 keeperBefore = USDC.balanceOf(KEEPER);
         uint256 traderBefore = USDC.balanceOf(trade.user);
 
@@ -214,10 +234,10 @@ contract ProtocolHandler is CommonBase, StdUtils {
     /// @notice A keeper executes a triggered TP or SL; reverts (and is discarded) when nothing is triggered
     function executeLimit(uint256 _tradeSeed) external countCall("executeLimit") {
         if (ENGINE.paused()) revert NotSettled();
-        (uint256 tradeId, TradingStorage.Trade memory trade) = _pick(_tradeSeed);
+        (uint256 tradeId, TradingStorage.Trade memory trade) = _pickTriggered(_tradeSeed);
         if (trade.user == address(0)) revert NotSettled();
 
-        uint128 exec = _closeExec(ORACLE.peekPrice(PAIR_INDEX), trade.isLong);
+        uint128 exec = _closeExec(ORACLE.peekPrice(trade.pairIndex), trade.isLong);
         uint256 keeperBefore = USDC.balanceOf(KEEPER);
         uint256 traderBefore = USDC.balanceOf(trade.user);
 
@@ -230,9 +250,9 @@ contract ProtocolHandler is CommonBase, StdUtils {
     /// @notice The owner moves the TP of an open position (seed 0 clears it)
     function updateTp(uint256 _tradeSeed, uint256 _tpSeed) external countCall("updateTp") {
         if (ENGINE.paused()) return;
-        (uint256 tradeId, TradingStorage.Trade memory trade) = _pick(_tradeSeed);
+        (uint256 tradeId, TradingStorage.Trade memory trade) = _pickRandom(_tradeSeed);
         if (trade.user == address(0)) return;
-        uint128 tp = _limitPrice(trade.isLong, true, ORACLE.peekPrice(PAIR_INDEX), trade.openPrice, _tpSeed);
+        uint128 tp = _limitPrice(trade.isLong, true, ORACLE.peekPrice(trade.pairIndex), trade.openPrice, _tpSeed);
         vm.prank(trade.user);
         ENGINE.updateTp(tradeId, tp, EMPTY_UPDATE);
     }
@@ -240,44 +260,49 @@ contract ProtocolHandler is CommonBase, StdUtils {
     /// @notice The owner moves the SL of an open position (seed 0 clears it)
     function updateSl(uint256 _tradeSeed, uint256 _slSeed) external countCall("updateSl") {
         if (ENGINE.paused()) return;
-        (uint256 tradeId, TradingStorage.Trade memory trade) = _pick(_tradeSeed);
+        (uint256 tradeId, TradingStorage.Trade memory trade) = _pickRandom(_tradeSeed);
         if (trade.user == address(0)) return;
-        uint128 sl = _limitPrice(trade.isLong, false, ORACLE.peekPrice(PAIR_INDEX), trade.openPrice, _slSeed);
+        uint128 sl = _limitPrice(trade.isLong, false, ORACLE.peekPrice(trade.pairIndex), trade.openPrice, _slSeed);
         vm.prank(trade.user);
         ENGINE.updateSl(tradeId, sl, EMPTY_UPDATE);
     }
 
     /**
      * @notice Anyone refreshes the Vault's PnL snapshot; the result is checked against the open positions
-     * @dev Two checks at the oracle price (MockOracle conf is 0), 18 decimals:
-     *      1. snapshot == toUsdcUp(pairPnl(totals built position by position)), exactly;
-     *      2. conservativeness: L <= max(0, snapshot) + E, where L is the brute-force liability, the positive
-     *         part of the sum over positions of pnl_i capped at 8x collateral and floored at minus collateral,
-     *         and E the excess loss, the sum of max(0, -pnl_i - collateral_i) over positions past 100% loss that
-     *         are not liquidated. The side clamp lets those positions offset winners; E bounds that. pnl_i is
-     *         rounded against the trader, as the engine settles it. Tolerance 0.
+     * @dev Two checks, 18 decimals:
+     *      1. snapshot == toUsdcUp(sum over pairs of pairPnl(price, conf, totals built position by position)),
+     *         exactly;
+     *      2. conservativeness: L <= max(0, snapshot) + E, where L is the brute-force liability at the oracle
+     *         price, the positive part of the sum over positions of pnl_i capped at 8x collateral and floored at
+     *         minus collateral, and E the excess loss, the sum of max(0, -pnl_i - collateral_i) over positions
+     *         past 100% loss that are not liquidated. The side clamp lets those positions offset winners; E bounds
+     *         that. pnl_i is rounded against the trader, as the engine settles it. Tolerance 0.
      */
     function refreshSnapshot() external countCall("refreshSnapshot") {
         VAULT.refreshPnlSnapshot(EMPTY_UPDATE);
         ghostRefreshes++;
         (int128 netPnl,,) = VAULT.pnlSnapshot();
-        uint128 price = ORACLE.peekPrice(PAIR_INDEX);
-        if (int256(netPnl) != OpenPnlLib.toUsdcUp(OpenPnlLib.pairPnl(price, 0, bruteForceTotals()))) ghostSnapshotMismatches++;
+        int256 netWad;
+        for (uint256 pair; pair < PAIRS; ++pair) {
+            netWad += OpenPnlLib.pairPnl(ORACLE.peekPrice(pair), ORACLE.peekConf(pair), bruteForceTotals(pair));
+        }
+        if (int256(netPnl) != OpenPnlLib.toUsdcUp(netWad)) ghostSnapshotMismatches++;
 
-        (uint256 liability, uint256 excess) = _bruteForceLiability(price);
+        (uint256 liability, uint256 excess) = _bruteForceLiability();
         uint256 snapshotLiability = netPnl > 0 ? uint256(int256(netPnl)) * 1e12 : 0;
         if (liability > snapshotLiability + excess) ghostSnapshotNotConservative++;
+        if (excess > 0) ghostExcessStates++;
         if (excess > ghostMaxExcessLoss) ghostMaxExcessLoss = excess;
     }
 
-    /// @dev Positive part of the sum of per-position PnL at _price, capped at 8x collateral and floored at -collateral
-    function _bruteForceLiability(uint128 _price) internal view returns (uint256 liability, uint256 excess) {
+    /// @dev Positive part of the sum of per-position PnL at the oracle price, capped at 8x collateral and floored at -collateral
+    function _bruteForceLiability() internal view returns (uint256 liability, uint256 excess) {
         int256 sum;
         uint256 len = openTradeIds.length;
         for (uint256 i; i < len; ++i) {
             TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(openTradeIds[i]);
             int256 collateral = int256(uint256(trade.collateral) * 1e12);
-            int256 pnl = _pnl(uint256(trade.collateral) * trade.leverage * 1e12, trade.openPrice, _price, trade.isLong);
+            int256 pnl = _pnl(uint256(trade.collateral) * trade.leverage * 1e12, trade.openPrice, ORACLE.peekPrice(trade.pairIndex), trade.isLong);
             if (pnl < -collateral) {
                 excess += uint256(-collateral - pnl);
                 pnl = -collateral;
@@ -301,7 +326,8 @@ contract ProtocolHandler is CommonBase, StdUtils {
     function _record(uint256 _tradeId, TradingStorage.Trade memory _trade, uint128 _exec, uint8 _kind, uint256 _traderGot, uint256 _keeperGot) internal {
         uint256 size = uint256(_trade.collateral) * _trade.leverage;
         int256 pnl = _pnl(size, _trade.openPrice, _exec, _trade.isLong);
-        int256 funding = FundingLib.calculateFundingOwed(size * 1e12, TRADING_STORAGE.getCumulativeFundingIndex(PAIR_INDEX, _trade.isLong), _entryFundingIndex);
+        int256 funding =
+            FundingLib.calculateFundingOwed(size * 1e12, TRADING_STORAGE.getCumulativeFundingIndex(_trade.pairIndex, _trade.isLong), _entryFundingIndex);
         Settlement memory s = _model(_trade.collateral, _trade.leverage, pnl, funding, _kind);
 
         if (s.traderGets != _traderGot || s.keeperGets != _keeperGot) ghostMismatches++;
@@ -318,8 +344,8 @@ contract ProtocolHandler is CommonBase, StdUtils {
         ghostFundingBadDebt += s.unpaid;
 
         ghostOpenCollateral -= _trade.collateral;
-        if (_trade.isLong) ghostOpenLongSize -= size * 1e12;
-        else ghostOpenShortSize -= size * 1e12;
+        if (_trade.isLong) ghostOpenLongSize[_trade.pairIndex] -= size * 1e12;
+        else ghostOpenShortSize[_trade.pairIndex] -= size * 1e12;
         _removeTradeId(_tradeId);
         ghostSettled++;
     }
@@ -389,6 +415,14 @@ contract ProtocolHandler is CommonBase, StdUtils {
         return uint128((uint256(_oracle) * (_isLong ? BPS - SPREAD_BPS : BPS + SPREAD_BPS)) / BPS);
     }
 
+    /// @dev Liquidation price before the spread: the trader-favourable band edge, price + conf (long), price - conf (short)
+    function _liqPrice(uint256 _pair, bool _isLong) internal view returns (uint128) {
+        uint128 price = ORACLE.peekPrice(_pair);
+        uint128 conf = ORACLE.peekConf(_pair);
+        if (_isLong) return price + conf;
+        return conf >= price ? 0 : price - conf;
+    }
+
     /**
      * @dev A valid TP or SL 0.1% to 20% away from both the oracle price and the reference (open) price,
      *      on the side the engine and storage accept; seed 0 returns 0 (not set).
@@ -402,17 +436,82 @@ contract ProtocolHandler is CommonBase, StdUtils {
     }
 
     /*//////////////////////////////////////////////////////////////
-                               HELPERS
+                           TARGET SELECTION
     //////////////////////////////////////////////////////////////*/
 
-    function _pick(uint256 _seed) internal view returns (uint256 tradeId, TradingStorage.Trade memory trade) {
+    /// @dev Whether liquidate would accept the position now, by the model (funding at the stored side index)
+    function _isLiquidatable(uint256 _tradeId, TradingStorage.Trade memory _trade) internal view returns (bool) {
+        uint256 size = uint256(_trade.collateral) * _trade.leverage;
+        int256 pnl = _pnl(size, _trade.openPrice, _closeExec(_liqPrice(_trade.pairIndex, _trade.isLong), _trade.isLong), _trade.isLong);
+        int256 funding = FundingLib.calculateFundingOwed(
+            size * 1e12, TRADING_STORAGE.getCumulativeFundingIndex(_trade.pairIndex, _trade.isLong), TRADING_STORAGE.getTradeFundingIndex(_tradeId)
+        );
+        int256 adjusted = pnl - funding;
+        uint256 loss = adjusted < 0 ? uint256(-adjusted) : 0;
+        return loss >= (uint256(_trade.collateral) * LIQ_THRESHOLD_BPS) / BPS;
+    }
+
+    /// @dev Same trigger rule as TradingEngine._isLimitTriggered at the oracle price
+    function _isTriggered(TradingStorage.Trade memory _trade) internal view returns (bool) {
+        uint128 price = ORACLE.peekPrice(_trade.pairIndex);
+        if (_trade.tp != 0 && (_trade.isLong ? price >= _trade.tp : price <= _trade.tp)) return true;
+        return _trade.sl != 0 && (_trade.isLong ? price <= _trade.sl : price >= _trade.sl);
+    }
+
+    function _pickRandom(uint256 _seed) internal view returns (uint256 tradeId, TradingStorage.Trade memory trade) {
         uint256 len = openTradeIds.length;
         if (len == 0) return (0, trade);
         tradeId = openTradeIds[bound(_seed, 0, len - 1)];
         trade = TRADING_STORAGE.getTrade(tradeId);
     }
 
+    /**
+     * @dev Record when positions become liquidatable, then pick one whose keeper latency has elapsed. A random
+     *      pick (one call in RANDOM_PICK_ONE_IN) may land on a solvent position and revert in the engine; one
+     *      still inside its latency is skipped.
+     */
+    function _pickLiquidation(uint256 _seed) internal returns (uint256 tradeId, TradingStorage.Trade memory trade) {
+        uint256 len = openTradeIds.length;
+        uint256[] memory ready = new uint256[](len);
+        uint256 count;
+        for (uint256 i; i < len; ++i) {
+            uint256 id = openTradeIds[i];
+            if (!_isLiquidatable(id, TRADING_STORAGE.getTrade(id))) continue;
+            if (liquidatableSince[id] == 0) liquidatableSince[id] = block.timestamp;
+            if (block.timestamp - liquidatableSince[id] >= KEEPER_LATENCY) ready[count++] = id;
+        }
+        if (_seed % RANDOM_PICK_ONE_IN == 0) {
+            (tradeId, trade) = _pickRandom(_seed / RANDOM_PICK_ONE_IN);
+            uint256 since = liquidatableSince[tradeId];
+            if (since != 0 && block.timestamp - since < KEEPER_LATENCY) {
+                TradingStorage.Trade memory none;
+                return (0, none);
+            }
+            return (tradeId, trade);
+        }
+        if (count == 0) return (0, trade);
+        tradeId = ready[bound(_seed, 0, count - 1)];
+        trade = TRADING_STORAGE.getTrade(tradeId);
+    }
+
+    /// @dev Pick a position whose TP or SL is triggered, or any open position one call in RANDOM_PICK_ONE_IN
+    function _pickTriggered(uint256 _seed) internal view returns (uint256 tradeId, TradingStorage.Trade memory trade) {
+        if (_seed % RANDOM_PICK_ONE_IN == 0) {
+            return _pickRandom(_seed / RANDOM_PICK_ONE_IN);
+        }
+        uint256 len = openTradeIds.length;
+        uint256[] memory ready = new uint256[](len);
+        uint256 count;
+        for (uint256 i; i < len; ++i) {
+            if (_isTriggered(TRADING_STORAGE.getTrade(openTradeIds[i]))) ready[count++] = openTradeIds[i];
+        }
+        if (count == 0) return (0, trade);
+        tradeId = ready[bound(_seed, 0, count - 1)];
+        trade = TRADING_STORAGE.getTrade(tradeId);
+    }
+
     function _removeTradeId(uint256 _tradeId) internal {
+        delete liquidatableSince[_tradeId];
         uint256 len = openTradeIds.length;
         for (uint256 i; i < len; ++i) {
             if (openTradeIds[i] == _tradeId) {
@@ -431,11 +530,12 @@ contract ProtocolHandler is CommonBase, StdUtils {
         return openTradeIds.length;
     }
 
-    /// @notice Open totals of the pair rebuilt position by position (sizes, collateral, quantities per side)
-    function bruteForceTotals() public view returns (OpenPnlLib.PairTotals memory t) {
+    /// @notice Open totals of a pair rebuilt position by position (sizes, collateral, quantities per side)
+    function bruteForceTotals(uint256 _pair) public view returns (OpenPnlLib.PairTotals memory t) {
         uint256 len = openTradeIds.length;
         for (uint256 i; i < len; ++i) {
             TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(openTradeIds[i]);
+            if (trade.pairIndex != _pair) continue;
             uint256 sizeWad = uint256(trade.collateral) * trade.leverage * 1e12;
             uint256 q = OpenPnlLib.quantity(sizeWad, trade.openPrice, trade.isLong);
             if (trade.isLong) {
@@ -457,7 +557,7 @@ contract ProtocolHandler is CommonBase, StdUtils {
             TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(openTradeIds[i]);
             uint256 sizeWad = uint256(trade.collateral) * trade.leverage * 1e12;
             accrued += FundingLib.calculateFundingOwed(
-                sizeWad, TRADING_STORAGE.getCumulativeFundingIndex(PAIR_INDEX, trade.isLong), TRADING_STORAGE.getTradeFundingIndex(openTradeIds[i])
+                sizeWad, TRADING_STORAGE.getCumulativeFundingIndex(trade.pairIndex, trade.isLong), TRADING_STORAGE.getTradeFundingIndex(openTradeIds[i])
             );
         }
     }

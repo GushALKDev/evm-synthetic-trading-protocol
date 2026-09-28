@@ -35,6 +35,11 @@ contract MockOracle is IOracle {
         return _prices[pairIndex];
     }
 
+    /// @notice Read the preset confidence band (used by test handlers)
+    function peekConf(uint256 pairIndex) external view returns (uint128) {
+        return _confs[pairIndex];
+    }
+
     function setFee(uint256 _fee) external {
         fee = _fee;
     }

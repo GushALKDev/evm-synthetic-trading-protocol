@@ -40,10 +40,11 @@ contract MockUSDC is ERC20 {
  * @author GushALKDev
  * @notice Stateful invariants over the whole protocol with MockOracle and MockSpreadManager: trading,
  *         LP deposits and withdrawals, the AssistantFund as treasury, the SolvencyManager and bonding.
- * @dev Two handlers drive the system: ProtocolHandler (trading, with a settlement model, and PnL snapshot
- *      refreshes checked against a brute-force valuation) and LiquidityHandler (LP flows with and without a
- *      snapshot refresh, time, price moves in both directions, pause, solvency actions). The Vault starts with
- *      1,000,000 USDC from an LP that never withdraws.
+ * @dev Two handlers drive the system: ProtocolHandler (trading on three pairs, with a settlement model, target
+ *      selection and PnL snapshot refreshes checked against a brute-force valuation) and LiquidityHandler (LP
+ *      flows with and without a snapshot refresh, time, price moves in both directions with a confidence band of
+ *      0% to 2%, pause, solvency actions). The Vault starts with 1,000,000 USDC from an LP that never withdraws.
+ *      ProtocolKeeperLatencyInvariantTest runs the same invariants with a one-day keeper latency.
  */
 contract ProtocolInvariantTest is StdInvariant, Test {
     TradingEngine engine;
@@ -68,7 +69,11 @@ contract ProtocolInvariantTest is StdInvariant, Test {
 
         usdc = new MockUSDC();
         oracle = new MockOracle();
-        oracle.setPrice(0, 50_000 * 1e18);
+        uint128[3] memory prices = [uint128(50_000 * 1e18), uint128(3_000 * 1e18), uint128(150 * 1e18)];
+        for (uint256 i; i < prices.length; ++i) {
+            oracle.setPrice(i, prices[i]);
+            oracle.setConf(i, prices[i] / 200); // 0.5%, inside the real oracle's 2% cap
+        }
 
         vm.startPrank(owner);
         tradingStorage = new TradingStorage(address(usdc), owner);
@@ -87,6 +92,8 @@ contract ProtocolInvariantTest is StdInvariant, Test {
         assistantFund.setSolvencyManager(address(solvencyManager));
         bondDepository.setSolvencyManager(address(solvencyManager));
         tradingStorage.addPair("BTC/USD", 100, 50_000_000 * 1e18);
+        tradingStorage.addPair("ETH/USD", 100, 50_000_000 * 1e18);
+        tradingStorage.addPair("SOL/USD", 100, 50_000_000 * 1e18);
         vm.stopPrank();
 
         usdc.mint(lp, SEED);
@@ -95,7 +102,7 @@ contract ProtocolInvariantTest is StdInvariant, Test {
         vault.deposit(SEED, lp);
         vm.stopPrank();
 
-        handler = new ProtocolHandler(engine, tradingStorage, vault, oracle, usdc);
+        handler = new ProtocolHandler(engine, tradingStorage, vault, oracle, usdc, _keeperLatency());
         address[] memory actors = new address[](handler.actorsLength());
         for (uint256 i; i < actors.length; ++i) {
             actors[i] = handler.actors(i);
@@ -104,7 +111,16 @@ contract ProtocolInvariantTest is StdInvariant, Test {
 
         targetContract(address(handler));
         targetContract(address(liquidity));
+        _seedPositions();
     }
+
+    /// @dev Keeper latency of the handler, in seconds; 0 here (liquidate as soon as a position qualifies)
+    function _keeperLatency() internal pure virtual returns (uint256) {
+        return 0;
+    }
+
+    /// @dev Positions opened before the campaign starts; none here
+    function _seedPositions() internal virtual {}
 
     /*//////////////////////////////////////////////////////////////
                            VAULT ACCOUNTING
@@ -161,11 +177,11 @@ contract ProtocolInvariantTest is StdInvariant, Test {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Funding credited to receivers never exceeds funding charged to payers (single pair)
+     * @notice Funding credited to receivers never exceeds funding charged to payers, summed over the pairs
      * @dev S = sum of fundingOwed over settled positions + fundingOwed accrued by open positions at the stored
-     *      side indexes (payer positive, receiver negative). Zero sum up to rounding: 0 <= S <= N, where N is
-     *      the number of positions counted, because each amount rounds by less than one unit in the protocol's
-     *      favour and index-level rounding stays far below one unit.
+     *      side indexes (payer positive, receiver negative). Zero sum up to rounding per pair, so over all
+     *      pairs: 0 <= S <= N, where N is the number of positions counted, because each amount rounds by less
+     *      than one unit in the protocol's favour and index-level rounding stays far below one unit.
      */
     function invariant_FundingCreditsNeverExceedCharges() public view {
         int256 total = handler.ghostFundingSettled() + handler.openAccruedFunding();
@@ -196,15 +212,17 @@ contract ProtocolInvariantTest is StdInvariant, Test {
     }
 
     /**
-     * @notice Open interest equals the open positions on each side, and long + short stays within maxOI
+     * @notice On every pair, open interest equals the open positions on each side, and long + short stays within maxOI
      * @dev TradingStorage.increaseOpenInterest checks the cap against long + short OI of the pair.
      */
     function invariant_OpenInterestMatchesPositionsAndCap() public view {
-        uint256 longOI = tradingStorage.getOpenInterestLong(0);
-        uint256 shortOI = tradingStorage.getOpenInterestShort(0);
-        assertEq(longOI, handler.ghostOpenLongSize(), "long OI differs from open longs");
-        assertEq(shortOI, handler.ghostOpenShortSize(), "short OI differs from open shorts");
-        assertLe(longOI + shortOI, tradingStorage.getPair(0).maxOI, "long + short OI above maxOI");
+        for (uint256 pair; pair < handler.PAIRS(); ++pair) {
+            uint256 longOI = tradingStorage.getOpenInterestLong(pair);
+            uint256 shortOI = tradingStorage.getOpenInterestShort(pair);
+            assertEq(longOI, handler.ghostOpenLongSize(pair), "long OI differs from open longs");
+            assertEq(shortOI, handler.ghostOpenShortSize(pair), "short OI differs from open shorts");
+            assertLe(longOI + shortOI, tradingStorage.getPair(pair).maxOI, "long + short OI above maxOI");
+        }
     }
 
     /// @notice Shares held by the Vault equal the shares of all pending withdrawal requests
@@ -234,19 +252,20 @@ contract ProtocolInvariantTest is StdInvariant, Test {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice The open position aggregates equal the open positions rebuilt one by one, per side, exactly
+     * @notice The open position aggregates equal the open positions rebuilt one by one, per pair and side, exactly
      * @dev Sizes, collateral and quantities (quantity rounded up for longs, down for shorts per position).
-     *      The suite has one pair.
      */
     function invariant_OpenTotalsMatchPositions() public view {
-        OpenPnlLib.PairTotals memory agg = tradingStorage.getPairOpenTotals(0);
-        OpenPnlLib.PairTotals memory brute = handler.bruteForceTotals();
-        assertEq(agg.longSize, brute.longSize, "long size");
-        assertEq(agg.longCollateral, brute.longCollateral, "long collateral");
-        assertEq(agg.longQuantity, brute.longQuantity, "long quantity");
-        assertEq(agg.shortSize, brute.shortSize, "short size");
-        assertEq(agg.shortCollateral, brute.shortCollateral, "short collateral");
-        assertEq(agg.shortQuantity, brute.shortQuantity, "short quantity");
+        for (uint256 pair; pair < handler.PAIRS(); ++pair) {
+            OpenPnlLib.PairTotals memory agg = tradingStorage.getPairOpenTotals(pair);
+            OpenPnlLib.PairTotals memory brute = handler.bruteForceTotals(pair);
+            assertEq(agg.longSize, brute.longSize, "long size");
+            assertEq(agg.longCollateral, brute.longCollateral, "long collateral");
+            assertEq(agg.longQuantity, brute.longQuantity, "long quantity");
+            assertEq(agg.shortSize, brute.shortSize, "short size");
+            assertEq(agg.shortCollateral, brute.shortCollateral, "short collateral");
+            assertEq(agg.shortQuantity, brute.shortQuantity, "short quantity");
+        }
         (uint32 openTrades,) = tradingStorage.getPositionState();
         assertEq(openTrades, handler.openTradeCount(), "open trade count");
     }
@@ -305,7 +324,7 @@ contract ProtocolInvariantTest is StdInvariant, Test {
         console.log("opened / settled / liquidated:", handler.ghostOpened(), handler.ghostSettled(), handler.ghostLiquidated());
         console.log("open positions left:", handler.openTradeCount());
         console.log("funding bad debt (USDC units):", handler.ghostFundingBadDebt());
-        console.log("refreshes / max excess loss (18 dec):", handler.ghostRefreshes(), handler.ghostMaxExcessLoss());
+        console.log("refreshes / refreshes with E > 0 / max E (18 dec):", handler.ghostRefreshes(), handler.ghostExcessStates(), handler.ghostMaxExcessLoss());
         console.log("deposits / withdrawals executed:", liquidity.ghostDepositCount(), liquidity.ghostWithdrawalCount());
     }
 }
