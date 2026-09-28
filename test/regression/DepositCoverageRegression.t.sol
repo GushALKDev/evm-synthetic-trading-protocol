@@ -68,18 +68,21 @@ contract DepositCoverageRegressionTest is Test {
 
     /**
      * @notice A deposit at a 90% ratio reverts, so the later injection goes to the LPs who carried the loss
-     * @dev Before the change the late LP bought shares at 0.9 and the injection lifted them to 1.0 per share.
+     * @dev The deposit is a low-level call so the test runs to the end before the change: there the late LP
+     *      bought shares at 0.9 and the injection lifted them above what it paid, which the first assertion
+     *      reports.
      */
     function test_Regression_DepositRevertsBelowFullCoverage_ThenInjectionRestoresPar() public {
         assertEq(d.vault.collateralizationRatio(), 0.9e18);
 
         vm.prank(late);
-        vm.expectPartialRevert(COVERAGE_BELOW_PAR);
-        d.vault.deposit(LP_DEPOSIT, late);
-
+        (bool deposited, bytes memory revertData) = address(d.vault).call(abi.encodeCall(d.vault.deposit, (LP_DEPOSIT, late)));
         d.solvencyManager.checkAndAct();
+
+        assertLe(d.vault.convertToAssets(d.vault.balanceOf(late)), LP_DEPOSIT, "late LP captured part of the injection");
+        assertFalse(deposited, "deposit below 100% did not revert");
+        assertEq(bytes4(revertData), COVERAGE_BELOW_PAR, "wrong revert");
         assertEq(d.vault.collateralizationRatio(), 1e18, "injection did not restore 100%");
-        assertEq(d.vault.balanceOf(late), 0, "late LP holds shares bought below par");
         assertEq(d.vault.convertToAssets(d.vault.balanceOf(lp)), LP_DEPOSIT, "injection not credited to the original LP");
     }
 
