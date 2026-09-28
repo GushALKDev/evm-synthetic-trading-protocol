@@ -106,7 +106,7 @@ contract SpreadManagerTest is Test {
         assertEq(spread, 11);
     }
 
-    function test_GetSpreadBps_CappedAtMax() public {
+    function test_GetSpreadBps_CappedAtMax() public view {
         // Very high OI to push spread above max
         uint256 hugeOI = 1_000_000_000 * 1e18; // 1B
         uint256 spread = sm.getSpreadBps(0, hugeOI);

@@ -172,7 +172,7 @@ contract TradingStorage is Ownable {
      *      The trade's position in the array is stored in Trade.userIndex; the last element moves into the
      *      freed position and its userIndex is updated. Array order is not preserved.
      */
-    function _removeFromUserTrades(address _user, uint256 _tradeId, uint32 _userIndex) internal {
+    function _removeFromUserTrades(address _user, uint32 _userIndex) internal {
         uint256[] storage userTrades = _userTrades[_user];
         uint256 lastIndex = userTrades.length - 1;
         if (_userIndex != lastIndex) {
@@ -269,7 +269,7 @@ contract TradingStorage is Ownable {
 
         address user = trade.user;
 
-        _removeFromUserTrades(user, _tradeId, trade.userIndex);
+        _removeFromUserTrades(user, trade.userIndex);
         delete _trades[_tradeId]; // Sets all fields to 0, including user → address(0)
 
         emit TradeDeleted(_tradeId, user);

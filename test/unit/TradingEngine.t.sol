@@ -506,12 +506,19 @@ contract TradingEngineTest is Test {
 
         // Close at same oracle price
         uint128 closeExec = _longClosePrice(DEFAULT_ORACLE_PRICE);
+        uint256 aliceBefore = usdc.balanceOf(alice);
 
         vm.prank(alice);
         engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
 
-        // With spread on both open and close, trader should have a small loss even at same oracle price
-        // Open: 50025e18, Close: 49975e18 → net loss due to spread + close fee
+        // Open at 50,025 and close at 49,975: the spread on both sides is a loss at an unchanged oracle price
+        uint256 size = uint256(DEFAULT_EFFECTIVE_COLLATERAL) * DEFAULT_LEVERAGE;
+        uint256 exitValue = (uint256(closeExec) * size) / uint256(DEFAULT_LONG_OPEN_PRICE);
+        uint256 spreadLoss = size - exitValue;
+        uint256 expectedPayout = uint256(DEFAULT_EFFECTIVE_COLLATERAL) - spreadLoss - _closeFee(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE);
+        assertEq(closeExec, 49_975 * 1e18);
+        assertGt(spreadLoss, 0);
+        assertEq(usdc.balanceOf(alice) - aliceBefore, expectedPayout);
     }
 
     function test_CloseTrade_EmitsEvent_Profit() public {
@@ -1210,6 +1217,7 @@ contract TradingEngineTest is Test {
 
         uint256 treasuryBefore = usdc.balanceOf(treasuryAddr);
         uint256 vaultBefore = usdc.balanceOf(address(vault));
+        uint256 aliceBefore = usdc.balanceOf(alice);
 
         vm.prank(alice);
         engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
@@ -1219,8 +1227,11 @@ contract TradingEngineTest is Test {
         uint256 expectedTreasuryFee = closeFeeVal - expectedVaultFee;
 
         assertEq(usdc.balanceOf(treasuryAddr) - treasuryBefore, expectedTreasuryFee);
-        // Vault receives fee share but pays out profit, net negative
-        // Just check the fee share was sent (vault delta accounts for profit payout too)
+        // The vault receives its fee share and pays the profit above the collateral left after the fee:
+        // vault delta = vaultFee - (payout - (collateral - closeFee))
+        uint256 payout = usdc.balanceOf(alice) - aliceBefore;
+        uint256 profitFromVault = payout - (uint256(DEFAULT_EFFECTIVE_COLLATERAL) - closeFeeVal);
+        assertEq(int256(usdc.balanceOf(address(vault))) - int256(vaultBefore), int256(expectedVaultFee) - int256(profitFromVault));
     }
 
     function test_Fee_EmitsFeesDistributedOnOpen() public {
@@ -1686,7 +1697,7 @@ contract TradingEngineTest is Test {
     }
 
     /// @dev fundingOwedUsdc of the last TradeClosed event in the recorded logs
-    function _lastTradeClosedFunding() internal returns (int256 fundingOwed) {
+    function _lastTradeClosedFunding() internal view returns (int256 fundingOwed) {
         Vm.Log[] memory logs = vm.getRecordedLogs();
         bytes32 topic = TradeClosed.selector;
         for (uint256 i = logs.length; i > 0; --i) {

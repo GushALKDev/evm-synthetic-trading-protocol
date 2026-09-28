@@ -79,7 +79,7 @@ contract WithdrawalRegressionTest is Test {
     }
 
     /// @notice withdraw and redeem always revert, so their max* functions report 0
-    function test_Regression_MaxWithdrawAndMaxRedeemAreZero() public {
+    function test_Regression_MaxWithdrawAndMaxRedeemAreZero() public view {
         assertEq(vault.maxWithdraw(alice), 0, "maxWithdraw not 0");
         assertEq(vault.maxRedeem(alice), 0, "maxRedeem not 0");
     }
