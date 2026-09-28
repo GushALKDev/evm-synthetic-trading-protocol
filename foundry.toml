@@ -8,8 +8,14 @@ remappings = [
     "solady/=lib/solady/src/"
 ]
 ffi = false
+# Gas benchmarks live in test/gas and run only under the gas profile: FOUNDRY_PROFILE=gas forge test
+no_match_path = "test/gas/*"
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+
+[profile.gas]
+match_path = "test/gas/*"
+no_match_path = "test/{unit,integration,invariant,regression,fork}/*"
 
 [fmt]
 line_length = 160
