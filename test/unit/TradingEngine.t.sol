@@ -358,6 +358,33 @@ contract TradingEngineTest is Test {
         engine.openTrade(DEFAULT_PAIR_INDEX, true, DEFAULT_COLLATERAL, 101, DEFAULT_LONG_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE);
     }
 
+    /// @notice A pair limit below MAX_LEVERAGE is enforced on its own
+    function test_OpenTrade_RevertOnLeverageExceedsPairMax() public {
+        vm.prank(owner);
+        tradingStorage.updatePair(DEFAULT_PAIR_INDEX, 50, 10_000_000 * 1e18, true);
+
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.LeverageExceedsMax.selector, uint16(60), uint16(50)));
+        engine.openTrade(DEFAULT_PAIR_INDEX, true, DEFAULT_COLLATERAL, 60, DEFAULT_LONG_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE);
+    }
+
+    function test_OpenTrade_RevertOnSlippageExceeded() public {
+        // Expected 1% below the execution price with a 0.5% tolerance
+        uint128 expected = uint128((uint256(DEFAULT_LONG_OPEN_PRICE) * 99) / 100);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.SlippageExceeded.selector, DEFAULT_LONG_OPEN_PRICE, expected, DEFAULT_SLIPPAGE_BPS));
+        engine.openTrade(DEFAULT_PAIR_INDEX, true, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, expected, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE);
+    }
+
+    function test_CloseTrade_RevertOnSlippageExceeded() public {
+        uint32 tradeId = _openDefaultTrade(alice);
+        uint128 closeExec = _longClosePrice(DEFAULT_ORACLE_PRICE);
+        uint128 expected = uint128((uint256(closeExec) * 101) / 100);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.SlippageExceeded.selector, closeExec, expected, DEFAULT_SLIPPAGE_BPS));
+        engine.closeTrade(tradeId, expected, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
+    }
+
     function test_OpenTrade_RevertOnInactivePair() public {
         vm.prank(owner);
         tradingStorage.updatePair(0, 100, 10_000_000 * 1e18, false);
