@@ -27,6 +27,7 @@ jobs:
           node-version: 20
           cache: npm
 
+      # Required: the Pyth Solidity SDK is an npm dependency, remapped from node_modules/ in foundry.toml
       - name: Install npm dependencies
         run: npm ci
 
@@ -35,13 +36,20 @@ jobs:
         with:
           version: stable
 
+      - name: Check formatting
+        run: forge fmt --check
+        id: fmt
+
       - name: Run Forge build
         run: |
           forge --version
           forge build --sizes
         id: build
 
+      # Fork tests run only when the FORK_RPC_URL secret is set (Arbitrum One archive RPC); otherwise they skip
       - name: Run Forge tests
+        env:
+          FORK_RPC_URL: ${{ secrets.FORK_RPC_URL }}
         run: |
           forge test -vvv
         id: test
