@@ -760,7 +760,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
      * @param _newTp The new take profit price (0 to clear)
      * @param priceUpdate Pyth price update data
      */
-    function updateTp(uint256 _tradeId, uint128 _newTp, bytes[] calldata priceUpdate) external payable whenNotPaused refundsEthSurplus {
+    function updateTp(uint256 _tradeId, uint128 _newTp, bytes[] calldata priceUpdate) external payable nonReentrant whenNotPaused refundsEthSurplus {
         TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(_tradeId);
         if (trade.user == address(0)) revert TradeNotFound(_tradeId);
         if (trade.user != msg.sender) revert NotTradeOwner(msg.sender, trade.user);
@@ -781,7 +781,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
      * @param _newSl The new stop loss price (0 to clear)
      * @param priceUpdate Pyth price update data
      */
-    function updateSl(uint256 _tradeId, uint128 _newSl, bytes[] calldata priceUpdate) external payable whenNotPaused refundsEthSurplus {
+    function updateSl(uint256 _tradeId, uint128 _newSl, bytes[] calldata priceUpdate) external payable nonReentrant whenNotPaused refundsEthSurplus {
         TradingStorage.Trade memory trade = TRADING_STORAGE.getTrade(_tradeId);
         if (trade.user == address(0)) revert TradeNotFound(_tradeId);
         if (trade.user != msg.sender) revert NotTradeOwner(msg.sender, trade.user);
