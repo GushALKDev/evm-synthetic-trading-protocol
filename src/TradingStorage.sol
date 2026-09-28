@@ -28,7 +28,8 @@ contract TradingStorage is Ownable {
         uint16 leverage; //    2 bytes  │
         uint48 timestamp; //   6 bytes -┘
         uint32 index; //       4 bytes -┐
-        uint64 collateral; //  8 bytes  │  Slot 1 (28/32)
+        uint32 userIndex; //   4 bytes  │  Slot 1 (full)
+        uint64 collateral; //  8 bytes  │
         uint128 openPrice; // 16 bytes -┘
         uint128 tp; //        16 bytes -┐  Slot 2 (full)
         uint128 sl; //        16 bytes -┘
@@ -167,22 +168,19 @@ contract TradingStorage is Ownable {
     }
 
     /**
-     * @dev Removes a trade ID from the user's trade array using swap-and-pop
-     * Swaps target element with last element, then pops — O(1) deletion at cost of losing order
+     * @dev Removes a trade ID from the user's trade array with swap-and-pop, in O(1).
+     *      The trade's position in the array is stored in Trade.userIndex; the last element moves into the
+     *      freed position and its userIndex is updated. Array order is not preserved.
      */
-    function _removeFromUserTrades(address _user, uint256 _tradeId) internal {
+    function _removeFromUserTrades(address _user, uint256 _tradeId, uint32 _userIndex) internal {
         uint256[] storage userTrades = _userTrades[_user];
-        uint256 len = userTrades.length;
-        for (uint256 i; i < len;) {
-            if (userTrades[i] == _tradeId) {
-                userTrades[i] = userTrades[len - 1];
-                userTrades.pop();
-                return;
-            }
-            unchecked {
-                ++i;
-            }
+        uint256 lastIndex = userTrades.length - 1;
+        if (_userIndex != lastIndex) {
+            uint256 movedId = userTrades[lastIndex];
+            userTrades[_userIndex] = movedId;
+            _trades[movedId].userIndex = _userIndex;
         }
+        userTrades.pop();
     }
 
     /**
@@ -248,6 +246,7 @@ contract TradingStorage is Ownable {
             leverage: _leverage,
             timestamp: uint48(block.timestamp),
             index: tradeId,
+            userIndex: uint32(_userTrades[_user].length),
             collateral: _collateral,
             openPrice: _openPrice,
             tp: _tp,
@@ -270,7 +269,7 @@ contract TradingStorage is Ownable {
 
         address user = trade.user;
 
-        _removeFromUserTrades(user, _tradeId);
+        _removeFromUserTrades(user, _tradeId, trade.userIndex);
         delete _trades[_tradeId]; // Sets all fields to 0, including user → address(0)
 
         emit TradeDeleted(_tradeId, user);
