@@ -100,6 +100,9 @@ contract ProtocolHandler is CommonBase, StdUtils {
     /// @notice Largest excess loss (losses beyond each position's collateral, 18 decimals) seen at a refresh
     uint256 public ghostMaxExcessLoss;
 
+    /// @dev Entry funding index of the position being settled, read before the call (deleteTrade clears it)
+    int256 internal _entryFundingIndex;
+
     /// @dev A settlement action that settles nothing reverts, so in the forge metrics table calls - reverts = settlements
     error NotSettled();
 
@@ -184,6 +187,7 @@ contract ProtocolHandler is CommonBase, StdUtils {
         uint128 exec = _closeExec(ORACLE.peekPrice(PAIR_INDEX), trade.isLong);
         uint256 traderBefore = USDC.balanceOf(trade.user);
 
+        _entryFundingIndex = TRADING_STORAGE.getTradeFundingIndex(tradeId);
         // Reverts with InsufficientVaultBalance when a winning close exceeds the Vault's USDC (documented limitation)
         vm.prank(trade.user);
         ENGINE.closeTrade(tradeId, exec, 1, EMPTY_UPDATE);
@@ -200,6 +204,7 @@ contract ProtocolHandler is CommonBase, StdUtils {
         uint256 keeperBefore = USDC.balanceOf(KEEPER);
         uint256 traderBefore = USDC.balanceOf(trade.user);
 
+        _entryFundingIndex = TRADING_STORAGE.getTradeFundingIndex(tradeId);
         vm.prank(KEEPER);
         ENGINE.liquidate(tradeId, EMPTY_UPDATE);
         _record(tradeId, trade, exec, LIQUIDATION, USDC.balanceOf(trade.user) - traderBefore, USDC.balanceOf(KEEPER) - keeperBefore);
@@ -216,6 +221,7 @@ contract ProtocolHandler is CommonBase, StdUtils {
         uint256 keeperBefore = USDC.balanceOf(KEEPER);
         uint256 traderBefore = USDC.balanceOf(trade.user);
 
+        _entryFundingIndex = TRADING_STORAGE.getTradeFundingIndex(tradeId);
         vm.prank(KEEPER);
         ENGINE.executeLimit(tradeId, EMPTY_UPDATE);
         _record(tradeId, trade, exec, LIMIT, USDC.balanceOf(trade.user) - traderBefore, USDC.balanceOf(KEEPER) - keeperBefore);
@@ -289,14 +295,13 @@ contract ProtocolHandler is CommonBase, StdUtils {
 
     /**
      * @dev Model one settlement and record it. The funding amount is the one the engine used: the position's
-     *      side index after the call (the engine accrues before settling) minus its entry index.
+     *      side index after the call (the engine accrues before settling) minus its entry index, which is read
+     *      before the call because deleteTrade clears it.
      */
     function _record(uint256 _tradeId, TradingStorage.Trade memory _trade, uint128 _exec, uint8 _kind, uint256 _traderGot, uint256 _keeperGot) internal {
         uint256 size = uint256(_trade.collateral) * _trade.leverage;
         int256 pnl = _pnl(size, _trade.openPrice, _exec, _trade.isLong);
-        int256 funding = FundingLib.calculateFundingOwed(
-            size * 1e12, TRADING_STORAGE.getCumulativeFundingIndex(PAIR_INDEX, _trade.isLong), TRADING_STORAGE.getTradeFundingIndex(_tradeId)
-        );
+        int256 funding = FundingLib.calculateFundingOwed(size * 1e12, TRADING_STORAGE.getCumulativeFundingIndex(PAIR_INDEX, _trade.isLong), _entryFundingIndex);
         Settlement memory s = _model(_trade.collateral, _trade.leverage, pnl, funding, _kind);
 
         if (s.traderGets != _traderGot || s.keeperGets != _keeperGot) ghostMismatches++;

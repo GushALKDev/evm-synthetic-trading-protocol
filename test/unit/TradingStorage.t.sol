@@ -954,6 +954,20 @@ contract TradingStorageTest is Test {
         tradingStorage.setTradeFundingIndex(0, 42e18);
     }
 
+    /**
+     * @notice Deleting a trade clears its entry funding index
+     * @dev Trade IDs are never reused (auto-incremented counter), so a stale index could not be read by a later
+     *      trade; the entry is cleared anyway so a deleted trade reads 0 like one that never existed.
+     */
+    function test_DeleteTrade_ClearsTradeFundingIndex() public {
+        vm.startPrank(tradingEngine);
+        uint32 tradeId = _storeTrade(alice);
+        tradingStorage.setTradeFundingIndex(tradeId, 42e18);
+        tradingStorage.deleteTrade(tradeId);
+        vm.stopPrank();
+        assertEq(tradingStorage.getTradeFundingIndex(tradeId), 0, "funding index not cleared on delete");
+    }
+
     function test_GetCumulativeFundingIndex_DefaultZero() public view {
         assertEq(tradingStorage.getCumulativeFundingIndex(0, true), 0);
         assertEq(tradingStorage.getCumulativeFundingIndex(0, false), 0);

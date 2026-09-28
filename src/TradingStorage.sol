@@ -341,6 +341,7 @@ contract TradingStorage is Ownable {
             ++_positionsNonce;
         }
         delete _trades[_tradeId]; // Sets all fields to 0, including user → address(0)
+        delete _tradeFundingIndex[_tradeId];
 
         emit TradeDeleted(_tradeId, user);
     }
