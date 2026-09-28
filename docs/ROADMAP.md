@@ -74,7 +74,7 @@ Counted with `awk '/^## Phase/{p=$3} /^- \[x\] \*\*[0-9]+\.[0-9]+\*\*/{c[p]++} E
 - [x] **1.3** Withdrawal through `requestWithdrawal()` / `executeWithdrawal()`; `redeem()` and `withdraw()` always revert
 - [x] **1.4** Function `totalAssets()`: the vault's USDC balance (no unrealised PnL, no locked funds)
 - [x] **1.5** Epoch system for temporal tracking
-- [x] **1.6** Withdrawal Request System (3 epoch delay; requests do not expire and shares are not escrowed)
+- [x] **1.6** Withdrawal Request System (3 epoch delay; since round 2 the shares are escrowed and a request expires one epoch after it unlocks)
 - [x] **1.7** Basic Access Control (`sendPayout` restricted to `tradingEngine`)
 - [x] **1.8** Vault unit tests
 
@@ -138,7 +138,7 @@ Counted with `awk '/^## Phase/{p=$3} /^- \[x\] \*\*[0-9]+\.[0-9]+\*\*/{c[p]++} E
 - [x] **3.1** Contract `PythChainlinkOracle.sol` (IOracle implementation, Pyth + Chainlink)
 - [x] **3.2** Pyth integration (pull model)
     - [x] 3.2.1 `updatePriceFeeds()` with user-submitted signed data
-    - [x] 3.2.2 `getPriceUnsafe()` with manual staleness check (MAX_STALENESS = 30s)
+    - [x] 3.2.2 `getPriceUnsafe()` with a manual age check (round 2: `maxPriceAge`, 5 s by default, owner-set up to MAX_STALENESS = 30 s; `PriceFromFuture` for a publish time after the block)
     - [x] 3.2.3 Confidence interval validation (MAX_CONFIDENCE_BPS = 200 / 2%)
 - [x] **3.3** Chainlink integration (deviation anchor only, NOT fallback)
     - [x] 3.3.1 Read `latestRoundData()` as reference price with heartbeat staleness check
@@ -150,7 +150,7 @@ Counted with `awk '/^## Phase/{p=$3} /^- \[x\] \*\*[0-9]+\.[0-9]+\*\*/{c[p]++} E
     - [x] 3.6.2 `closeTrade` signature: add `priceUpdate`, `_closePrice` renamed to `_expectedPrice`
     - [x] 3.6.3 `updateTp`/`updateSl`: add `priceUpdate` to validate TP/SL not already reached at current price
     - [x] 3.6.4 Caller funds Pyth fees via `msg.value`; oracle refunds surplus (redesigned in Phase 7, was oracle self-funding)
-    - [x] 3.6.5 TradingEngine uses `IOracle` interface, no fee logic; forwards `msg.value` and sweeps refunds to caller
+    - [x] 3.6.5 TradingEngine uses `IOracle` interface, no fee logic; forwards `msg.value` and returns the refund to the caller (round 2: only `msg.value` minus the fee paid)
 - [x] **3.7** Price-dependent validations
     - [x] 3.7.1 Validate TP/SL not already triggered on `openTrade` against oracle price
     - [x] 3.7.2 Validate TP/SL not already triggered on `updateTp`/`updateSl` against oracle price
@@ -160,7 +160,7 @@ Counted with `awk '/^## Phase/{p=$3} /^- \[x\] \*\*[0-9]+\.[0-9]+\*\*/{c[p]++} E
     - [x] 3.8.2 OI tracking kept as nominal (`collateral × leverage × 1e12`), unchanged
 - [x] **3.9** Pyth fee handling (redesigned in Phase 7: caller-funded instead of oracle-subsidized)
     - [x] 3.9.1 `getPrice` is `payable`; caller attaches the fee as `msg.value`, oracle refunds surplus to `msg.sender`
-    - [x] 3.9.2 TradingEngine forwards `msg.value` to the oracle and sweeps any refund back to the caller (never holds ETH)
+    - [x] 3.9.2 TradingEngine forwards `msg.value` to the oracle and returns what the call added to its balance (round 2: ETH force-sent to the engine stays there)
     - [x] 3.9.3 `InsufficientFee(provided, required)` error on oracle if `msg.value` too low
 - [x] **3.10** Mock Oracle for local tests (MockOracle + MockChainlinkFeed)
 - [x] **3.11** Oracle tests (staleness, confidence, deviation, normalization, fee refund, fuzz)
@@ -215,8 +215,8 @@ Counted with `awk '/^## Phase/{p=$3} /^- \[x\] \*\*[0-9]+\.[0-9]+\*\*/{c[p]++} E
 
 **Deliverables:**
 
-- The heavier side pays funding and the lighter side receives it, settled against the vault
-- The rate is `3.6e-5` of position size per hour per USD of imbalance and is not normalised by OI (see [02-mathematics.md](./02-mathematics.md#6-funding))
+- The heavier side pays funding and the lighter side receives the same total, pro rata (round 2; it was settled against the vault)
+- The rate is proportional to the relative skew and capped at 0.01% of the heavier side's notional per hour (round 2; it was `3.6e-5` of position size per hour per USD of imbalance), see [02-mathematics.md](./02-mathematics.md#6-funding)
 
 **Reference:** [02-mathematics.md](./02-mathematics.md) - Funding Section
 
@@ -258,8 +258,8 @@ Counted with `awk '/^## Phase/{p=$3} /^- \[x\] \*\*[0-9]+\.[0-9]+\*\*/{c[p]++} E
 - [x] **7.2** Liquidation condition from funding-adjusted PnL at the close-spread price (no liquidation price is computed or stored)
 - [x] **7.3** Liquidation condition verification (loss >= 90%)
 - [x] **7.4** Remaining collateral distribution (liquidator vs vault)
-- [x] **7.5** Liquidator reward (10% of remainder)
-- [x] **7.6** Reject positions that are pre-liquidable after the open spread (moved from Phase 3; the close spread used by `liquidate` is not included in this check)
+- [x] **7.5** Liquidator reward (10% of remainder; round 2 adds a floor of 0.5% of collateral, paid also past 100% loss)
+- [x] **7.6** Reject positions that are pre-liquidable (moved from Phase 3; round 2 checks the close spread at the post-open OI and the collateral net of the open fee, as `liquidate` does)
 - [x] **7.7** Confidence-based conservative pricing for liquidation checks (moved from Phase 3), `IOracle.getPrice` now returns `(price18, conf18)`; liquidate() uses the trader-favorable band edge (long: price + conf, short: price - conf)
 - [x] **7.8** Liquidation tests (edge case fuzzing)
 - [x] **7.9** Post-review hardening
@@ -273,7 +273,7 @@ Counted with `awk '/^## Phase/{p=$3} /^- \[x\] \*\*[0-9]+\.[0-9]+\*\*/{c[p]++} E
 **Deliverables:**
 
 - At-risk positions can be liquidated by anyone
-- Liquidators receive 10% of the remaining collateral (zero once the loss reaches the full collateral)
+- Liquidators receive `max(10% of the remaining collateral, 0.5% of the collateral)` (round 2; before, zero once the loss reached the full collateral)
 - Trader loss is capped at the collateral
 
 **Reference:** [02-mathematics.md](./02-mathematics.md) - Liquidations Section
@@ -344,7 +344,7 @@ Counted with `awk '/^## Phase/{p=$3} /^- \[x\] \*\*[0-9]+\.[0-9]+\*\*/{c[p]++} E
 - [x] **10.1** Contract `BondDepository.sol`
 - [x] **10.2** Contract `SolvencyManager.sol`
 - [x] **10.3** Bond price calculation (owner-set `referencePrice` used as a proxy for a TWAP, with discount; a real DEX TWAP is deferred to V2)
-- [x] **10.4** Bond purchase function (`bond()`, permissionless, clamps to remaining round cap, injects USDC into Vault)
+- [x] **10.4** Bond purchase function (`bond()`, permissionless, clamps to the remaining round cap and, since round 2, to the Vault deficit, injects USDC into Vault; the round closes when CR is back at 100%)
 - [x] **10.5** Token vesting (linear over an owner-configurable `vestingPeriod`, default 48h, capped at 7 days; `claim()` releases vested $SYNTH, multiple simultaneous bonds per bonder supported)
 - [x] **10.6** Activation logic (`SolvencyManager.checkAndAct`, CR thresholds: inject reserve < 100%, activate bonding < 95%)
 
@@ -389,18 +389,18 @@ Counted with `awk '/^## Phase/{p=$3} /^- \[x\] \*\*[0-9]+\.[0-9]+\*\*/{c[p]++} E
 >
 > **Dependencies:** Phases 1-11
 
-- [x] **12.1** Test coverage: 100% lines on every `src/` file; branches 72.73% on `BondDepository` and 90.14% on `TradingEngine` (`forge coverage --report summary`)
-- [x] **12.2** Fuzz tests on the math (35 `testFuzz_*` functions: PnL, funding, spread, vesting, payouts)
-- [x] **12.3** Invariant tests: 17 `invariant_*` functions (3 only log), 128,000 calls each with Foundry defaults
+- [x] **12.1** Test coverage at commit `aaceb08` (`forge coverage --report summary`): lines 100% on every `src/` file except `Vault` (98.18%); branches 75.00% on `BondDepository` and 95.65% on `TradingEngine`, 100% elsewhere; full table in [tests/README.md](./tests/README.md#coverage)
+- [x] **12.2** Fuzz tests on the math (39 `testFuzz_*` functions: PnL, funding, spread, vesting, payouts, opening guard)
+- [x] **12.3** Invariant tests: 24 `invariant_*` functions, 128,000 calls each with Foundry defaults; call summaries in `afterInvariant` hooks (round 2 replaced the items below with modelled vault, reserve and funding accounting, see [tests/README.md](./tests/README.md#invariant-suites))
     - [x] 12.3.1 `totalAssets` always backed by the real USDC balance
     - [x] 12.3.2 Per pair, long OI and short OI each `<= maxOI` (the contract enforces long + short `<= maxOI`)
     - [x] 12.3.3 `sharePrice > 0`
     - [x] 12.3.4 Custody: TradingStorage always covers open-trade collateral
     - [x] 12.3.5 Bonding: escrow always covers unclaimed vesting positions
-- [x] **12.4** Fork tests against HyperEVM (13 tests, Pyth updates from Hermes); not reproducible in this review (Hermes returned HTTP 401)
-- [x] **12.5** Static analysis run (Slither 0.11.6: 0 High, 6 Medium, 14 Low, 121 Informational; Aderyn 0.6.8: 2 High, 7 Low); not triaged in this review
+- [x] **12.4** Fork tests against Arbitrum One at a pinned block (19 tests, no Hermes call, `ffi = false`; round 2 replaced the HyperEVM suite that fetched Hermes updates through `ffi`)
+- [x] **12.5** Static analysis run at commit `aaceb08` (Slither 0.11.6: 0 High, 8 Medium, 20 Low, 128 Informational; Aderyn 0.6.8: 3 High, 5 Low); not triaged
 - [x] **12.6** Internal code review (findings reviewed and remediated, see below)
-- [x] **12.7** Deployment script and integration suite (`script/Deploy.s.sol` with shared `DeployLib`; 17 integration tests and 6 invariant functions over the wired solvency contracts)
+- [x] **12.7** Deployment script and integration suite (`script/Deploy.s.sol` with shared `DeployLib`; 17 integration tests and 8 invariant functions over the wired solvency contracts)
 
 > **Scope note:** external audit by a firm is **out of scope** for this PoC, there is no launch and
 > no funds at risk, so it is not tracked as a pending item. See the disclaimer in
@@ -443,7 +443,7 @@ Counted with `awk '/^## Phase/{p=$3} /^- \[x\] \*\*[0-9]+\.[0-9]+\*\*/{c[p]++} E
 **13.6** Account Abstraction (ERC-4337)
 **13.7** NFT Boost for LPs
 **13.8** Open limit orders (open a position at a target price, pending order with collateral custody, cancellation, and expiry). Distinct from Phase 8 which only automates TP/SL on already-open trades.
-**13.9** Bonding V2: real DEX TWAP oracle for `referencePrice` (replacing the keeper proxy), debt-ratio-based dynamic discount (Olympus-style), and worst-case-payout CR (Vault reads trader OI from TradingStorage instead of share-price CR). Linear vesting is already shipped in Phase 10.5.
+**13.9** Bonding V2: real DEX TWAP oracle for `referencePrice` (replacing the owner-set proxy), debt-ratio-based dynamic discount (Olympus-style), and worst-case-payout CR (Vault reads trader OI from TradingStorage instead of share-price CR). Linear vesting is already shipped in Phase 10.5.
 
 **Reference:** [06-improvements.md](./06-improvements.md)
 
@@ -453,6 +453,7 @@ Counted with `awk '/^## Phase/{p=$3} /^- \[x\] \*\*[0-9]+\.[0-9]+\*\*/{c[p]++} E
 
 | Date       | Changes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | :--------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-09-28 | Review round 2 (branch `fix/review-findings`): funding made a capped zero-sum transfer between traders, withdrawal escrow and expiry, ERC-4626 `max*` fixed, 5 s Pyth price age and `PriceFromFuture`, L2 sequencer uptime check, fork suite on Arbitrum One at a pinned block, global `MAX_LEVERAGE = 100`, opening guard at the liquidation price, liquidator reward floor, O(1) `deleteTrade`, ETH refund limited to the call's surplus, `nonReentrant` on `updateTp`/`updateSl`, bonding round closed at 100% CR, 33 regression tests, modelled invariants, gas benchmarks. See the root README, "Review notes" |
 | 2026-07-21 | Phase 12: Testing and review. Invariant suites over stateful handlers (vault backing, OI cap, share price, collateral custody, bonding escrow), Slither and Aderyn run, `Vault` constructor zero-address check, and a division-by-zero fix in `BondDepository` (a tiny `referencePrice` floored the discounted price to 0 and made `quoteBond` revert). New [test suite docs](./tests/README.md). External audit left out of scope |
 | 2026-07-21 | Phase 10 and 11: Bonding (Layer 3 solvency). `SynthToken` ($SYNTH ERC-20, minter-gated), `BondDepository` (sells $SYNTH at a capped discount off an owner-set `referencePrice`, sends USDC to the Vault, linear vesting over a configurable window, default 48h), `SolvencyManager` (`checkAndAct` injects reserve below 100% CR, then opens bonding below 95%), new `Vault.collateralizationRatio()` WAD view. Phase 13 (V2) marked as not counted |
 | 2026-07-19 | Phase 9: Assistant Fund, USDC reserve (Layer 2 solvency), receives 20% fee share via treasury, `injectFunds` onlySolvencyManager, permissionless `skim` of overflow above `targetCap` to the Vault. No TradingEngine changes                                                                                                                                                                                                                                                                                                                                  |

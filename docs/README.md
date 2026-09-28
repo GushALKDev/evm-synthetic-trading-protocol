@@ -59,8 +59,9 @@ code, it says so.
 
 9. **[Test suite](./tests/README.md)**
     - Test groups and counts
-    - Invariants and fuzz tests
-    - Fork tests
+    - Regression tests for the round 2 findings
+    - Invariants, handler call distribution and tolerances
+    - Fork tests (Arbitrum One, pinned block) and gas benchmarks
     - Coverage and static analysis counts
 
 **[ROADMAP](./ROADMAP.md)**: build log by phase.
@@ -100,9 +101,11 @@ MIT, see [LICENSE](../LICENSE).
 
 ## External references
 
+GMX and Gains Network are architectural references, not code this repository reuses.
+
 - Foundry: https://book.getfoundry.sh/
 - ERC-4626: https://eips.ethereum.org/EIPS/eip-4626
 - Pyth: https://docs.pyth.network/ (price source)
 - Chainlink data feeds: https://docs.chain.link/data-feeds (deviation anchor)
-- GMX: https://gmx-docs.io/ (reference implementation)
-- Gains Network: https://gains-network.gitbook.io/ (reference implementation)
+- GMX: https://gmx-docs.io/ (architectural reference)
+- Gains Network (gTrade): https://gains-network.gitbook.io/ (architectural reference)
