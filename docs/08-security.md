@@ -343,8 +343,9 @@ Derived from the code as it is. "Other levers" are existing owner functions; non
   every `bond` revert on the mint. `AssistantFund.setSolvencyManager` away from the SolvencyManager stops
   injections, and `setTargetCap(type(uint256).max)` stops `skim`. Add vault `PAUSE_DEPOSIT`: while an
   injection is pending, a deposit runs `checkAndAct`, which then reverts anyway.
-- Stays open: `claim`. No lever stops claims: a bug in the vesting math can move escrowed $SYNTH between
-  bonders (the escrow holds only $SYNTH; no USDC is at risk from `claim`).
+- Stays open: `claim`, by decision. No lever stops claims: a bug in the vesting math can move escrowed $SYNTH
+  between bonders (the escrow holds only $SYNTH; no USDC is at risk from `claim`). A pause on `claim` would
+  itself trap bonders' vested $SYNTH, so none was added.
 - Residual: with the depository or the fund redirected, every `checkAndAct` that would open or close a round,
   or inject, reverts until the wiring is restored.
 

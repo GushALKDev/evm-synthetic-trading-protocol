@@ -238,7 +238,10 @@ request returns the shares.
   it is cleared, and the NAV's optimistic bias (the excess loss `E` above) grows meanwhile. Vault flags do not
   stop settlements, and engine flags do not stop LP flows, so the owner has to set both when an incident
   affects both sides. `PAUSE_WITHDRAW` extends pending requests' expiry in whole epochs, rounded up. No flag
-  stops `claim`, and no flag protects against the owner ([Guide 8, sections 5 and 6](./docs/08-security.md#5-pause-flags)).
+  protects against the owner ([Guide 8, sections 5 and 6](./docs/08-security.md#5-pause-flags)).
+- **`claim` has no pause lever, by decision.** A bug in the vesting math could move escrowed $SYNTH between
+  bonders; the depository's escrow holds only $SYNTH, so no USDC is at risk from `claim`. A pause on `claim`
+  would itself trap bonders' vested $SYNTH ([Guide 8, section 6](./docs/08-security.md#6-incident-playbook)).
 - **Thin-side funding.** When one side of a pair is small, each unit on that side receives the heavier side's
   rate times `OI_heavy / OI_light` per hour; the total credited to the light side is at most what the heavy
   side pays ([Guide 2](./docs/02-mathematics.md#thin-side-funding)).
