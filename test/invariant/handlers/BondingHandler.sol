@@ -6,15 +6,18 @@ import {StdCheats} from "forge-std/StdCheats.sol";
 import {StdUtils} from "forge-std/StdUtils.sol";
 import {BondDepository} from "../../../src/BondDepository.sol";
 import {SynthToken} from "../../../src/SynthToken.sol";
+import {MockSolvencyVault} from "../../mocks/MockSolvencyVault.sol";
 import {ERC20} from "solady/tokens/ERC20.sol";
 
 /**
  * @title BondingHandler
  * @author GushALKDev
  * @notice Stateful fuzzing handler for the bonding / vesting flow (BondDepository + SynthToken).
- * @dev Drives rounds, purchases, claims and admin re-pricing. Ghost variables track the total $SYNTH
- *      promised to bonders and the total actually claimed, so the invariants can assert the
- *      depository always holds enough tokens to honour every outstanding vesting position.
+ * @dev Drives rounds, purchases, claims, admin re-pricing and the Vault deficit (MockSolvencyVault).
+ *      Ghost variables track the total $SYNTH promised to bonders and the total actually claimed, so the
+ *      invariants can assert the depository always holds enough tokens to honour every outstanding vesting
+ *      position, and the cap and deficit of each round, so they can assert a round never raises more than
+ *      either. A bond lowers the mock deficit by what it raised, as the real Vault's deficit would.
  */
 contract BondingHandler is CommonBase, StdCheats, StdUtils {
     BondDepository public immutable BOND;
@@ -32,6 +35,13 @@ contract BondingHandler is CommonBase, StdCheats, StdUtils {
     uint256 public ghostTotalClaimed;
     /// @notice Total USDC raised through bonding
     uint256 public ghostUsdcRaised;
+    /// @notice Sum of the caps of every round opened
+    uint256 public ghostCapsTotal;
+    /// @notice Cap of the current (last opened) round and USDC raised in it
+    uint256 public ghostRoundCap;
+    uint256 public ghostRoundRaised;
+    /// @notice Bonds that raised a different amount than min(amount, cap, deficit), or left the round open after taking all of it
+    uint256 public ghostMismatches;
 
     mapping(bytes32 => uint256) public calls;
 
@@ -63,26 +73,51 @@ contract BondingHandler is CommonBase, StdCheats, StdUtils {
         vm.startPrank(SOLVENCY_MANAGER);
         BOND.activateBonding(needed);
         vm.stopPrank();
+        ghostCapsTotal += needed;
+        ghostRoundCap = needed;
+        ghostRoundRaised = 0;
+    }
+
+    /// @notice The Vault's deficit changes through other inflows and outflows (0 means CR is back at 100%)
+    function setDeficit(uint256 _deficit) external countCall("setDeficit") {
+        uint256 deficit = _deficit % 4 == 0 ? 0 : bound(_deficit, 1 * 10 ** 6, 600_000 * 10 ** 6);
+        MockSolvencyVault(BOND.VAULT()).setDeficit(deficit);
+    }
+
+    /// @notice The SolvencyManager closes the round once the Vault deficit is zero (checkAndAct at CR >= 100%)
+    function closeIfRecovered() external countCall("closeIfRecovered") {
+        if (!BOND.isActive() || MockSolvencyVault(BOND.VAULT()).collateralizationDeficit() != 0) return;
+        vm.startPrank(SOLVENCY_MANAGER);
+        BOND.closeBonding();
+        vm.stopPrank();
     }
 
     /// @notice A bonder buys discounted $SYNTH (no-op when no round is open)
     function bond(uint256 _bonderSeed, uint256 _usdcAmount) external countCall("bond") {
-        if (!BOND.isActive()) return;
+        MockSolvencyVault vault = MockSolvencyVault(BOND.VAULT());
+        uint256 cap = BOND.remainingCap();
+        uint256 deficit = vault.collateralizationDeficit();
+        uint256 available = deficit < cap ? deficit : cap;
+        if (available == 0) return; // bond() reverts NoActiveRound
         currentBonder = bonders[bound(_bonderSeed, 0, bonders.length - 1)];
 
         uint256 amount = bound(_usdcAmount, 1 * 10 ** 6, 100_000 * 10 ** 6);
+        uint256 expected = amount < available ? amount : available;
         deal(address(USDC), currentBonder, amount);
-
-        // bond() clamps the deposit to the remaining cap, so measure what the Vault actually received
-        uint256 vaultBefore = USDC.balanceOf(BOND.VAULT());
+        uint256 vaultBefore = USDC.balanceOf(address(vault));
 
         vm.startPrank(currentBonder);
         USDC.approve(address(BOND), amount);
         (, uint256 synthOut) = BOND.bond(amount);
         vm.stopPrank();
 
+        uint256 raised = USDC.balanceOf(address(vault)) - vaultBefore;
+        if (raised != expected || (raised == available && BOND.isActive())) ghostMismatches++;
+        vault.setDeficit(raised < deficit ? deficit - raised : 0);
+
         ghostTotalPromised += synthOut;
-        ghostUsdcRaised += USDC.balanceOf(BOND.VAULT()) - vaultBefore;
+        ghostUsdcRaised += raised;
+        ghostRoundRaised += raised;
     }
 
     /// @notice A bonder claims whatever has vested so far (no-op when nothing is claimable)

@@ -109,23 +109,30 @@ contract BondingInvariantTest is StdInvariant, Test {
     }
 
     /**
-     * @notice Round cap integrity — a round never raises more USDC than it was opened for
-     * @dev activateBonding sets the cap and bond() clamps to it, so the raised total must stay at or
-     *      below the sum of caps. Over-raising would dilute $SYNTH beyond the approved deficit.
+     * @notice Round cap integrity: a round never raises more USDC than it was opened for
+     * @dev activateBonding sets the cap and bond() clamps to it, so the current round's raise stays at or
+     *      below its cap and the total raise at or below the sum of all caps. Every USDC raised is in the
+     *      Vault. Over-raising would dilute $SYNTH beyond the approved deficit.
      */
     function invariant_RaisedWithinCap() public view {
-        // Every USDC raised landed in the Vault; it can never exceed what bonders actually paid.
+        assertLe(handler.ghostRoundRaised(), handler.ghostRoundCap(), "round raised above its cap");
+        assertLe(handler.ghostUsdcRaised(), handler.ghostCapsTotal(), "total raised above the sum of caps");
         assertEq(usdc.balanceOf(vault), handler.ghostUsdcRaised(), "vault USDC diverged from bonded raise");
     }
 
-    /// @notice Surfaces action coverage so a silently idle suite is visible
-    function invariant_CallSummary() public view {
-        console.log("activate  :", handler.calls("activateBonding"));
-        console.log("bond      :", handler.calls("bond"));
-        console.log("claim     :", handler.calls("claim"));
-        console.log("warp      :", handler.calls("warp"));
-        console.log("promised  :", handler.ghostTotalPromised());
-        console.log("claimed   :", handler.ghostTotalClaimed());
-        console.log("raised    :", handler.ghostUsdcRaised());
+    /**
+     * @notice A bond takes min(amount, remaining cap, Vault deficit), and the bond that takes all that is
+     *         available closes the round, so no bond is sold once the Vault is back at 100% CR
+     */
+    function invariant_BondsNeverExceedDeficit() public view {
+        assertEq(handler.ghostMismatches(), 0, "bond raised above the deficit or left the round open");
+    }
+
+    /// @notice Run summary, logged after each run (forge shows the last run's logs with -vv)
+    function afterInvariant() public view {
+        assertLe(handler.ghostTotalClaimed(), handler.ghostTotalPromised(), "claimed more than promised");
+        console.log("activate / bond / claim:", handler.calls("activateBonding"), handler.calls("bond"), handler.calls("claim"));
+        console.log("promised / claimed:", handler.ghostTotalPromised(), handler.ghostTotalClaimed());
+        console.log("raised:", handler.ghostUsdcRaised());
     }
 }
