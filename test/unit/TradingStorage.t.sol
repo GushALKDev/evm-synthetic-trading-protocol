@@ -42,7 +42,7 @@ contract TradingStorageTest is Test {
     event TradeTpUpdated(uint256 indexed tradeId, uint128 newTp);
     event TradeSlUpdated(uint256 indexed tradeId, uint128 newSl);
     event OpenInterestUpdated(uint256 indexed pairIndex, uint256 longOI, uint256 shortOI);
-    event CumulativeFundingIndexUpdated(uint256 indexed pairIndex, int256 newIndex, uint256 timestamp);
+    event CumulativeFundingIndexUpdated(uint256 indexed pairIndex, int256 longIndex, int256 shortIndex, uint256 timestamp);
     event CollateralSent(address indexed to, uint256 amount);
     event PairAdded(uint256 indexed pairIndex, string name);
     event PairUpdated(uint256 indexed pairIndex);
@@ -904,31 +904,33 @@ contract TradingStorageTest is Test {
 
     function test_UpdateFundingState() public {
         vm.prank(tradingEngine);
-        tradingStorage.updateFundingState(0, 100e18, 1_000_000);
+        tradingStorage.updateFundingState(0, 100e18, -300e18, 1_000_000);
 
-        assertEq(tradingStorage.getCumulativeFundingIndex(0), 100e18);
+        assertEq(tradingStorage.getCumulativeFundingIndex(0, true), 100e18);
+        assertEq(tradingStorage.getCumulativeFundingIndex(0, false), -300e18);
         assertEq(tradingStorage.getFundingLastUpdated(0), 1_000_000);
     }
 
     function test_UpdateFundingState_EmitsEvent() public {
         vm.expectEmit(true, false, false, true);
-        emit CumulativeFundingIndexUpdated(0, 100e18, 1_000_000);
+        emit CumulativeFundingIndexUpdated(0, 100e18, -300e18, 1_000_000);
 
         vm.prank(tradingEngine);
-        tradingStorage.updateFundingState(0, 100e18, 1_000_000);
+        tradingStorage.updateFundingState(0, 100e18, -300e18, 1_000_000);
     }
 
     function test_UpdateFundingState_NegativeIndex() public {
         vm.prank(tradingEngine);
-        tradingStorage.updateFundingState(0, -500e18, 2_000_000);
+        tradingStorage.updateFundingState(0, -500e18, 700e18, 2_000_000);
 
-        assertEq(tradingStorage.getCumulativeFundingIndex(0), -500e18);
+        assertEq(tradingStorage.getCumulativeFundingIndex(0, true), -500e18);
+        assertEq(tradingStorage.getCumulativeFundingIndex(0, false), 700e18);
     }
 
     function test_UpdateFundingState_RevertIfNotTradingEngine() public {
         vm.prank(alice);
         vm.expectRevert(TradingStorage.CallerNotTradingEngine.selector);
-        tradingStorage.updateFundingState(0, 100e18, 1_000_000);
+        tradingStorage.updateFundingState(0, 100e18, -100e18, 1_000_000);
     }
 
     function test_SetTradeFundingIndex() public {
@@ -952,7 +954,8 @@ contract TradingStorageTest is Test {
     }
 
     function test_GetCumulativeFundingIndex_DefaultZero() public view {
-        assertEq(tradingStorage.getCumulativeFundingIndex(0), 0);
+        assertEq(tradingStorage.getCumulativeFundingIndex(0, true), 0);
+        assertEq(tradingStorage.getCumulativeFundingIndex(0, false), 0);
     }
 
     function test_GetFundingLastUpdated_DefaultZero() public view {

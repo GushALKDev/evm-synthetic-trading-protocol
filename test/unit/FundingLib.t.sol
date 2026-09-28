@@ -5,166 +5,165 @@ import {Test} from "forge-std/Test.sol";
 import {FundingLib} from "../../src/libraries/FundingLib.sol";
 
 contract FundingLibTest is Test {
+    uint256 constant FACTOR = 1e14; // FundingLib.DEFAULT_FUNDING_FACTOR: 0.01% per hour at 100% skew
+    uint256 constant CEILING = 1e14; // FundingLib.MAX_FUNDING_RATE_PER_HOUR
+
     /*//////////////////////////////////////////////////////////////
                       INDEX DELTA TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_CalculateIndexDelta_LongsHeavier() public pure {
-        // OI long > OI short → positive delta
-        int256 delta = FundingLib.calculateIndexDelta(2_000 * 1e18, 1_000 * 1e18, 3600);
-        assertGt(delta, 0);
+    function test_CalculateIndexDeltas_LongsHeavier_LongsPayShortsReceive() public pure {
+        (int256 longDelta, int256 shortDelta) = FundingLib.calculateIndexDeltas(2_000 * 1e18, 1_000 * 1e18, 3600, FACTOR);
+        assertGt(longDelta, 0);
+        assertLt(shortDelta, 0);
     }
 
-    function test_CalculateIndexDelta_ShortsHeavier() public pure {
-        // OI short > OI long → negative delta
-        int256 delta = FundingLib.calculateIndexDelta(1_000 * 1e18, 2_000 * 1e18, 3600);
-        assertLt(delta, 0);
+    function test_CalculateIndexDeltas_ShortsHeavier_ShortsPayLongsReceive() public pure {
+        (int256 longDelta, int256 shortDelta) = FundingLib.calculateIndexDeltas(1_000 * 1e18, 2_000 * 1e18, 3600, FACTOR);
+        assertLt(longDelta, 0);
+        assertGt(shortDelta, 0);
     }
 
-    function test_CalculateIndexDelta_Balanced() public pure {
-        // Equal OI → zero delta
-        int256 delta = FundingLib.calculateIndexDelta(1_000 * 1e18, 1_000 * 1e18, 3600);
-        assertEq(delta, 0);
+    function test_CalculateIndexDeltas_Balanced() public pure {
+        (int256 longDelta, int256 shortDelta) = FundingLib.calculateIndexDeltas(1_000 * 1e18, 1_000 * 1e18, 3600, FACTOR);
+        assertEq(longDelta, 0);
+        assertEq(shortDelta, 0);
     }
 
-    function test_CalculateIndexDelta_ZeroTime() public pure {
-        // No time elapsed → zero delta regardless of imbalance
-        int256 delta = FundingLib.calculateIndexDelta(2_000 * 1e18, 1_000 * 1e18, 0);
-        assertEq(delta, 0);
+    function test_CalculateIndexDeltas_ZeroTime() public pure {
+        (int256 longDelta, int256 shortDelta) = FundingLib.calculateIndexDeltas(2_000 * 1e18, 1_000 * 1e18, 0, FACTOR);
+        assertEq(longDelta, 0);
+        assertEq(shortDelta, 0);
     }
 
-    function test_CalculateIndexDelta_ZeroOI() public pure {
-        // No OI on either side → zero delta
-        int256 delta = FundingLib.calculateIndexDelta(0, 0, 3600);
-        assertEq(delta, 0);
+    /// @notice With no counterparty on one side there is nobody to pay, so nothing accrues
+    function test_CalculateIndexDeltas_OneSideEmpty_NoFunding() public pure {
+        (int256 longDelta, int256 shortDelta) = FundingLib.calculateIndexDeltas(5_000 * 1e18, 0, 3600, FACTOR);
+        assertEq(longDelta, 0);
+        assertEq(shortDelta, 0);
+        (longDelta, shortDelta) = FundingLib.calculateIndexDeltas(0, 5_000 * 1e18, 3600, FACTOR);
+        assertEq(longDelta, 0);
+        assertEq(shortDelta, 0);
     }
 
-    function test_CalculateIndexDelta_ExactMath() public pure {
-        // (2000e18 - 1000e18) * 1e10 * 3600 / 1e18
-        // = 1000e18 * 1e10 * 3600 / 1e18
-        // = 1000 * 1e10 * 3600
-        // = 36_000_000_000_000 (3.6e13)
-        int256 delta = FundingLib.calculateIndexDelta(2_000 * 1e18, 1_000 * 1e18, 3600);
-        assertEq(delta, int256(1_000) * 1e10 * 3600);
+    /**
+     * @notice skew = (3000 - 1000) / (3000 + 1000) = 0.5, rate = 1e14 * 0.5 = 5e13 per hour
+     *         payer delta = 5e13 * 3600 / 3600 = 5e13; receiver delta = 5e13 * 3000 / 1000 = 1.5e14
+     */
+    function test_CalculateIndexDeltas_ExactMath() public pure {
+        (int256 longDelta, int256 shortDelta) = FundingLib.calculateIndexDeltas(3_000 * 1e18, 1_000 * 1e18, 3600, FACTOR);
+        assertEq(longDelta, 5e13);
+        assertEq(shortDelta, -15e13);
+    }
+
+    /// @notice The rate depends on the relative skew, so scaling both sides leaves it unchanged
+    function test_CalculateIndexDeltas_DependsOnRelativeSkewOnly() public pure {
+        (int256 small,) = FundingLib.calculateIndexDeltas(3_000 * 1e18, 1_000 * 1e18, 3600, FACTOR);
+        (int256 large,) = FundingLib.calculateIndexDeltas(3_000_000 * 1e18, 1_000_000 * 1e18, 3600, FACTOR);
+        assertEq(small, large);
+    }
+
+    /// @notice The maximum factor reaches the ceiling at 10% skew and never exceeds it
+    function test_CalculateIndexDeltas_CappedAtCeiling() public pure {
+        uint256 maxFactor = FundingLib.MAX_FUNDING_FACTOR;
+        (int256 fullSkew,) = FundingLib.calculateIndexDeltas(1_000_000 * 1e18, 1e18, 3600, maxFactor);
+        assertEq(fullSkew, int256(CEILING));
+        // skew = (55 - 45) / 100 = 10%: 1e15 * 0.1 = 1e14 = ceiling
+        (int256 tenPercent,) = FundingLib.calculateIndexDeltas(55 * 1e18, 45 * 1e18, 3600, maxFactor);
+        assertEq(tenPercent, int256(CEILING));
+    }
+
+    /// @notice Payer index deltas round up: one second at a tiny rate still charges one index unit
+    function test_CalculateIndexDeltas_PayerDeltaRoundsUp() public pure {
+        // rate = 1e12 * (2 - 1) / 3 = 333_333_333_333 per hour; 1 s = 92_592_592.59... -> 92_592_593
+        (int256 longDelta,) = FundingLib.calculateIndexDeltas(2e18, 1e18, 1, 1e12);
+        assertEq(longDelta, 92_592_593);
     }
 
     /*//////////////////////////////////////////////////////////////
                       FUNDING OWED TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_CalculateFundingOwed_LongPays() public pure {
-        // Long pays when index moved up (positive delta)
-        int256 entryIndex = 0;
-        int256 currentIndex = 36_000_000_000_000; // positive delta
-        uint256 posSize = 1_000 * 1e18; // 1000 USD position in 18 dec
-
-        int256 owed = FundingLib.calculateFundingOwed(posSize, true, currentIndex, entryIndex);
-        // rawFunding = 1000e18 * 36e12 / 1e18 = 36_000_000_000_000_000 (3.6e16)
-        // Long: fundingOwedUsdc = rawFunding / 1e12 = 36_000 (0.036 USDC)
-        assertGt(owed, 0);
-        assertEq(owed, 36_000);
+    /// @notice 1,000 USD notional, index moved by 1e14 (0.01%): owes 0.1 USDC
+    function test_CalculateFundingOwed_Pays() public pure {
+        int256 owed = FundingLib.calculateFundingOwed(1_000 * 1e18, 1e14, 0);
+        assertEq(owed, 100_000);
     }
 
-    function test_CalculateFundingOwed_ShortReceives() public pure {
-        // Short receives when index moved up (longs heavier)
-        int256 entryIndex = 0;
-        int256 currentIndex = 36_000_000_000_000;
-        uint256 posSize = 1_000 * 1e18;
-
-        int256 owed = FundingLib.calculateFundingOwed(posSize, false, currentIndex, entryIndex);
-        assertLt(owed, 0); // Negative = receives
-        assertEq(owed, -36_000);
-    }
-
-    function test_CalculateFundingOwed_LongReceives() public pure {
-        // Long receives when index moved down (shorts heavier)
-        int256 entryIndex = 0;
-        int256 currentIndex = -36_000_000_000_000;
-        uint256 posSize = 1_000 * 1e18;
-
-        int256 owed = FundingLib.calculateFundingOwed(posSize, true, currentIndex, entryIndex);
-        assertLt(owed, 0); // Long receives when shorts are heavier
-    }
-
-    function test_CalculateFundingOwed_ShortPays() public pure {
-        // Short pays when index moved down (shorts heavier)
-        int256 entryIndex = 0;
-        int256 currentIndex = -36_000_000_000_000;
-        uint256 posSize = 1_000 * 1e18;
-
-        int256 owed = FundingLib.calculateFundingOwed(posSize, false, currentIndex, entryIndex);
-        assertGt(owed, 0); // Positive = pays
+    function test_CalculateFundingOwed_Receives() public pure {
+        int256 owed = FundingLib.calculateFundingOwed(1_000 * 1e18, -1e14, 0);
+        assertEq(owed, -100_000);
     }
 
     function test_CalculateFundingOwed_NoChange() public pure {
-        // No index change → zero funding
-        int256 owed = FundingLib.calculateFundingOwed(1_000 * 1e18, true, 100, 100);
+        int256 owed = FundingLib.calculateFundingOwed(1_000 * 1e18, 100, 100);
         assertEq(owed, 0);
     }
 
-    function test_CalculateFundingOwed_PrecisionConversion() public pure {
-        // Verify 18dec → 6dec conversion via /1e12
-        // posSize = 100_000e18 (100k USD), index delta = 1e12
-        int256 owed = FundingLib.calculateFundingOwed(100_000 * 1e18, true, 1e12, 0);
-        // rawFunding = 100_000e18 * 1e12 / 1e18 = 100_000e12
-        // / 1e12 = 100_000 (0.1 USDC)
-        assertEq(owed, 100_000);
+    /// @notice A payer's fractional amount rounds up, a receiver's rounds down
+    function test_CalculateFundingOwed_RoundsAgainstTheTrader() public pure {
+        // 1 USD notional * 1 index unit = 1e18 / 1e30 of a USDC unit
+        assertEq(FundingLib.calculateFundingOwed(1e18, 1, 0), 1);
+        assertEq(FundingLib.calculateFundingOwed(1e18, -1, 0), 0);
     }
 
     /*//////////////////////////////////////////////////////////////
                           FUZZ TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function testFuzz_IndexDelta_Symmetry(uint256 oiLong, uint256 oiShort, uint256 deltaTime) public pure {
+    /// @notice Swapping the sides swaps the deltas
+    function testFuzz_IndexDeltas_Symmetry(uint256 oiLong, uint256 oiShort, uint256 deltaTime, uint256 factor) public pure {
         oiLong = bound(oiLong, 0, 100_000_000 * 1e18);
         oiShort = bound(oiShort, 0, 100_000_000 * 1e18);
         deltaTime = bound(deltaTime, 0, 365 days);
+        factor = bound(factor, FundingLib.MIN_FUNDING_FACTOR, FundingLib.MAX_FUNDING_FACTOR);
 
-        int256 delta = FundingLib.calculateIndexDelta(oiLong, oiShort, deltaTime);
-        int256 deltaSwapped = FundingLib.calculateIndexDelta(oiShort, oiLong, deltaTime);
-
-        // Symmetric: swapping long/short negates the delta
-        assertEq(delta, -deltaSwapped);
+        (int256 longDelta, int256 shortDelta) = FundingLib.calculateIndexDeltas(oiLong, oiShort, deltaTime, factor);
+        (int256 longSwapped, int256 shortSwapped) = FundingLib.calculateIndexDeltas(oiShort, oiLong, deltaTime, factor);
+        assertEq(longDelta, shortSwapped);
+        assertEq(shortDelta, longSwapped);
     }
 
-    function testFuzz_FundingOwed_LongShortOpposite(uint256 posSize, int256 currentIndex, int256 entryIndex) public pure {
-        posSize = bound(posSize, 1e18, 100_000_000 * 1e18);
-        currentIndex = bound(currentIndex, -1e30, 1e30);
-        entryIndex = bound(entryIndex, -1e30, 1e30);
+    /**
+     * @notice Zero sum at the index level: the light side is credited at most what the heavy side is charged,
+     *         and the heavy side pays at most the ceiling on its notional
+     */
+    function testFuzz_IndexDeltas_CreditsNeverExceedCharges(uint256 oiLong, uint256 oiShort, uint256 deltaTime, uint256 factor) public pure {
+        oiLong = bound(oiLong, 1e18, 100_000_000 * 1e18);
+        oiShort = bound(oiShort, 1e18, 100_000_000 * 1e18);
+        deltaTime = bound(deltaTime, 0, 365 days);
+        factor = bound(factor, FundingLib.MIN_FUNDING_FACTOR, FundingLib.MAX_FUNDING_FACTOR);
 
-        int256 longOwed = FundingLib.calculateFundingOwed(posSize, true, currentIndex, entryIndex);
-        int256 shortOwed = FundingLib.calculateFundingOwed(posSize, false, currentIndex, entryIndex);
+        (int256 longDelta, int256 shortDelta) = FundingLib.calculateIndexDeltas(oiLong, oiShort, deltaTime, factor);
+        int256 charged = int256(oiLong) * longDelta + int256(oiShort) * shortDelta;
+        assertGe(charged, 0, "credits exceed charges");
 
-        // Long and short always pay opposite
-        assertEq(longOwed, -shortOwed);
+        uint256 payerDelta = uint256(longDelta > 0 ? longDelta : shortDelta > 0 ? shortDelta : int256(0));
+        assertLe(payerDelta, (CEILING * deltaTime + 3599) / 3600, "rate above the ceiling");
     }
 
-    function testFuzz_IndexDelta_MonotonicWithTime(uint256 oiLong, uint256 oiShort, uint256 t1, uint256 t2) public pure {
+    function testFuzz_IndexDeltas_MonotonicWithTime(uint256 oiLong, uint256 oiShort, uint256 t1, uint256 t2) public pure {
         oiLong = bound(oiLong, 0, 100_000_000 * 1e18);
         oiShort = bound(oiShort, 0, 100_000_000 * 1e18);
         t1 = bound(t1, 0, 365 days);
         t2 = bound(t2, t1, 365 days);
 
-        int256 delta1 = FundingLib.calculateIndexDelta(oiLong, oiShort, t1);
-        int256 delta2 = FundingLib.calculateIndexDelta(oiLong, oiShort, t2);
-
-        // More time → larger absolute delta (or equal)
-        if (oiLong >= oiShort) {
-            assertGe(delta2, delta1);
-        } else {
-            assertLe(delta2, delta1);
-        }
+        (int256 long1,) = FundingLib.calculateIndexDeltas(oiLong, oiShort, t1, FACTOR);
+        (int256 long2,) = FundingLib.calculateIndexDeltas(oiLong, oiShort, t2, FACTOR);
+        if (oiLong >= oiShort) assertGe(long2, long1);
+        else assertLe(long2, long1);
     }
 
+    /// @notice Doubling the size doubles the amount, within the one-unit rounding of each call
     function testFuzz_FundingOwed_LinearWithSize(uint256 posSize, int256 currentIndex, int256 entryIndex) public pure {
         posSize = bound(posSize, 1e18, 50_000_000 * 1e18);
         currentIndex = bound(currentIndex, -1e25, 1e25);
         entryIndex = bound(entryIndex, -1e25, 1e25);
 
-        int256 owedSingle = FundingLib.calculateFundingOwed(posSize, true, currentIndex, entryIndex);
-        int256 owedDouble = FundingLib.calculateFundingOwed(posSize * 2, true, currentIndex, entryIndex);
+        int256 owedSingle = FundingLib.calculateFundingOwed(posSize, currentIndex, entryIndex);
+        int256 owedDouble = FundingLib.calculateFundingOwed(posSize * 2, currentIndex, entryIndex);
 
-        // Double position size → double funding (within ±1 for integer division rounding)
+        // Each call rounds once (up for payers, down for receivers), so 2 * single and double differ by at most 1
         assertApproxEqAbs(owedDouble, owedSingle * 2, 1);
     }
 }

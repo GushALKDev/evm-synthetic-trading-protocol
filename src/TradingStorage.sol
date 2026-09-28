@@ -84,9 +84,14 @@ contract TradingStorage is Ownable {
     mapping(uint256 => uint256) private _openInterestShort;
 
     /**
-     * @notice Cumulative funding index per pair (signed, 18 decimals)
+     * @notice Cumulative funding index of the long side per pair (signed, WAD per unit of notional, positive = paid)
      */
-    mapping(uint256 => int256) private _cumulativeFundingIndex;
+    mapping(uint256 => int256) private _cumulativeFundingIndexLong;
+
+    /**
+     * @notice Cumulative funding index of the short side per pair (signed, WAD per unit of notional, positive = paid)
+     */
+    mapping(uint256 => int256) private _cumulativeFundingIndexShort;
 
     /**
      * @notice Timestamp of last funding index update per pair
@@ -94,7 +99,7 @@ contract TradingStorage is Ownable {
     mapping(uint256 => uint256) private _fundingLastUpdated;
 
     /**
-     * @notice Entry funding index per trade ID (signed, 18 decimals)
+     * @notice Entry funding index per trade ID, taken from the index of the trade's side (signed, WAD)
      */
     mapping(uint256 => int256) private _tradeFundingIndex;
 
@@ -112,7 +117,7 @@ contract TradingStorage is Ownable {
     event TradeTpUpdated(uint256 indexed tradeId, uint128 newTp);
     event TradeSlUpdated(uint256 indexed tradeId, uint128 newSl);
     event OpenInterestUpdated(uint256 indexed pairIndex, uint256 longOI, uint256 shortOI);
-    event CumulativeFundingIndexUpdated(uint256 indexed pairIndex, int256 newIndex, uint256 timestamp);
+    event CumulativeFundingIndexUpdated(uint256 indexed pairIndex, int256 longIndex, int256 shortIndex, uint256 timestamp);
     event CollateralSent(address indexed to, uint256 amount);
     event PairAdded(uint256 indexed pairIndex, string name);
     event PairUpdated(uint256 indexed pairIndex);
@@ -333,15 +338,17 @@ contract TradingStorage is Ownable {
     }
 
     /**
-     * @notice Update the cumulative funding index and timestamp for a pair
+     * @notice Update both cumulative funding indexes and the timestamp for a pair
      * @param _pairIndex The pair index
-     * @param _newIndex The new cumulative funding index
+     * @param _longIndex The new cumulative funding index of the long side
+     * @param _shortIndex The new cumulative funding index of the short side
      * @param _timestamp The timestamp of the update
      */
-    function updateFundingState(uint256 _pairIndex, int256 _newIndex, uint256 _timestamp) external onlyTradingEngine {
-        _cumulativeFundingIndex[_pairIndex] = _newIndex;
+    function updateFundingState(uint256 _pairIndex, int256 _longIndex, int256 _shortIndex, uint256 _timestamp) external onlyTradingEngine {
+        _cumulativeFundingIndexLong[_pairIndex] = _longIndex;
+        _cumulativeFundingIndexShort[_pairIndex] = _shortIndex;
         _fundingLastUpdated[_pairIndex] = _timestamp;
-        emit CumulativeFundingIndexUpdated(_pairIndex, _newIndex, _timestamp);
+        emit CumulativeFundingIndexUpdated(_pairIndex, _longIndex, _shortIndex, _timestamp);
     }
 
     /**
@@ -425,12 +432,13 @@ contract TradingStorage is Ownable {
     }
 
     /**
-     * @notice Get the cumulative funding index for a pair
+     * @notice Get the cumulative funding index of one side of a pair
      * @param _pairIndex The pair index
-     * @return The cumulative funding index
+     * @param _isLong true = long side, false = short side
+     * @return The cumulative funding index of that side
      */
-    function getCumulativeFundingIndex(uint256 _pairIndex) external view returns (int256) {
-        return _cumulativeFundingIndex[_pairIndex];
+    function getCumulativeFundingIndex(uint256 _pairIndex, bool _isLong) external view returns (int256) {
+        return _isLong ? _cumulativeFundingIndexLong[_pairIndex] : _cumulativeFundingIndexShort[_pairIndex];
     }
 
     /**

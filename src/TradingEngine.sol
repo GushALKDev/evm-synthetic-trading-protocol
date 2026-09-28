@@ -46,6 +46,8 @@ contract TradingEngine is Ownable, ReentrancyGuard {
 
     bool private _paused;
     address public treasury;
+    /// @notice Funding rate per hour at 100% skew (WAD), bounded by FundingLib.MIN/MAX_FUNDING_FACTOR
+    uint64 public fundingFactor;
 
     /*//////////////////////////////////////////////////////////////
                                 EVENTS
@@ -82,6 +84,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         int256 fundingOwedUsdc
     );
     event TreasuryUpdated(address indexed newTreasury);
+    event FundingFactorUpdated(uint256 newFundingFactor);
     event Paused(address account);
     event Unpaused(address account);
 
@@ -106,6 +109,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     error NotLiquidatable(uint256 tradeId, uint256 loss, uint256 threshold);
     error LimitNotTriggered(uint256 tradeId, uint128 oraclePrice);
     error NoLimitSet(uint256 tradeId);
+    error FundingFactorOutOfBounds(uint256 fundingFactor);
 
     /*//////////////////////////////////////////////////////////////
                               MODIFIERS
@@ -226,22 +230,16 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev Calculate the final payout to the trader after applying profit cap.
-     *      payout = collateral + pnl, capped at collateral * MAX_PROFIT_MULTIPLIER, floored at 0.
+     * @dev Calculate the final payout to the trader.
+     *      payout = max(0, collateral + min(pnl, collateral * (MAX_PROFIT_MULTIPLIER - 1)) - fundingOwed)
+     *      The cap applies to price PnL only. Funding is a transfer between traders, so it is settled after
+     *      the cap in both directions: a capped payer still pays, and a receiver's credit is not truncated.
      */
-    function _calculatePayout(uint64 _collateral, int256 _pnlUsdc) internal pure returns (uint256 payoutUsdc) {
-        if (_pnlUsdc >= 0) {
-            payoutUsdc = uint256(_pnlUsdc) + uint256(_collateral);
-            uint256 maxPayout = uint256(_collateral) * MAX_PROFIT_MULTIPLIER;
-            if (payoutUsdc > maxPayout) payoutUsdc = maxPayout;
-        } else {
-            uint256 loss = uint256(-_pnlUsdc);
-            if (loss >= uint256(_collateral)) {
-                payoutUsdc = 0;
-            } else {
-                payoutUsdc = uint256(_collateral) - loss;
-            }
-        }
+    function _calculatePayout(uint64 _collateral, int256 _pnlUsdc, int256 _fundingOwedUsdc) internal pure returns (uint256 payoutUsdc) {
+        int256 maxProfit = int256(uint256(_collateral) * (MAX_PROFIT_MULTIPLIER - 1));
+        int256 cappedPnl = _pnlUsdc > maxProfit ? maxProfit : _pnlUsdc;
+        int256 net = int256(uint256(_collateral)) + cappedPnl - _fundingOwedUsdc;
+        payoutUsdc = net > 0 ? uint256(net) : 0;
     }
 
     /**
@@ -283,14 +281,14 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev Update cumulative funding index for a pair based on time elapsed and OI imbalance.
-     *      Called before any OI change (open/close) to materialize accrued funding.
+     * @dev Accrue funding on both side indexes of a pair for the time elapsed at the current OI.
+     *      Called before any OI change (open/close/liquidate/executeLimit) so each interval uses constant OI.
      */
     function _updateFundingIndex(uint256 _pairIndex) internal {
         uint256 lastUpdated = TRADING_STORAGE.getFundingLastUpdated(_pairIndex);
         if (lastUpdated == 0) {
-            // First interaction — initialize timestamp, index stays at 0
-            TRADING_STORAGE.updateFundingState(_pairIndex, 0, block.timestamp);
+            // First interaction: initialize timestamp, indexes stay at 0
+            TRADING_STORAGE.updateFundingState(_pairIndex, 0, 0, block.timestamp);
             return;
         }
         uint256 deltaTime = block.timestamp - lastUpdated;
@@ -298,18 +296,22 @@ contract TradingEngine is Ownable, ReentrancyGuard {
 
         uint256 oiLong = TRADING_STORAGE.getOpenInterestLong(_pairIndex);
         uint256 oiShort = TRADING_STORAGE.getOpenInterestShort(_pairIndex);
-        int256 indexDelta = FundingLib.calculateIndexDelta(oiLong, oiShort, deltaTime);
-        int256 newIndex = TRADING_STORAGE.getCumulativeFundingIndex(_pairIndex) + indexDelta;
-        TRADING_STORAGE.updateFundingState(_pairIndex, newIndex, block.timestamp);
+        (int256 longDelta, int256 shortDelta) = FundingLib.calculateIndexDeltas(oiLong, oiShort, deltaTime, fundingFactor);
+        TRADING_STORAGE.updateFundingState(
+            _pairIndex,
+            TRADING_STORAGE.getCumulativeFundingIndex(_pairIndex, true) + longDelta,
+            TRADING_STORAGE.getCumulativeFundingIndex(_pairIndex, false) + shortDelta,
+            block.timestamp
+        );
     }
 
     /**
-     * @dev Calculate funding owed for a trade. Extracted to avoid stack-too-deep.
+     * @dev Calculate funding owed for a trade from the index of its own side. Extracted to avoid stack-too-deep.
      */
     function _calculateFunding(uint256 _tradeId, uint256 _posSizeWad, bool _isLong, uint256 _pairIndex) internal view returns (int256) {
-        int256 currentIndex = TRADING_STORAGE.getCumulativeFundingIndex(_pairIndex);
+        int256 currentIndex = TRADING_STORAGE.getCumulativeFundingIndex(_pairIndex, _isLong);
         int256 entryIndex = TRADING_STORAGE.getTradeFundingIndex(_tradeId);
-        return FundingLib.calculateFundingOwed(_posSizeWad, _isLong, currentIndex, entryIndex);
+        return FundingLib.calculateFundingOwed(_posSizeWad, currentIndex, entryIndex);
     }
 
     /**
@@ -333,7 +335,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         _distributeFees(fee);
 
         tradeId = TRADING_STORAGE.storeTrade(_user, _isLong, _pairIndex, _leverage, effectiveCollateral, _executionPrice, _tp, _sl);
-        TRADING_STORAGE.setTradeFundingIndex(tradeId, TRADING_STORAGE.getCumulativeFundingIndex(_pairIndex));
+        TRADING_STORAGE.setTradeFundingIndex(tradeId, TRADING_STORAGE.getCumulativeFundingIndex(_pairIndex, _isLong));
         TRADING_STORAGE.increaseOpenInterest(_pairIndex, _positionSizeWad(effectiveCollateral, _leverage), _isLong);
         emit TradeOpened(tradeId, _user, _pairIndex, _isLong, effectiveCollateral, _leverage, _executionPrice, fee);
     }
@@ -413,6 +415,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         ASSET = _asset;
         SPREAD_MANAGER = SpreadManager(_spreadManager);
         treasury = _treasury;
+        fundingFactor = uint64(FundingLib.DEFAULT_FUNDING_FACTOR);
     }
 
     /**
@@ -501,10 +504,9 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         int256 pnlUsdc = _calculatePnl(trade.collateral, trade.leverage, trade.openPrice, executionPrice, trade.isLong);
         uint256 positionSize = _positionSizeWad(trade.collateral, trade.leverage);
 
-        // Calculate funding owed and adjust PnL
+        // Calculate funding owed; it is settled after the profit cap
         int256 fundingOwedUsdc = _calculateFunding(_tradeId, positionSize, trade.isLong, trade.pairIndex);
-        int256 adjustedPnl = pnlUsdc - fundingOwedUsdc;
-        uint256 payoutUsdc = _calculatePayout(trade.collateral, adjustedPnl);
+        uint256 payoutUsdc = _calculatePayout(trade.collateral, pnlUsdc, fundingOwedUsdc);
 
         // Close fee deducted from payout
         uint256 closeFee = _calculateFee(trade.collateral, trade.leverage, CLOSE_FEE_BPS);
@@ -655,7 +657,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         uint256 positionSize = _positionSizeWad(_trade.collateral, _trade.leverage);
         int256 pnlUsdc = _calculatePnl(_trade.collateral, _trade.leverage, _trade.openPrice, _executionPrice, _trade.isLong);
         int256 fundingOwedUsdc = _calculateFunding(_tradeId, positionSize, _trade.isLong, _trade.pairIndex);
-        uint256 payoutUsdc = _calculatePayout(_trade.collateral, pnlUsdc - fundingOwedUsdc);
+        uint256 payoutUsdc = _calculatePayout(_trade.collateral, pnlUsdc, fundingOwedUsdc);
 
         // Close fee deducted from payout (same as closeTrade)
         uint256 closeFee = _calculateFee(_trade.collateral, _trade.leverage, CLOSE_FEE_BPS);
@@ -760,6 +762,22 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         if (_treasury == address(0)) revert ZeroAddress();
         treasury = _treasury;
         emit TreasuryUpdated(_treasury);
+    }
+
+    /**
+     * @notice Set the funding rate per hour at 100% skew (WAD)
+     * @dev Accrues every pair at the old factor first, so the new factor never applies to time already elapsed.
+     */
+    function setFundingFactor(uint256 _fundingFactor) external onlyOwner {
+        if (_fundingFactor < FundingLib.MIN_FUNDING_FACTOR || _fundingFactor > FundingLib.MAX_FUNDING_FACTOR) {
+            revert FundingFactorOutOfBounds(_fundingFactor);
+        }
+        uint256 pairsCount = TRADING_STORAGE.getPairsCount();
+        for (uint256 i; i < pairsCount; ++i) {
+            _updateFundingIndex(i);
+        }
+        fundingFactor = uint64(_fundingFactor);
+        emit FundingFactorUpdated(_fundingFactor);
     }
 
     function pause() external onlyOwner whenNotPaused {
