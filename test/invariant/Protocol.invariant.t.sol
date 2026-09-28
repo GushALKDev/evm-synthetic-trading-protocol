@@ -6,9 +6,14 @@ import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {TradingEngine} from "../../src/TradingEngine.sol";
 import {TradingStorage} from "../../src/TradingStorage.sol";
 import {Vault} from "../../src/Vault.sol";
+import {AssistantFund} from "../../src/AssistantFund.sol";
+import {SolvencyManager} from "../../src/SolvencyManager.sol";
+import {BondDepository} from "../../src/BondDepository.sol";
+import {SynthToken} from "../../src/SynthToken.sol";
 import {MockOracle} from "../mocks/MockOracle.sol";
 import {MockSpreadManager} from "../mocks/MockSpreadManager.sol";
 import {ProtocolHandler} from "./handlers/ProtocolHandler.sol";
+import {LiquidityHandler} from "./handlers/LiquidityHandler.sol";
 import {ERC20} from "solady/tokens/ERC20.sol";
 
 contract MockUSDC is ERC20 {
@@ -32,120 +37,205 @@ contract MockUSDC is ERC20 {
 /**
  * @title ProtocolInvariantTest
  * @author GushALKDev
- * @notice Roadmap 12.3 — properties that must hold after ANY sequence of protocol actions.
- * @dev All state transitions go through ProtocolHandler, which only issues valid calls. The Vault is
- *      seeded with LP liquidity so winning traders can actually be paid, otherwise payouts would
- *      revert and the interesting states would never be reached.
+ * @notice Stateful invariants over the whole protocol with MockOracle and MockSpreadManager: trading,
+ *         LP deposits and withdrawals, the AssistantFund as treasury, the SolvencyManager and bonding.
+ * @dev Two handlers drive the system: ProtocolHandler (trading, with a settlement model) and
+ *      LiquidityHandler (LP flows, time, price, pause, solvency actions). The Vault starts with 1,000,000
+ *      USDC from an LP that never withdraws.
  */
 contract ProtocolInvariantTest is StdInvariant, Test {
     TradingEngine engine;
     TradingStorage tradingStorage;
     Vault vault;
+    AssistantFund assistantFund;
+    SolvencyManager solvencyManager;
+    BondDepository bondDepository;
+    SynthToken synth;
     MockUSDC usdc;
     MockOracle oracle;
-    MockSpreadManager spreadManager;
     ProtocolHandler handler;
+    LiquidityHandler liquidity;
 
     address owner = makeAddr("owner");
-    address treasury = makeAddr("treasury");
     address lp = makeAddr("lp");
 
-    uint128 constant MAX_OI = 10_000_000 * 1e18;
+    uint256 constant SEED = 1_000_000 * 10 ** 6;
 
     function setUp() public {
-        // Staleness/funding math needs a non-trivial starting timestamp
         vm.warp(1_000_000);
 
         usdc = new MockUSDC();
         oracle = new MockOracle();
         oracle.setPrice(0, 50_000 * 1e18);
-        spreadManager = new MockSpreadManager(5);
 
         vm.startPrank(owner);
         tradingStorage = new TradingStorage(address(usdc), owner);
         vault = new Vault(address(usdc), owner);
-        engine = new TradingEngine(address(tradingStorage), address(vault), address(oracle), address(usdc), treasury, address(spreadManager), owner);
+        assistantFund = new AssistantFund(address(usdc), address(vault), 50_000 * 10 ** 6, owner);
+        synth = new SynthToken(owner);
+        bondDepository = new BondDepository(address(usdc), address(vault), address(synth), 500, owner);
+        engine = new TradingEngine(
+            address(tradingStorage), address(vault), address(oracle), address(usdc), address(assistantFund), address(new MockSpreadManager(5)), owner
+        );
+        solvencyManager = new SolvencyManager(address(vault), address(assistantFund), address(bondDepository), owner);
         tradingStorage.setTradingEngine(address(engine));
         vault.setTradingEngine(address(engine));
-        tradingStorage.addPair("BTC/USD", 100, MAX_OI);
+        synth.setMinter(address(bondDepository));
+        assistantFund.setSolvencyManager(address(solvencyManager));
+        bondDepository.setSolvencyManager(address(solvencyManager));
+        tradingStorage.addPair("BTC/USD", 100, 50_000_000 * 1e18);
         vm.stopPrank();
 
-        // Seed LP liquidity so profitable traders can be paid out
-        usdc.mint(lp, 1_000_000 * 10 ** 6);
+        usdc.mint(lp, SEED);
         vm.startPrank(lp);
-        usdc.approve(address(vault), type(uint256).max);
-        vault.deposit(1_000_000 * 10 ** 6, lp);
+        usdc.approve(address(vault), SEED);
+        vault.deposit(SEED, lp);
         vm.stopPrank();
 
         handler = new ProtocolHandler(engine, tradingStorage, vault, oracle, usdc);
+        address[] memory actors = new address[](handler.actorsLength());
+        for (uint256 i; i < actors.length; ++i) {
+            actors[i] = handler.actors(i);
+        }
+        liquidity = new LiquidityHandler(engine, vault, oracle, usdc, assistantFund, solvencyManager, bondDepository, owner, actors);
+
         targetContract(address(handler));
+        targetContract(address(liquidity));
     }
 
     /*//////////////////////////////////////////////////////////////
-                              INVARIANTS
+                           VAULT ACCOUNTING
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice 12.3.1 — The Vault never reports more assets than the USDC it actually holds
-     * @dev totalAssets() is balance-based, so this pins it to reality: a drift would mean the Vault
-     *      is promising LPs liquidity that is not there.
+     * @notice The Vault's USDC balance equals the sum of every modelled flow into and out of it
+     * @dev vault USDC = SEED + LP deposits - LP withdrawals
+     *                   + Vault fee share (80% of open and close fees)
+     *                   + realised trader losses (collateral kept on close, TP/SL or liquidation)
+     *                   - realised trader profits (paid with sendPayout)
+     *                   + AssistantFund injections + AssistantFund skims + bond proceeds
+     *      Trader losses and profits are computed by the handler's settlement model, not measured, so any
+     *      settlement that moves Vault USDC differently from the documented formulas breaks the equation.
      */
-    function invariant_TotalAssetsBackedByBalance() public view {
-        assertEq(vault.totalAssets(), usdc.balanceOf(address(vault)), "totalAssets diverged from USDC balance");
+    function invariant_VaultBalanceMatchesModelledFlows() public view {
+        uint256 inflows = SEED + liquidity.ghostDeposits() + handler.ghostVaultFees() + handler.ghostTraderLosses() + liquidity.ghostInjections()
+            + liquidity.ghostSkims() + liquidity.ghostBondProceeds();
+        uint256 outflows = liquidity.ghostWithdrawals() + handler.ghostTraderProfits();
+        assertEq(usdc.balanceOf(address(vault)), inflows - outflows, "vault balance diverged from modelled flows");
     }
 
     /**
-     * @notice 12.3.2 — Open interest never exceeds the pair's configured maxOI
-     * @dev Long and short OI are tracked separately; the cap applies to each side as enforced in
-     *      TradingEngine._validateMaxOI.
+     * @notice The AssistantFund (the treasury) holds exactly the treasury fee share minus what it sent to the Vault
+     * @dev AssistantFund USDC = 20% of open and close fees - injections - skims
      */
-    function invariant_OpenInterestWithinMax() public view {
-        uint128 maxOI = tradingStorage.getPair(0).maxOI;
-        assertLe(tradingStorage.getOpenInterestLong(0), maxOI, "long OI exceeded maxOI");
-        assertLe(tradingStorage.getOpenInterestShort(0), maxOI, "short OI exceeded maxOI");
+    function invariant_AssistantFundBalanceMatchesModelledFlows() public view {
+        assertEq(
+            assistantFund.balance(), handler.ghostTreasuryFees() - liquidity.ghostInjections() - liquidity.ghostSkims(), "reserve diverged from modelled flows"
+        );
+    }
+
+    /// @notice Every settlement, withdrawal, injection, skim and bond moved exactly the modelled amount
+    function invariant_FlowsMatchModel() public view {
+        assertEq(handler.ghostMismatches(), 0, "trader or keeper payout differs from the model");
+        assertEq(liquidity.ghostMismatches(), 0, "LP or solvency flow differs from the model");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                               FUNDING
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice Funding credited to receivers never exceeds funding charged to payers (single pair)
+     * @dev S = sum of fundingOwed over settled positions + fundingOwed accrued by open positions at the stored
+     *      side indexes (payer positive, receiver negative). Zero sum up to rounding: 0 <= S <= N, where N is
+     *      the number of positions counted, because each amount rounds by less than one unit in the protocol's
+     *      favour and index-level rounding stays far below one unit.
+     */
+    function invariant_FundingCreditsNeverExceedCharges() public view {
+        int256 total = handler.ghostFundingSettled() + handler.openAccruedFunding();
+        assertGe(total, 0, "credits exceed charges");
+        assertLe(total, int256(handler.ghostSettled() + handler.openTradeCount()), "funding surplus above rounding");
     }
 
     /**
-     * @notice 12.3.3 — Share price is strictly positive while shares are outstanding
-     * @dev A zero share price would mean LP shares became worthless and would break both deposit
-     *      and withdrawal math (division by zero / infinite mint).
+     * @notice The Vault does not pay funding except for the documented bad-debt residual
+     * @dev collected - credited + accrued(open) + badDebt >= 0, where collected is what payers actually paid
+     *      at settlement, credited what receivers actually got, accrued what open positions owe (+) or are owed
+     *      (-), and badDebt the funding payers could not pay because their loss exceeded their collateral.
+     *      Receivers can be credited before payers settle; the accrued term carries that timing difference.
      */
+    function invariant_VaultFundingExposureBoundedByBadDebt() public view {
+        int256 exposure = int256(handler.ghostFundingCollected()) - int256(handler.ghostFundingCredited()) + handler.openAccruedFunding()
+            + int256(handler.ghostFundingBadDebt());
+        assertGe(exposure, 0, "vault paid funding beyond the bad-debt residual");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                          CUSTODY AND LIMITS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice TradingStorage holds exactly the collateral of the open positions, no more and no less
+    function invariant_StorageHoldsExactlyOpenCollateral() public view {
+        assertEq(usdc.balanceOf(address(tradingStorage)), handler.ghostOpenCollateral(), "storage balance differs from open collateral");
+    }
+
+    /**
+     * @notice Open interest equals the open positions on each side, and long + short stays within maxOI
+     * @dev TradingStorage.increaseOpenInterest checks the cap against long + short OI of the pair.
+     */
+    function invariant_OpenInterestMatchesPositionsAndCap() public view {
+        uint256 longOI = tradingStorage.getOpenInterestLong(0);
+        uint256 shortOI = tradingStorage.getOpenInterestShort(0);
+        assertEq(longOI, handler.ghostOpenLongSize(), "long OI differs from open longs");
+        assertEq(shortOI, handler.ghostOpenShortSize(), "short OI differs from open shorts");
+        assertLe(longOI + shortOI, tradingStorage.getPair(0).maxOI, "long + short OI above maxOI");
+    }
+
+    /// @notice Shares held by the Vault equal the shares of all pending withdrawal requests
+    function invariant_EscrowedSharesMatchRequests() public view {
+        uint256 requested;
+        uint256 count = liquidity.actorsLength();
+        for (uint256 i; i < count; ++i) {
+            (uint256 shares,) = vault.withdrawalRequests(liquidity.actors(i));
+            requested += shares;
+        }
+        assertEq(vault.balanceOf(address(vault)), requested, "escrow differs from pending requests");
+    }
+
+    /**
+     * @notice A rescue (injection or bond) never lifts CR above 100%
+     * @dev Both are sized off collateralizationDeficit = totalSupply / 1e12 - totalAssets, so the resulting
+     *      CR is floor(totalSupply / 1e12) * 1e30 / totalSupply <= 1e18. Tolerance 0.
+     */
+    function invariant_RescueNeverOvershootsTarget() public view {
+        assertLe(liquidity.ghostMaxCrAfterRescue(), 1e18, "rescue lifted CR above 100%");
+    }
+
+    /// @notice Share price is strictly positive while shares are outstanding
     function invariant_SharePricePositive() public view {
-        uint256 supply = vault.totalSupply();
-        if (supply == 0) return;
+        if (vault.totalSupply() == 0) return;
         assertGt(vault.convertToAssets(1e18), 0, "share price fell to zero");
     }
 
     /**
-     * @notice Custody — TradingStorage holds at least the collateral owed to all open trades
-     * @dev Trader collateral lives in TradingStorage, never in the Vault. If its balance dipped below
-     *      the sum of open positions' collateral, some trader could not be paid on close: the Vault
-     *      would have absorbed funds that were never LP liquidity.
-     */
-    function invariant_StorageCoversOpenCollateral() public view {
-        assertGe(usdc.balanceOf(address(tradingStorage)), handler.ghostOpenCollateral(), "TradingStorage cannot cover open trade collateral");
-    }
-
-    /**
-     * @notice Custody — shares are never created without assets backing them
-     * @dev The mirror of the share-price invariant: a non-zero share supply must always be backed by
-     *      a non-zero asset balance. Zero assets against live shares is the insolvency end-state, and
-     *      would let the next depositor mint against an empty Vault.
+     * @notice Shares are never outstanding without assets backing them
+     * @dev Zero assets against live shares is the insolvency end-state and would let the next depositor mint
+     *      against an empty Vault.
      */
     function invariant_SharesBackedByAssets() public view {
         if (vault.totalSupply() == 0) return;
         assertGt(vault.totalAssets(), 0, "shares outstanding with zero backing assets");
     }
 
-    /// @notice Surfaces how often each handler action actually ran, to catch a silently idle suite
-    function invariant_CallSummary() public view {
-        console.log("deposit    :", handler.calls("deposit"));
-        console.log("openTrade  :", handler.calls("openTrade"));
-        console.log("closeTrade :", handler.calls("closeTrade"));
-        console.log("liquidate  :", handler.calls("liquidate"));
-        console.log("movePrice  :", handler.calls("movePrice"));
-        console.log("warp       :", handler.calls("warp"));
-        console.log("open trades:", handler.openTradeCount());
-        console.log("settled liq:", handler.ghostLiquidations());
+    /**
+     * @notice Run summary, logged after each run (forge shows the last run's logs with -vv); the forge metrics
+     *         table gives the call distribution over all runs. Also checks the settlement counters are consistent.
+     */
+    function afterInvariant() public view {
+        assertLe(handler.ghostSettled() + handler.openTradeCount(), handler.ghostOpened(), "settled or open positions never opened");
+        assertLe(handler.ghostLiquidated(), handler.ghostSettled(), "more liquidations than settlements");
+        console.log("opened / settled / liquidated:", handler.ghostOpened(), handler.ghostSettled(), handler.ghostLiquidated());
+        console.log("open positions left:", handler.openTradeCount());
+        console.log("funding bad debt (USDC units):", handler.ghostFundingBadDebt());
     }
 }
