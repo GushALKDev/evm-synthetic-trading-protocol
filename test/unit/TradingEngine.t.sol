@@ -2038,6 +2038,13 @@ contract TradingEngineTest is Test {
     );
 
     // Threshold = effectiveCollateral * 9000 / 10000
+    /// @dev Liquidator reward on the default position: max(10% of remaining, 0.5% of collateral)
+    function _expectedLiqReward(uint256 remaining) internal pure returns (uint256) {
+        uint256 reward = (remaining * 1000) / 10_000;
+        uint256 minReward = (uint256(DEFAULT_EFFECTIVE_COLLATERAL) * 50) / 10_000;
+        return reward < minReward ? minReward : reward;
+    }
+
     function _liqThreshold(uint64 effectiveCollateral) internal pure returns (uint256) {
         return (uint256(effectiveCollateral) * 9000) / 10_000;
     }
@@ -2123,7 +2130,7 @@ contract TradingEngineTest is Test {
         int256 pnl = _calcLongPnl(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, execPrice);
         uint256 loss = uint256(-pnl);
         uint256 remaining = loss >= DEFAULT_EFFECTIVE_COLLATERAL ? 0 : DEFAULT_EFFECTIVE_COLLATERAL - loss;
-        uint256 expectedReward = (remaining * 1000) / 10_000;
+        uint256 expectedReward = _expectedLiqReward(remaining);
         uint256 expectedVault = DEFAULT_EFFECTIVE_COLLATERAL - expectedReward;
 
         vm.prank(bob);
@@ -2142,7 +2149,7 @@ contract TradingEngineTest is Test {
         int256 pnl = _calcLongPnl(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, execPrice);
         uint256 loss = uint256(-pnl);
         uint256 remaining = loss >= DEFAULT_EFFECTIVE_COLLATERAL ? 0 : DEFAULT_EFFECTIVE_COLLATERAL - loss;
-        uint256 expectedReward = (remaining * 1000) / 10_000;
+        uint256 expectedReward = _expectedLiqReward(remaining);
         uint256 expectedVault = DEFAULT_EFFECTIVE_COLLATERAL - expectedReward;
 
         vm.expectEmit(true, true, true, true);
@@ -2165,10 +2172,11 @@ contract TradingEngineTest is Test {
         assertEq(tradingStorage.getOpenInterest(DEFAULT_PAIR_INDEX), 0);
     }
 
-    function test_Liquidate_LossExceedsCollateral_ZeroReward() public {
+    /// @dev Round 2: past 100% loss the liquidator is paid the 0.5% floor (it was 0 before round 2)
+    function test_Liquidate_LossExceedsCollateral_PaysMinReward() public {
         uint32 tradeId = _openDefaultTrade(alice);
 
-        // Push loss beyond 100% of collateral → remaining = 0, reward = 0, all to vault
+        // Push loss beyond 100% of collateral → remaining = 0, reward = 0.5% of collateral, rest to vault
         uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 10_500); // 105% loss
         mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
 
@@ -2178,8 +2186,9 @@ contract TradingEngineTest is Test {
         vm.prank(bob);
         engine.liquidate(tradeId, EMPTY_UPDATE);
 
-        assertEq(usdc.balanceOf(bob), bobBefore); // no reward
-        assertEq(usdc.balanceOf(address(vault)) - vaultBefore, DEFAULT_EFFECTIVE_COLLATERAL);
+        uint256 minReward = (uint256(DEFAULT_EFFECTIVE_COLLATERAL) * 50) / 10_000;
+        assertEq(usdc.balanceOf(bob) - bobBefore, minReward);
+        assertEq(usdc.balanceOf(address(vault)) - vaultBefore, DEFAULT_EFFECTIVE_COLLATERAL - minReward);
     }
 
     function test_Liquidate_RevertWhenNotLiquidatable() public {
@@ -2366,7 +2375,7 @@ contract TradingEngineTest is Test {
 
         uint256 loss = uint256(-expectedPnl);
         uint256 remaining = loss >= DEFAULT_EFFECTIVE_COLLATERAL ? 0 : DEFAULT_EFFECTIVE_COLLATERAL - loss;
-        uint256 expectedReward = (remaining * 1000) / 10_000;
+        uint256 expectedReward = _expectedLiqReward(remaining);
         uint256 expectedVault = DEFAULT_EFFECTIVE_COLLATERAL - expectedReward;
 
         vm.expectEmit(true, true, true, true);
@@ -2423,8 +2432,9 @@ contract TradingEngineTest is Test {
         assertEq(total, DEFAULT_EFFECTIVE_COLLATERAL);
     }
 
-    function test_Liquidate_UnderwaterVaultMadeWhole() public {
-        // Deep loss (>100%) so remaining = 0: liquidator gets nothing, the full collateral backs the vault.
+    /// @dev Round 2: the liquidator now receives the 0.5% floor; the vault receives the rest of the collateral
+    function test_Liquidate_Underwater_VaultGetsCollateralMinusMinReward() public {
+        // Deep loss (>100%) so remaining = 0: liquidator gets the floor, the rest of the collateral backs the vault.
         uint32 tradeId = _openDefaultTrade(alice);
         uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 12_000); // 120% loss
         vm.assume(liqOracle > 0);
@@ -2438,14 +2448,14 @@ contract TradingEngineTest is Test {
         vm.prank(bob);
         engine.liquidate(tradeId, EMPTY_UPDATE);
 
-        // Liquidator reward is 0 when the position is fully underwater.
-        assertEq(usdc.balanceOf(bob), bobBefore);
+        // Liquidator reward is the 0.5% floor when the position is fully underwater.
+        uint256 minReward = (uint256(DEFAULT_EFFECTIVE_COLLATERAL) * 50) / 10_000;
+        assertEq(usdc.balanceOf(bob) - bobBefore, minReward);
 
-        // The entire effective collateral moved from storage into the vault, and the vault's
-        // balance-based accounting absorbed it exactly (made whole).
+        // The entire effective collateral left storage; the vault absorbed all of it except the reward.
         assertEq(storageBefore - usdc.balanceOf(address(tradingStorage)), DEFAULT_EFFECTIVE_COLLATERAL);
-        assertEq(usdc.balanceOf(address(vault)) - vaultBalBefore, DEFAULT_EFFECTIVE_COLLATERAL);
-        assertEq(vault.totalAssets() - vaultTotalBefore, DEFAULT_EFFECTIVE_COLLATERAL);
+        assertEq(usdc.balanceOf(address(vault)) - vaultBalBefore, DEFAULT_EFFECTIVE_COLLATERAL - minReward);
+        assertEq(vault.totalAssets() - vaultTotalBefore, DEFAULT_EFFECTIVE_COLLATERAL - minReward);
     }
 
     function testFuzz_Liquidate_ShortRoundingFavorsPool(uint256 lossBps) public {
@@ -2483,7 +2493,7 @@ contract TradingEngineTest is Test {
         int256 pnlFloor = int256(size) - int256(exitFloor); // floor mirror (weakly smaller loss)
         uint256 lossFloor = pnlFloor < 0 ? uint256(-pnlFloor) : 0;
         uint256 remainingFloor = lossFloor >= DEFAULT_EFFECTIVE_COLLATERAL ? 0 : DEFAULT_EFFECTIVE_COLLATERAL - lossFloor;
-        uint256 vaultFloorLowerBound = DEFAULT_EFFECTIVE_COLLATERAL - (remainingFloor * 1000) / 10_000;
+        uint256 vaultFloorLowerBound = DEFAULT_EFFECTIVE_COLLATERAL - _expectedLiqReward(remainingFloor);
 
         assertGe(usdc.balanceOf(address(vault)) - vaultBefore, vaultFloorLowerBound);
     }

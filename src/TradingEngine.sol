@@ -33,6 +33,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     uint256 public constant FEE_VAULT_SPLIT_BPS = 8000; // 80% to Vault, 20% to treasury
     uint256 public constant LIQUIDATION_THRESHOLD_BPS = 9000; // liquidatable when loss >= 90% of collateral
     uint256 public constant LIQUIDATOR_REWARD_BPS = 1000; // 10% of remaining collateral to liquidator
+    uint256 public constant LIQUIDATOR_MIN_REWARD_BPS = 50; // floor: 0.5% of collateral, paid even past 100% loss
     uint256 public constant EXEC_REWARD_BPS = 10; // 0.1% of position size to the TP/SL executor
 
     /*//////////////////////////////////////////////////////////////
@@ -387,6 +388,18 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     }
 
     /**
+     * @dev Liquidator reward = max(10% of the collateral left after the loss, 0.5% of collateral).
+     *      Always positive (MIN_COLLATERAL keeps the floor above zero) and never above the collateral, so it
+     *      is paid from the position and never from Vault liquidity, including when the loss exceeds it.
+     */
+    function _computeLiquidatorReward(uint64 _collateral, uint256 _loss) internal pure returns (uint256 reward) {
+        uint256 remaining = _loss >= uint256(_collateral) ? 0 : uint256(_collateral) - _loss;
+        reward = (remaining * LIQUIDATOR_REWARD_BPS) / BPS_DENOMINATOR;
+        uint256 minReward = (uint256(_collateral) * LIQUIDATOR_MIN_REWARD_BPS) / BPS_DENOMINATOR;
+        if (reward < minReward) reward = minReward;
+    }
+
+    /**
      * @dev Determine whether the trade's TP or SL is triggered at the given oracle price.
      *      Long TP: price >= tp | Long SL: price <= sl
      *      Short TP: price <= tp | Short SL: price >= sl
@@ -566,8 +579,8 @@ contract TradingEngine is Ownable, ReentrancyGuard {
      * @dev Permissionless. Loss is computed on adjustedPnl (price PnL minus funding owed),
      *      evaluated at the spread-adjusted execution price (close direction), exactly like closeTrade.
      *      Reverts with NotLiquidatable if the position is still solvent.
-     *      Remaining collateral (collateral - loss) is split: 10% to the liquidator, 90% to the Vault.
-     *      The loss portion is also sent to the Vault. No close fee is charged on liquidation.
+     *      Liquidator reward = max(10% of (collateral - loss), 0.5% of collateral); the rest of the collateral,
+     *      loss portion included, goes to the Vault. No close fee is charged on liquidation.
      *      Collateral flow: TradingStorage → Vault (rest) + TradingStorage → liquidator (reward).
      *
      *      Not gated by whenNotPaused: liquidation is the protocol's solvency valve and must stay live
@@ -597,10 +610,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         uint256 loss = adjustedPnl < 0 ? uint256(-adjustedPnl) : 0;
         if (loss < threshold) revert NotLiquidatable(_tradeId, loss, threshold);
 
-        // Remaining collateral after covering the loss (0 if loss exceeds collateral)
-        uint256 remaining = loss >= uint256(trade.collateral) ? 0 : uint256(trade.collateral) - loss;
-        uint256 liquidatorReward = (remaining * LIQUIDATOR_REWARD_BPS) / BPS_DENOMINATOR;
-
+        uint256 liquidatorReward = _computeLiquidatorReward(trade.collateral, loss);
         _executeLiquidation(trade, _tradeId, positionSize, executionPrice, pnlUsdc, fundingOwedUsdc, liquidatorReward);
 
         _refundEth();
