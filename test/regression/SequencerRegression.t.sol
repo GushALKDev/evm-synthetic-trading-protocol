@@ -10,7 +10,9 @@ import {MockChainlinkFeed} from "../mocks/MockChainlinkFeed.sol";
  * @title SequencerRegressionTest
  * @author GushALKDev
  * @notice Round 1 finding: the oracle had no L2 sequencer uptime check. Prices are now refused while the
- *         Chainlink sequencer uptime feed reports the sequencer down and for one hour after it comes back.
+ *         Chainlink sequencer uptime feed reports the sequencer down, and opening new positions is refused for one
+ *         hour after it comes back (round 3 narrowed the grace period to openings, see
+ *         SequencerGraceScopeRegression.t.sol).
  * @dev Mock mode: MockChainlinkFeed plays the uptime feed (answer 0 = up, 1 = down, startedAt = last change).
  *      The fork suite runs the same checks against the Arbitrum One feed.
  */
@@ -56,16 +58,23 @@ contract SequencerRegressionTest is Test {
         oracle.getPrice(0, data);
     }
 
-    function test_Regression_Sequencer_GracePeriodReverts() public {
+    /// @notice During the grace period opening is refused; prices for other actions are served
+    function test_Regression_Sequencer_GracePeriodBlocksOpening() public {
         uint256 upSince = block.timestamp - 3600; // exactly the grace period: still refused
         sequencerFeed.setStartedAt(upSince);
-        bytes[] memory data = _update();
         vm.expectRevert(abi.encodeWithSelector(PythChainlinkOracle.SequencerGracePeriodNotOver.selector, upSince, block.timestamp));
-        oracle.getPrice(0, data);
+        oracle.checkOpenAllowed();
+        (uint128 price,) = oracle.getPrice(0, _update());
+        assertGt(price, 0, "price refused during the grace period");
 
         vm.warp(block.timestamp + 1);
-        (uint128 price,) = oracle.getPrice(0, _update());
-        assertGt(price, 0, "not accepted after the grace period");
+        oracle.checkOpenAllowed();
+    }
+
+    function test_Sequencer_DownBlocksOpening() public {
+        sequencerFeed.setAnswer(1);
+        vm.expectRevert(PythChainlinkOracle.SequencerDown.selector);
+        oracle.checkOpenAllowed();
     }
 
     function test_Regression_Sequencer_UninitializedFeedTreatedAsDown() public {
@@ -85,5 +94,6 @@ contract SequencerRegressionTest is Test {
         assertEq(address(noSequencer.SEQUENCER_UPTIME_FEED()), address(0));
         (uint128 price,) = noSequencer.getPrice(0, _update());
         assertGt(price, 0);
+        noSequencer.checkOpenAllowed();
     }
 }

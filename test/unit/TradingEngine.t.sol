@@ -923,6 +923,37 @@ contract TradingEngineTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
+                      OPENING BLOCKED BY THE ORACLE
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice openTrade asks the oracle whether opening is allowed (the sequencer grace period on Arbitrum)
+    function test_OpenTrade_RevertWhenOracleBlocksOpening() public {
+        mockOracle.setOpenBlocked(true);
+        vm.prank(alice);
+        vm.expectRevert(MockOracle.OpenNotAllowed.selector);
+        engine.openTrade(DEFAULT_PAIR_INDEX, true, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE);
+    }
+
+    /// @notice The opening check does not apply to closes, TP/SL updates or liquidations
+    function test_OracleBlocksOpening_CloseUpdateAndLiquidateStillWork() public {
+        uint32 closeId = _openDefaultTrade(alice);
+        uint32 liqId = _openDefaultTrade(bob);
+        mockOracle.setOpenBlocked(true);
+
+        vm.startPrank(alice);
+        engine.updateSl(closeId, 0, EMPTY_UPDATE);
+        engine.closeTrade(closeId, _longClosePrice(DEFAULT_ORACLE_PRICE), DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
+        vm.stopPrank();
+        assertEq(tradingStorage.getTrade(closeId).user, address(0));
+
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, (DEFAULT_ORACLE_PRICE * 90) / 100);
+        vm.prank(bob);
+        engine.updateSl(liqId, 0, EMPTY_UPDATE);
+        engine.liquidate(liqId, EMPTY_UPDATE);
+        assertEq(tradingStorage.getTrade(liqId).user, address(0));
+    }
+
+    /*//////////////////////////////////////////////////////////////
                           PAUSE TESTS
     //////////////////////////////////////////////////////////////*/
 

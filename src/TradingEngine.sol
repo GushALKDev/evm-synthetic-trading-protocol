@@ -513,6 +513,7 @@ contract TradingEngine is Ownable, ReentrancyGuard {
         if (_collateral < MIN_COLLATERAL) revert BelowMinCollateral(_collateral);
         if (_leverage == 0) revert ZeroLeverage();
         _validatePair(_pairIndex, _leverage);
+        ORACLE.checkOpenAllowed();
 
         uint128 oraclePrice = _getOraclePrice(_pairIndex, priceUpdate);
         _validateTpSlAgainstOraclePrice(_tp, _sl, oraclePrice, _isLong);

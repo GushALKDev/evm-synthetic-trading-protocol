@@ -17,8 +17,10 @@ import {IOracle} from "./interfaces/IOracle.sol";
  *      Chainlink is ONLY used as a deviation anchor — if Pyth is stale, we REVERT (no fallback).
  *      Validation pipeline: Feed active → Sequencer up → Pyth age → Non-zero → Confidence → Normalize → Chainlink staleness → Deviation
  *      Sequencer up: on L2s with a Chainlink sequencer uptime feed, prices are refused while the sequencer is
- *      down and for SEQUENCER_GRACE_PERIOD after it comes back, so positions are not settled before traders
- *      could react to the outage. The feed is a constructor parameter; address(0) disables the check.
+ *      down. For SEQUENCER_GRACE_PERIOD after it comes back, checkOpenAllowed reverts, so no new position opens
+ *      on prices traders could not react to; closes, TP/SL, liquidations and the vault keep reading prices,
+ *      because a position cannot be topped up and blocking its liquidation would let it run past 100% loss.
+ *      The feed is a constructor parameter; address(0) disables both checks.
  *      Pyth age: publishTime must not be after block.timestamp and must be at most maxPriceAge old. Every
  *      getPrice call is a trade execution or a TP/SL validation, so the same limit applies to all of them.
  *      The caller funds the Pyth fee via msg.value on getPrice; any surplus is refunded to the caller.
@@ -172,20 +174,29 @@ contract PythChainlinkOracle is IOracle, Ownable {
         if (surplus > 0) msg.sender.safeTransferETH(surplus);
     }
 
+    /**
+     * @notice Revert while the L2 sequencer is down or within SEQUENCER_GRACE_PERIOD of coming back up
+     * @dev Called by TradingEngine.openTrade only; see the contract header for why other actions are not blocked.
+     */
+    function checkOpenAllowed() external view {
+        uint256 startedAt = _checkSequencerUp();
+        if (startedAt != 0 && block.timestamp - startedAt <= SEQUENCER_GRACE_PERIOD) revert SequencerGracePeriodNotOver(startedAt, block.timestamp);
+    }
+
     /*//////////////////////////////////////////////////////////////
                           INTERNAL HELPERS
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @dev Revert while the L2 sequencer is down or within SEQUENCER_GRACE_PERIOD of coming back up.
-     *      startedAt is the time of the last status change; Chainlink documents startedAt == 0 as an
-     *      uninitialized feed on Arbitrum, which is treated as down.
+     * @dev Revert while the L2 sequencer is down. startedAt is the time of the last status change; Chainlink
+     *      documents startedAt == 0 as an uninitialized feed on Arbitrum, which is treated as down.
+     * @return startedAt Time the sequencer came back up, or 0 when the check is disabled
      */
-    function _checkSequencerUp() internal view {
-        if (address(SEQUENCER_UPTIME_FEED) == address(0)) return;
-        (, int256 answer, uint256 startedAt,,) = SEQUENCER_UPTIME_FEED.latestRoundData();
+    function _checkSequencerUp() internal view returns (uint256 startedAt) {
+        if (address(SEQUENCER_UPTIME_FEED) == address(0)) return 0;
+        int256 answer;
+        (, answer, startedAt,,) = SEQUENCER_UPTIME_FEED.latestRoundData();
         if (answer != 0 || startedAt == 0) revert SequencerDown();
-        if (block.timestamp - startedAt <= SEQUENCER_GRACE_PERIOD) revert SequencerGracePeriodNotOver(startedAt, block.timestamp);
     }
 
     /**

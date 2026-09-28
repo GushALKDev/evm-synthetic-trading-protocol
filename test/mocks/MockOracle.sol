@@ -14,11 +14,13 @@ contract MockOracle is IOracle {
     using SafeTransferLib for address;
 
     error OracleUnavailable();
+    error OpenNotAllowed();
 
     mapping(uint256 => uint128) private _prices;
     mapping(uint256 => uint128) private _confs;
     uint256 public fee;
     bool public shouldRevert;
+    bool public openBlocked;
 
     function setPrice(uint256 pairIndex, uint128 price) external {
         _prices[pairIndex] = price;
@@ -40,6 +42,15 @@ contract MockOracle is IOracle {
     /// @notice Simulate an oracle outage (stale/deviation) so getPrice reverts, like the real oracle.
     function setShouldRevert(bool _shouldRevert) external {
         shouldRevert = _shouldRevert;
+    }
+
+    /// @notice Simulate a condition that blocks new positions only (the real oracle's sequencer grace period)
+    function setOpenBlocked(bool _openBlocked) external {
+        openBlocked = _openBlocked;
+    }
+
+    function checkOpenAllowed() external view {
+        if (openBlocked) revert OpenNotAllowed();
     }
 
     function getPrice(uint256 pairIndex, bytes[] calldata) external payable returns (uint128, uint128) {

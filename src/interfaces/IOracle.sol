@@ -25,4 +25,12 @@ interface IOracle {
      * @return conf18 Confidence band (price uncertainty) normalized to 18 decimals
      */
     function getPrice(uint256 pairIndex, bytes[] calldata priceData) external payable returns (uint128 price18, uint128 conf18);
+
+    /**
+     * @notice Revert when conditions outside the price itself do not allow opening new positions
+     * @dev Called by TradingEngine.openTrade only. PythChainlinkOracle reverts here during the grace period after
+     *      the L2 sequencer comes back up; getPrice keeps serving closes, liquidations and the vault meanwhile.
+     *      Oracles without such a condition implement it as a no-op.
+     */
+    function checkOpenAllowed() external view;
 }

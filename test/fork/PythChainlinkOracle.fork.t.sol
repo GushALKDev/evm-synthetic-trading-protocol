@@ -265,11 +265,14 @@ contract PythChainlinkOracleForkTest is Test {
         oracle.getPrice(PAIR_BTC, _empty());
     }
 
-    function test_Fork_Sequencer_GracePeriodReverts() public skipIfNoFork {
+    /// @notice During the grace period opening is refused and prices are still served for other actions
+    function test_Fork_Sequencer_GracePeriodBlocksOpeningOnly() public skipIfNoFork {
         uint256 upSince = block.timestamp - 100;
         _mockSequencer(0, upSince);
         vm.expectRevert(abi.encodeWithSelector(PythChainlinkOracle.SequencerGracePeriodNotOver.selector, upSince, block.timestamp));
-        oracle.getPrice(PAIR_BTC, _empty());
+        oracle.checkOpenAllowed();
+        (uint128 price,) = oracle.getPrice(PAIR_BTC, _empty());
+        assertGt(price, 0, "price refused during the grace period");
     }
 
     function _mockSequencer(int256 _answer, uint256 _startedAt) internal {
@@ -284,13 +287,18 @@ contract PythChainlinkOracleForkTest is Test {
                     END TO END THROUGH THE ENGINE
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Open and close a 10x BTC long through TradingEngine on the real oracle stack
-    function test_Fork_TradingEngine_OpenAndClose() public skipIfNoFork {
-        RegressionUSDC usdc = new RegressionUSDC();
+    RegressionUSDC usdc;
+    TradingStorage tradingStorage;
+    Vault vault;
+    TradingEngine engine;
+
+    /// @dev Storage, Vault and engine on the real oracle, with 1,000,000 USDC deposited by this contract
+    function _deployEngineStack() internal {
+        usdc = new RegressionUSDC();
         vm.startPrank(owner);
-        TradingStorage tradingStorage = new TradingStorage(address(usdc), owner);
-        Vault vault = new Vault(address(usdc), owner, address(tradingStorage), address(oracle));
-        TradingEngine engine = new TradingEngine(
+        tradingStorage = new TradingStorage(address(usdc), owner);
+        vault = new Vault(address(usdc), owner, address(tradingStorage), address(oracle));
+        engine = new TradingEngine(
             address(tradingStorage), address(vault), address(oracle), address(usdc), makeAddr("treasury"), address(new MockSpreadManager(5)), owner
         );
         tradingStorage.setTradingEngine(address(engine));
@@ -302,13 +310,32 @@ contract PythChainlinkOracleForkTest is Test {
         usdc.approve(address(vault), type(uint256).max);
         vault.deposit(1_000_000 * 10 ** 6, address(this));
         usdc.approve(address(engine), type(uint256).max);
+    }
 
+    /// @notice Open and close a 10x BTC long through TradingEngine on the real oracle stack
+    function test_Fork_TradingEngine_OpenAndClose() public skipIfNoFork {
+        _deployEngineStack();
         (uint128 oraclePrice,) = oracle.getPrice(PAIR_BTC, _empty());
         uint32 tradeId = engine.openTrade(uint16(PAIR_BTC), true, 100 * 10 ** 6, 10, oraclePrice, 100, 0, 0, _empty());
         assertEq(tradingStorage.getTrade(tradeId).openPrice, (uint256(oraclePrice) * 10_005) / 10_000);
 
         engine.closeTrade(tradeId, oraclePrice, 100, _empty());
         assertEq(tradingStorage.getTrade(tradeId).user, address(0));
+    }
+
+    /// @notice During the sequencer grace period a position opened before it closes through the engine; opening reverts
+    function test_Fork_TradingEngine_GracePeriodClosesButDoesNotOpen() public skipIfNoFork {
+        _deployEngineStack();
+        (uint128 oraclePrice,) = oracle.getPrice(PAIR_BTC, _empty());
+        uint32 tradeId = engine.openTrade(uint16(PAIR_BTC), true, 100 * 10 ** 6, 10, oraclePrice, 100, 0, 0, _empty());
+
+        uint256 upSince = block.timestamp - 100;
+        _mockSequencer(0, upSince);
+        engine.closeTrade(tradeId, oraclePrice, 100, _empty());
+        assertEq(tradingStorage.getTrade(tradeId).user, address(0), "close refused during the grace period");
+
+        vm.expectRevert(abi.encodeWithSelector(PythChainlinkOracle.SequencerGracePeriodNotOver.selector, upSince, block.timestamp));
+        engine.openTrade(uint16(PAIR_BTC), true, 100 * 10 ** 6, 10, oraclePrice, 100, 0, 0, _empty());
     }
 
     receive() external payable {}
