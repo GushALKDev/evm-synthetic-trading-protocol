@@ -110,7 +110,6 @@ contract TradingEngine is Ownable, ReentrancyGuard {
     error TpAlreadyTriggered(uint128 tp, uint128 oraclePrice);
     error SlAlreadyTriggered(uint128 sl, uint128 oraclePrice);
     error FeeExceedsCollateral(uint256 fee, uint64 collateral);
-    error ZeroFeeRecipient();
     error NotLiquidatable(uint256 tradeId, uint256 loss, uint256 threshold);
     error LimitNotTriggered(uint256 tradeId, uint128 oraclePrice);
     error NoLimitSet(uint256 tradeId);
