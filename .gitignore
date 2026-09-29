@@ -27,3 +27,6 @@ es/
 *.local.*
 # Aderyn static analysis output
 report.md
+
+# Local bootstrap notes, not part of the repository
+PROJECT-BOOTSTRAP.md

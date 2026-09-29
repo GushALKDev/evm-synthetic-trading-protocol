@@ -13,7 +13,7 @@ import {ERC20} from "solady/tokens/ERC20.sol";
  * @notice Stateful handler driving the full solvency system: LP flows, trader payouts draining the
  *         Vault, fee income, permissionless rescues, bonding and claims.
  * @dev Unlike the per-contract handlers, this one operates the REAL wired deployment, so a sequence
- *      can interleave a rescue with new deposits, further payouts and vesting claims — the ordering
+ *      can interleave a rescue with new deposits, further payouts and vesting claims; the ordering
  *      that unit tests never reach.
  */
 contract SolvencyHandler is CommonBase, StdCheats, StdUtils {
@@ -30,6 +30,19 @@ contract SolvencyHandler is CommonBase, StdCheats, StdUtils {
     uint256 public ghostClaimed;
     /// @notice Number of rescues that actually moved reserve funds or opened a round
     uint256 public ghostRescues;
+
+    // Modelled flows into and out of the Vault and the AssistantFund
+    uint256 public ghostDeposits;
+    uint256 public ghostPayouts;
+    uint256 public ghostVaultFees;
+    uint256 public ghostReserveFees;
+    uint256 public ghostInjections;
+    uint256 public ghostSkims;
+    uint256 public ghostBondProceeds;
+    /// @notice Flows whose measured amount differed from the model
+    uint256 public ghostMismatches;
+    /// @notice Highest CR observed right after a rescue action (checkAndAct or bond) that raised the CR
+    uint256 public ghostMaxCrAfterRescue;
 
     mapping(bytes32 => uint256) public calls;
 
@@ -52,16 +65,30 @@ contract SolvencyHandler is CommonBase, StdCheats, StdUtils {
                                ACTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice An LP deposits into the Vault
+    /**
+     * @notice An LP deposits into the Vault
+     * @dev The Vault runs the pending AssistantFund injection first and refuses while a bonding round is open or
+     *      due; the outcome must match maxDeposit, and the injection is recorded like one from checkAndAct.
+     */
     function deposit(uint256 _actorSeed, uint256 _assets) external countCall("deposit") {
         currentActor = actors[bound(_actorSeed, 0, actors.length - 1)];
         uint256 assets = bound(_assets, 1 * 10 ** 6, 200_000 * 10 ** 6);
+        bool expected = d.vault.maxDeposit(currentActor) != 0;
+        uint256 reserveBefore = d.assistantFund.balance();
 
         deal(address(USDC), currentActor, assets);
         vm.startPrank(currentActor);
         USDC.approve(address(d.vault), assets);
-        d.vault.deposit(assets, currentActor);
+        bool ok;
+        try d.vault.deposit(assets, currentActor) {
+            ok = true;
+        } catch {}
         vm.stopPrank();
+
+        if (ok != expected) ghostMismatches++;
+        if (!ok) return;
+        ghostInjections += reserveBefore - d.assistantFund.balance();
+        ghostDeposits += assets;
     }
 
     /**
@@ -77,21 +104,35 @@ contract SolvencyHandler is CommonBase, StdCheats, StdUtils {
         vm.startPrank(ENGINE);
         d.vault.sendPayout(actors[0], amount);
         vm.stopPrank();
+        ghostPayouts += amount;
     }
 
     /// @notice Protocol fees accrue to the Vault (LP side) and the AssistantFund (reserve side)
     function accrueFees(uint256 _vaultFee, uint256 _reserveFee) external countCall("accrueFees") {
-        deal(address(USDC), address(d.vault), USDC.balanceOf(address(d.vault)) + bound(_vaultFee, 0, 10_000 * 10 ** 6));
-        deal(address(USDC), address(d.assistantFund), USDC.balanceOf(address(d.assistantFund)) + bound(_reserveFee, 0, 10_000 * 10 ** 6));
+        uint256 vaultFee = bound(_vaultFee, 0, 10_000 * 10 ** 6);
+        uint256 reserveFee = bound(_reserveFee, 0, 10_000 * 10 ** 6);
+        deal(address(USDC), address(d.vault), USDC.balanceOf(address(d.vault)) + vaultFee);
+        deal(address(USDC), address(d.assistantFund), USDC.balanceOf(address(d.assistantFund)) + reserveFee);
+        ghostVaultFees += vaultFee;
+        ghostReserveFees += reserveFee;
     }
 
     /// @notice Anyone triggers the permissionless solvency check
     function checkAndAct() external countCall("checkAndAct") {
         uint256 reserveBefore = d.assistantFund.balance();
         bool activeBefore = d.bondDepository.isActive();
+        uint256 crBefore = d.vault.collateralizationRatio();
+        uint256 expected;
+        if (crBefore < 1e18) {
+            uint256 deficit = d.vault.collateralizationDeficit();
+            expected = reserveBefore < deficit ? reserveBefore : deficit;
+        }
 
         d.solvencyManager.checkAndAct();
 
+        if (reserveBefore - d.assistantFund.balance() != expected) ghostMismatches++;
+        ghostInjections += expected;
+        _trackRescue(crBefore);
         if (d.assistantFund.balance() != reserveBefore || d.bondDepository.isActive() != activeBefore) {
             ghostRescues++;
         }
@@ -99,10 +140,16 @@ contract SolvencyHandler is CommonBase, StdCheats, StdUtils {
 
     /// @notice A bonder buys into an open round (no-op when none is active)
     function bond(uint256 _actorSeed, uint256 _amount) external countCall("bond") {
-        if (!d.bondDepository.isActive()) return;
+        uint256 cap = d.bondDepository.remainingCap();
+        uint256 deficit = d.vault.realisedCollateralizationDeficit();
+        uint256 available = deficit < cap ? deficit : cap;
+        if (available == 0) return; // bond() reverts NoActiveRound
         currentActor = actors[bound(_actorSeed, 0, actors.length - 1)];
 
         uint256 amount = bound(_amount, 1 * 10 ** 6, 100_000 * 10 ** 6);
+        uint256 expected = amount < available ? amount : available;
+        uint256 crBefore = d.vault.collateralizationRatio();
+        uint256 vaultBefore = USDC.balanceOf(address(d.vault));
         deal(address(USDC), currentActor, amount);
 
         vm.startPrank(currentActor);
@@ -110,7 +157,10 @@ contract SolvencyHandler is CommonBase, StdCheats, StdUtils {
         (, uint256 synthOut) = d.bondDepository.bond(amount);
         vm.stopPrank();
 
+        if (USDC.balanceOf(address(d.vault)) - vaultBefore != expected) ghostMismatches++;
+        ghostBondProceeds += expected;
         ghostPromised += synthOut;
+        _trackRescue(crBefore);
     }
 
     /// @notice A bonder claims vested $SYNTH (no-op when nothing is claimable)
@@ -129,7 +179,12 @@ contract SolvencyHandler is CommonBase, StdCheats, StdUtils {
 
     /// @notice Anyone skims reserve overflow above the target cap back into the Vault
     function skim() external countCall("skim") {
+        uint256 reserve = d.assistantFund.balance();
+        uint256 cap = d.assistantFund.targetCap();
+        uint256 expected = reserve > cap ? reserve - cap : 0;
         d.assistantFund.skim();
+        if (reserve - d.assistantFund.balance() != expected) ghostMismatches++;
+        ghostSkims += expected;
     }
 
     /// @notice Advance time so vesting progresses
@@ -140,6 +195,11 @@ contract SolvencyHandler is CommonBase, StdCheats, StdUtils {
     /*//////////////////////////////////////////////////////////////
                                 VIEWS
     //////////////////////////////////////////////////////////////*/
+
+    function _trackRescue(uint256 _crBefore) internal {
+        uint256 crAfter = d.vault.collateralizationRatio();
+        if (crAfter > _crBefore && crAfter > ghostMaxCrAfterRescue) ghostMaxCrAfterRescue = crAfter;
+    }
 
     function actorsLength() external view returns (uint256) {
         return actors.length;

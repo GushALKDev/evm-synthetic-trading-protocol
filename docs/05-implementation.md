@@ -1,508 +1,313 @@
-# 💻 Guide 5: Solidity Implementation
+# Guide 5: Solidity Implementation
 
-**Version:** 1.0
-**Prerequisites:** [Guide 4: Trade-offs and Problems](./04-tradeoffs.md)
+**Prerequisites:** [Guide 4: Trade-offs and Risks](./04-tradeoffs.md)
 **Next:** [Guide 6: Future Improvements](./06-improvements.md)
+
+**Status:** Proof of concept. Not audited and not deployed.
+
+This guide describes the code as it is. Earlier versions of this file contained design-time sketches
+(role-based access control, a `receiveLoss` vault function, WAD-based PnL); none of that was built, and it
+has been replaced by the actual structures.
 
 ---
 
-## 📋 Table of Contents
+## Table of Contents
 
 1. [Tech Stack](#1-tech-stack)
 2. [Data Structures](#2-data-structures)
-3. [Contract Interfaces](#3-contract-interfaces)
-4. [Security Patterns](#4-security-patterns)
-5. [Numerical Precision Handling](#5-numerical-precision-handling)
-6. [Implementation Examples](#6-implementation-examples)
-7. [Pre-Deployment Checklist](#7-pre-deployment-checklist)
+3. [Interfaces](#3-interfaces)
+4. [Code Patterns](#4-code-patterns)
+5. [Numerical Precision and Rounding](#5-numerical-precision-and-rounding)
+6. [Before Any Deployment](#6-before-any-deployment)
 
 ---
 
 ## 1. Tech Stack
 
-### Framework: Foundry
-
-**Why Foundry over Hardhat?**
-
-| Feature | Foundry | Hardhat |
+| Component | Version or setting | Source |
 |:---|:---|:---|
-| Test language | Solidity | JavaScript/TypeScript |
-| Speed | Extremely fast | Moderate |
-| Native fuzzing | ✅ Yes | ❌ Requires plugin |
-| Invariant testing | ✅ Yes | ❌ No |
-| Gas snapshots | ✅ Integrated | ⚠️ Plugin |
-| Fork testing | ✅ Excellent | ⚠️ Limited |
+| Solidity | 0.8.24, fixed by `pragma solidity 0.8.24;` in every file | `src/`, `test/`, `script/` |
+| Foundry | forge 1.7.1, pinned in CI (`version: v1.7.1`) | `.github/workflows/test.yml` |
+| Solady | v0.1.26 (git submodule) | `foundry.lock`, `.gitmodules` |
+| forge-std | v1.14.0 (git submodule) | `foundry.lock`, `.gitmodules` |
+| Pyth SDK | `@pythnetwork/pyth-sdk-solidity` `^4.3.1` (npm), remapped from `node_modules/`; `npm ci` is required before `forge build` | `package.json`, `foundry.toml` |
+| Formatter | `forge fmt`, `line_length = 160` | `foundry.toml` `[fmt]` |
 
-### Recommended Dependencies
+`foundry.toml` sets `ffi = false`, the optimizer with 200 runs and `evm_version = "cancun"` (the engine and
+the vault keep their ETH refund baseline in transient storage), excludes `test/gas` from the default profile
+(a `gas` profile runs only the gas benchmarks), and has a `coverage` profile that lifts the contract size
+limit for coverage builds only. It does not set `solc` or `via_ir`.
 
-```toml
-# foundry.toml
-[profile.default]
-solc = "0.8.24"
-optimizer = true
-optimizer_runs = 200
-via_ir = true
+The Pyth SDK stays on npm because there is no tagged Solidity SDK repository to use as a submodule:
 
-[dependencies]
-openzeppelin = "5.0.0"
-solady = "0.0.170"
-```
+- `pyth-network/pyth-sdk-solidity` is archived (last commit 2025-05-06, "Add deprecation notices"); its
+  newest tag, `v2.2.0`, has no `PythUtils.sol`, which `PythChainlinkOracle` uses
+  (`gh api repos/pyth-network/pyth-sdk-solidity --jq .archived`,
+  `gh api "repos/pyth-network/pyth-sdk-solidity/contents/PythUtils.sol?ref=v2.2.0"` returns 404).
+- The SDK now lives in the `pyth-network/pyth-crosschain` monorepo, none of whose 1,037 tags is a
+  Solidity SDK tag
+  (`gh api --paginate 'repos/pyth-network/pyth-crosschain/git/matching-refs/tags/' --jq '.[].ref' | grep -ciE "solidity"`
+  prints 0).
 
-### Libraries
-
-| Library | Use | Import |
-|:---|:---|:---|
-| **Solady** | Ownable, SafeTransferLib, ReentrancyGuard, ERC4626, FixedPointMathLib | `solady/` |
-| **Pyth SDK** | IPyth, PythStructs for price verification | `@pythnetwork/pyth-sdk-solidity/` |
+Solady modules used: `ERC4626`, `ERC20`, `Ownable`, `ReentrancyGuard`, `SafeTransferLib`, `SafeCastLib`.
+OpenZeppelin is not a dependency.
 
 ---
 
 ## 2. Data Structures
 
-### Trade Struct
+### Trade (`TradingStorage.sol`), 3 slots
 
 ```solidity
-/// @notice Represents an open trading position
 struct Trade {
-    address user;           // Position owner
-    uint256 pairIndex;      // Index of the trading pair (e.g., 0 = BTC/USD)
-    uint256 index;          // Unique trade ID (auto-incremented)
-    uint256 collateral;     // Initial margin deposited (USDC, 6 decimals)
-    uint256 positionSize;   // Leveraged size in USD (18 decimals for precision)
-    uint256 openPrice;      // Entry price from oracle (8 decimals normalized to 18)
-    uint256 leverage;       // Leverage multiplier (e.g., 10 = 10x)
-    uint256 tp;             // Take profit price (0 if not set)
-    uint256 sl;             // Stop loss price (0 if not set)
-    uint256 fundingIndex;   // Cumulative funding index at open
-    uint256 timestamp;      // Block timestamp at open
-    bool isLong;            // true = LONG, false = SHORT
+    address user; //      20 bytes -┐
+    bool isLong; //        1 byte   │
+    uint16 pairIndex; //   2 bytes  │  Slot 0 (31/32)
+    uint16 leverage; //    2 bytes  │
+    uint48 timestamp; //   6 bytes -┘
+    uint32 index; //       4 bytes -┐
+    uint32 userIndex; //   4 bytes  │  Slot 1 (full)
+    uint64 collateral; //  8 bytes  │
+    uint128 openPrice; // 16 bytes -┘
+    uint128 tp; //        16 bytes -┐  Slot 2 (full)
+    uint128 sl; //        16 bytes -┘
 }
 ```
 
-### Pair Struct
+- `collateral` is the stored collateral after the open fee (USDC, 6 decimals).
+- `openPrice`, `tp`, `sl` are 18-decimal prices; `openPrice` includes the open spread.
+- `user == address(0)` marks a deleted or nonexistent trade. Trade IDs come from a `uint32` counter and
+  are never reused.
+- `userIndex` is the trade's position in its user's list, so `deleteTrade` removes it in constant time.
+- The entry funding index (of the trade's side) is stored separately in
+  `mapping(uint256 => int256) _tradeFundingIndex`.
+
+### Pair (`TradingStorage.sol`), 2 slots
 
 ```solidity
-/// @notice Configuration for a trading pair
-/// @dev Packed into 2 storage slots
 struct Pair {
-    string name;         // Slot 0 (pointer), e.g., "BTC/USD"
-    uint128 maxOI;       // 16 bytes ─┐
-    uint16 maxLeverage;  //  2 bytes  │  Slot 1 (19 bytes)
-    bool isActive;       //  1 byte  ─┘
+    string name; //       32 bytes -── Slot 0 (pointer)
+    uint128 maxOI; //     16 bytes -┐
+    uint16 maxLeverage; // 2 bytes  │  Slot 1 (19/32)
+    bool isActive; //      1 byte  -┘
 }
-// Note: spreadBps removed from Pair — spread is now computed by SpreadManager
-// Note: pythFeedId/chainlinkFeed are in PairFeed struct (PythChainlinkOracle)
-// Note: fundingFactor is a global constant in FundingLib
 ```
 
-### Oracle Price
+### PairFeed (`PythChainlinkOracle.sol`), 2 slots
 
-The oracle returns a single `uint128 price18` (normalized to 18 decimals). Confidence and staleness checks are handled internally by the oracle implementation — the consumer only receives a validated price.
+```solidity
+struct PairFeed {
+    bytes32 pythFeedId; //       32 bytes -── Slot 0 (full)
+    address chainlinkFeed; //    20 bytes -┐
+    uint32 chainlinkHeartbeat; // 4 bytes  │  Slot 1 (25/32)
+    bool active; //               1 byte  -┘
+}
+```
+
+### SideTotals (`TradingStorage.sol`), 1 slot per pair and side
+
+```solidity
+struct SideTotals {
+    uint128 collateral; // 16 bytes -┐  Slot 0 (full)
+    uint128 quantity; //   16 bytes -┘
+}
+```
+
+`_longTotals` and `_shortTotals` map a pair index to its totals; the side size is the existing open
+interest mapping. `quantity` is the sum of `size_wad x 1e18 / openPrice` over the side's positions, rounded
+up per long and down per short, in WAD asset units. `_openTradeCount` and `_positionsNonce` (both `uint32`)
+share slot 0 with `tradingEngine` and `_tradeCounter`; every `storeTrade` and `deleteTrade` increments the
+nonce.
+
+### PnlSnapshot (`Vault.sol`), 1 slot
+
+```solidity
+struct PnlSnapshot {
+    int128 netPnl; //   16 bytes -┐
+    uint48 timestamp; // 6 bytes  │  Slot 0 (26/32)
+    uint32 nonce; //     4 bytes -┘
+}
+```
+
+`netPnl` is USDC (6 decimals), positive when traders are in profit. `maxPnlSnapshotAge` (`uint32`) shares a
+slot with `tradingEngine`, `pauseFlags` (`uint8`) and `_withdrawPausedSince` (`uint48`); `_withdrawPausedTotal`
+(`uint64`) shares a slot with `solvencyManager`.
+
+### WithdrawalRequest (`Vault.sol`), 2 slots
+
+```solidity
+struct WithdrawalRequest {
+    uint256 shares; //                  32 bytes -── Slot 0 (full)
+    uint128 requestEpoch; //            16 bytes -┐  Slot 1 (full)
+    uint128 withdrawPausedAtRequest; // 16 bytes -┘
+}
+```
+
+One request per address. The requested shares are held by the vault (escrow); a new request returns the
+previous escrow and replaces the request. `withdrawPausedAtRequest` is the number of seconds the vault had
+spent under `PAUSE_WITHDRAW` when the request was made; the time paused since then extends the request's
+expiry ([Guide 8, section 5](./08-security.md#5-pause-flags)).
+
+### BondPosition (`BondDepository.sol`), 2 slots
+
+```solidity
+struct BondPosition {
+    uint128 totalSynth;
+    uint128 claimedSynth;
+    uint64 start;
+    uint64 end;
+}
+```
+
+A bonder can hold several positions (`mapping(address => BondPosition[])`).
 
 ---
 
-## 3. Contract Interfaces
+## 3. Interfaces
 
-### IVault.sol
-
-```solidity
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
-
-import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
-
-interface IVault is IERC4626 {
-    /*//////////////////////////////////////////////////////////////
-                                ERRORS
-    //////////////////////////////////////////////////////////////*/
-    
-    error OnlyTrading();
-    error InsufficientBalance(uint256 requested, uint256 available);
-    error WithdrawalLocked(uint256 unlockTime);
-    
-    /*//////////////////////////////////////////////////////////////
-                                EVENTS
-    //////////////////////////////////////////////////////////////*/
-    
-    event PayoutSent(address indexed user, uint256 amount);
-    event LossReceived(uint256 amount);
-    event CollateralizationRatioUpdated(uint256 newRatio);
-    
-    /*//////////////////////////////////////////////////////////////
-                            TRADING FUNCTIONS
-    //////////////////////////////////////////////////////////////*/
-    
-    /// @notice Send payout to winning trader (only callable by TradingEngine)
-    /// @param user Recipient address
-    /// @param amount Amount in USDC (6 decimals)
-    function sendPayout(address user, uint256 amount) external;
-    
-    /// @notice Receive loss from losing trader (internal accounting)
-    /// @param amount Amount in USDC (6 decimals)
-    function receiveLoss(uint256 amount) external;
-    
-    /*//////////////////////////////////////////////////////////////
-                            VIEW FUNCTIONS
-    //////////////////////////////////////////////////////////////*/
-    
-    /// @notice Current collateralization ratio (18 decimals, 1e18 = 100%)
-    function collateralizationRatio() external view returns (uint256);
-    
-    /// @notice Check if withdrawals are currently allowed
-    function canWithdraw(address user) external view returns (bool);
-}
-```
-
-### ITradingEngine.sol
+### IOracle
 
 ```solidity
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
-
-interface ITradingEngine {
-    /*//////////////////////////////////////////////////////////////
-                                ERRORS
-    //////////////////////////////////////////////////////////////*/
-    
-    error InvalidLeverage(uint256 leverage, uint256 max);
-    error MaxOpenInterestReached(uint256 current, uint256 max);
-    error PairNotActive(uint256 pairIndex);
-    error NotTradeOwner(address caller, address owner);
-    error NotLiquidatable(uint256 lossPercent, uint256 threshold);
-    error InvalidPrice(uint256 price, uint256 timestamp);
-    error ProfitCapExceeded();
-    
-    /*//////////////////////////////////////////////////////////////
-                                EVENTS
-    //////////////////////////////////////////////////////////////*/
-    
-    event TradeOpened(
-        uint256 indexed tradeId,
-        address indexed user,
-        uint256 pairIndex,
-        uint256 collateral,
-        uint256 leverage,
-        bool isLong,
-        uint256 openPrice
-    );
-    
-    event TradeClosed(
-        uint256 indexed tradeId,
-        address indexed user,
-        uint256 closePrice,
-        int256 pnl,
-        CloseReason reason
-    );
-    
-    event TradeLiquidated(
-        uint256 indexed tradeId,
-        address indexed liquidator,
-        uint256 reward
-    );
-    
-    /*//////////////////////////////////////////////////////////////
-                                ENUMS
-    //////////////////////////////////////////////////////////////*/
-    
-    enum CloseReason { Manual, TakeProfit, StopLoss, Liquidation }
-    
-    /*//////////////////////////////////////////////////////////////
-                            TRADING FUNCTIONS
-    //////////////////////////////////////////////////////////////*/
-    
-    function openTrade(
-        uint256 pairIndex,
-        uint256 collateral,
-        uint256 leverage,
-        bool isLong,
-        uint256 tp,
-        uint256 sl
-    ) external returns (uint256 tradeId);
-    
-    function closeTrade(uint256 tradeId) external;
-    
-    function updateTakeProfit(uint256 tradeId, uint256 newTp) external;
-
-    function updateStopLoss(uint256 tradeId, uint256 newSl) external;
-
-    function liquidate(uint256 tradeId) external;
-
-    function executeLimit(uint256 tradeId) external;
-}
-```
-
-> **TP/SL price-dependent validations (Phase 3):**
-> `openTrade`, `updateTakeProfit`, and `updateStopLoss` must validate that the TP/SL has not already been triggered at the current oracle price. For example, a LONG with `oraclePrice = 80,000` must reject `sl = 90,000` because the keeper would execute immediately at 80k — worse than the 90k the user intended. Similarly, a TP already surpassed is rejected so the user can raise it or close at market. These validations live in TradingEngine (requires oracle access), while TradingStorage retains its structural checks (`tp > openPrice` for longs, etc.) as a defense-in-depth layer.
-
-### IOracle.sol
-
-```solidity
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
-
 interface IOracle {
-    /// @notice Get a validated price for a trading pair
-    /// @dev Implementation-specific: may use Pyth, Chainlink, or any other source.
-    ///      `payable` — the caller funds any oracle fee (e.g., Pyth) via msg.value; the oracle refunds the surplus.
-    ///      `priceData` is used by pull-based oracles (e.g., Pyth); push-based oracles ignore it.
-    /// @param pairIndex The pair index to get price for
-    /// @param priceData Oracle-specific signed price data (empty for push-based oracles)
-    /// @return price18 Validated price normalized to 18 decimals
-    /// @return conf18 Confidence band normalized to 18 decimals (0 for push-based oracles)
     function getPrice(uint256 pairIndex, bytes[] calldata priceData) external payable returns (uint128 price18, uint128 conf18);
+
+    function checkOpenAllowed() external view;
 }
 ```
 
-> **Technology-agnostic design:** `IOracle` decouples the protocol from any specific oracle provider. The current implementation (`PythChainlinkOracle.sol`) uses Pyth as primary source with Chainlink as deviation anchor. Swapping oracle providers only requires deploying a new `IOracle` implementation and updating the address — TradingEngine never changes.
+`checkOpenAllowed` reverts when conditions outside the price do not allow new positions; `openTrade` calls it
+(the sequencer grace period in `PythChainlinkOracle`). `priceData` is opaque update data for pull oracles. The caller pays any fee in `msg.value` and the oracle
+refunds the surplus to `msg.sender`. `TradingEngine` stores the oracle as an immutable, so replacing it
+requires a new engine deployment.
+
+### ISolvency (`ISolvencyVault`, `IAssistantFund`, `IBondDepository`)
+
+Minimal views and calls used by `SolvencyManager` and `BondDepository`: `collateralizationRatio()`,
+`collateralizationDeficit()`, `realisedCollateralizationRatio()`, `realisedCollateralizationDeficit()`,
+`isPnlSnapshotFresh()`, `refreshPnlSnapshot(bytes[])` (payable), `totalAssets()`, `balance()`,
+`injectFunds(uint256)`, `isActive()`, `activateBonding(uint256)`, `closeBonding()`. `ISolvencyManager`: `checkAndActBeforeDeposit()` and
+`bondingRoundOpenAfterCheck()`, which the Vault calls on its deposit paths and in `maxDeposit`/`maxMint`.
+
+### ISynthToken
+
+`mint(address to, uint256 amount)`, used by `BondDepository`.
+
+### AggregatorV3Interface
+
+Local copy of the Chainlink aggregator interface (`latestRoundData`, `decimals`).
+
+### TradingEngine external functions
+
+```solidity
+function openTrade(uint16 pairIndex, bool isLong, uint64 collateral, uint16 leverage, uint128 expectedPrice, uint16 slippageBps, uint128 tp, uint128 sl, bytes[] calldata priceUpdate) external payable returns (uint32 tradeId);
+function closeTrade(uint256 tradeId, uint128 expectedPrice, uint16 slippageBps, bytes[] calldata priceUpdate) external payable;
+function liquidate(uint256 tradeId, bytes[] calldata priceUpdate) external payable;
+function executeLimit(uint256 tradeId, bytes[] calldata priceUpdate) external payable;
+function updateTp(uint256 tradeId, uint128 newTp, bytes[] calldata priceUpdate) external payable;
+function updateSl(uint256 tradeId, uint128 newSl, bytes[] calldata priceUpdate) external payable;
+```
+
+Slippage: `abs(executionPrice - expectedPrice) * 10000 <= expectedPrice * slippageBps`.
+
+TP/SL: `openTrade`, `updateTp` and `updateSl` reject a TP or SL that is already crossed at the oracle
+price; `TradingStorage` also checks it against the open price (long `tp > openPrice`, `sl < openPrice`;
+short the reverse).
 
 ---
 
-## 4. Security Patterns
+## 4. Code Patterns
 
-### 4.1 Custom Errors (Gas Efficient)
+- **Custom errors with parameters**, no revert strings, for example
+  `error LeverageExceedsMax(uint16 leverage, uint16 maxLeverage);` and
+  `error MaxOpenInterestExceeded(uint256 newOI, uint128 maxOI);`.
+- **Access control:** Solady `Ownable` in every contract, plus single-address gates implemented as a
+  modifier that calls an internal check, for example:
 
-```solidity
-// ❌ BAD: String errors (expensive)
-require(newOI <= maxOI, "Max OI reached");
+  ```solidity
+  modifier onlyTradingEngine() {
+      _requireTradingEngine();
+      _;
+  }
 
-// ✅ GOOD: Custom errors (cheap)
-error MaxOpenInterestReached(uint256 current, uint256 max);
+  function _requireTradingEngine() internal view {
+      if (msg.sender != tradingEngine) revert CallerNotTradingEngine();
+  }
+  ```
 
-function openTrade(...) external {
-    uint256 newOI = currentOI + positionSize;
-    if (newOI > maxOI) {
-        revert MaxOpenInterestReached(newOI, maxOI);
-    }
-}
-```
-
-### 4.2 Checks-Effects-Interactions (CEI)
-
-```solidity
-function closeTrade(uint256 tradeId) external nonReentrant {
-    Trade storage t = trades[tradeId];
-    
-    // ══════════════════════════════════════════════════════════
-    //                         CHECKS
-    // ══════════════════════════════════════════════════════════
-    if (msg.sender != t.user) {
-        revert NotTradeOwner(msg.sender, t.user);
-    }
-    
-    (uint256 price,) = oracle.getPrice(t.pairIndex);
-    int256 pnl = _calculatePnL(t, price);
-    uint256 payout = _calculatePayout(t.collateral, pnl);
-    
-    // ══════════════════════════════════════════════════════════
-    //                         EFFECTS
-    // ══════════════════════════════════════════════════════════
-    // Update state BEFORE external calls
-    openInterest[t.pairIndex] -= t.positionSize;
-    delete trades[tradeId];
-    _removeFromUserTrades(msg.sender, tradeId);
-    
-    emit TradeClosed(tradeId, msg.sender, price, pnl, CloseReason.Manual);
-    
-    // ══════════════════════════════════════════════════════════
-    //                       INTERACTIONS
-    // ══════════════════════════════════════════════════════════
-    // External calls LAST
-    if (payout > 0) {
-        vault.sendPayout(msg.sender, payout);
-    }
-}
-```
-
-### 4.3 Access Control with Roles
-
-```solidity
-import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
-
-contract TradingEngine is AccessControl {
-    bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
-    bytes32 public constant KEEPER_ROLE = keccak256("KEEPER_ROLE");
-    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
-    
-    modifier onlyKeeper() {
-        if (!hasRole(KEEPER_ROLE, msg.sender)) {
-            revert NotKeeper(msg.sender);
-        }
-        _;
-    }
-    
-    function executeLimit(uint256 tradeId) external onlyKeeper {
-        // Only keepers can execute limit orders
-    }
-    
-    function pause() external onlyRole(PAUSER_ROLE) {
-        _pause();
-    }
-}
-```
+  Gates: `TradingStorage.onlyTradingEngine`, `Vault.sendPayout` (inline check), `SpreadManager.onlyKeeper`,
+  `AssistantFund.onlySolvencyManager`, `BondDepository.onlySolvencyManager`, `SynthToken.onlyMinter`.
+- **Pause:** `TradingEngine` (`PAUSE_OPEN`, `PAUSE_SETTLE`) and `Vault` (`PAUSE_DEPOSIT`, `PAUSE_WITHDRAW`)
+  each keep a `uint8 pauseFlags` set by `setPauseFlags`; `whenNotPaused(flag)` calls `_requireNotPaused(flag)`,
+  which reverts with `EnforcedPause(flag)`. `TradingStorage` has no pause: the engine's flags decide when
+  collateral moves.
+- **Reentrancy:** Solady `ReentrancyGuard` on `TradingEngine.openTrade`, `closeTrade`, `liquidate`,
+  `executeLimit`, `updateTp`, `updateSl` and on `Vault.deposit`, `mint`, `requestWithdrawal`,
+  `executeWithdrawal`, `sendPayout`.
+- **ETH refunds:** the `refundsEthSurplus` modifier stores `balance - msg.value` in transient storage at
+  entry (`tstore`, EVM `cancun`) and refunds `balance - baseline` at the end of the call.
+  `TradingStorage` has none: all its mutating functions are restricted to the engine.
+- **Ordering:** in the engine, the trade is deleted and OI reduced before USDC is transferred. The oracle
+  and the funding-state update in `TradingStorage` are called before that.
+- **Token transfers:** `SafeTransferLib` (`safeTransfer`, `safeTransferFrom`, `safeTransferETH`).
 
 ---
 
-## 5. Numerical Precision Handling
+## 5. Numerical Precision and Rounding
 
-### Decimal Standards
-
-| Type | Decimals | Constant |
+| Quantity | Decimals | Notes |
 |:---|:---|:---|
-| USDC (input/output) | 6 | `1e6` |
-| Internal USD values | 18 | `WAD = 1e18` |
-| Chainlink prices | 8 | `1e8` |
-| Pyth prices | variable (expo) | normalized to `1e18` |
-| Internal prices | 18 | `WAD = 1e18` |
-| Percentages (BPS) | 4 | `10000 = 100%` |
+| USDC amounts (collateral, fees, PnL, payouts) | 6 | PnL is computed in USDC units directly |
+| sUSDC shares | 18 | `_decimalsOffset() = 12` |
+| Prices (oracle, open, TP, SL) | 18 | Pyth normalised with `PythUtils.convertToUint`; Chainlink scaled by `10 ** (18 - decimals)` |
+| Open interest, position size for OI | 18 | `collateral * leverage * 1e12` |
+| Funding index | 18 (signed), one per side | `FundingLib`; funding owed is `size x delta / 1e30` in USDC units |
+| Volatility | 18 | 3% = `3e16` |
+| Open PnL quantity (`SideTotals.quantity`) | 18 | asset units, `size_wad x 1e18 / openPrice` |
+| PnL snapshot (`PnlSnapshot.netPnl`) | 6 (signed) | rounded toward plus infinity |
+| Collateralization ratios (NAV and realised) | 18 | 1e18 = 100% |
+| Percentages | BPS | 10,000 = 100% |
 
-### Conversions
+PnL (`TradingEngine._calculatePnl`):
 
 ```solidity
-using FixedPointMathLib for uint256;
-
-uint256 constant WAD = 1e18;
-uint256 constant USDC_DECIMALS = 6;
-uint256 constant PRICE_DECIMALS = 8;
-
-/// @notice Convert USDC (6 decimals) to internal representation (18 decimals)
-function toWad(uint256 usdc) internal pure returns (uint256) {
-    return usdc * 1e12; // 6 + 12 = 18
-}
-
-/// @notice Convert internal (18 decimals) back to USDC (6 decimals)
-function toUsdc(uint256 wad) internal pure returns (uint256) {
-    return wad / 1e12;
-}
-
-/// @notice Normalize Chainlink price (8 decimals) to internal (18 decimals)
-function normalizePrice(uint256 chainlinkPrice) internal pure returns (uint256) {
-    return chainlinkPrice * 1e10; // 8 + 10 = 18
+uint256 size = uint256(_collateral) * uint256(_leverage);
+if (_isLong) {
+    // Floor exitValue: larger loss for the trader, rounding favours the pool
+    uint256 exitValue = (uint256(_closePrice) * size) / uint256(_openPrice);
+    pnlUsdc = int256(exitValue) - int256(size);
+} else {
+    // Ceil exitValue: larger loss for the trader, rounding favours the pool
+    uint256 num = uint256(_closePrice) * size;
+    uint256 exitValue = (num + uint256(_openPrice) - 1) / uint256(_openPrice);
+    pnlUsdc = int256(size) - int256(exitValue);
 }
 ```
 
-### PnL Calculation with Precision
-
-```solidity
-/// @notice Calculate PnL for a trade
-/// @param t The trade struct
-/// @param currentPrice Current price (18 decimals)
-/// @return pnl Signed PnL (positive = profit, negative = loss)
-function _calculatePnL(Trade storage t, uint256 currentPrice) internal view returns (int256 pnl) {
-    // positionSize is in 18 decimals
-    // currentPrice and openPrice are in 18 decimals
-    
-    if (t.isLong) {
-        // PnL = (exitPrice * size / entryPrice) - size
-        // Multiply first to avoid precision loss
-        uint256 exitValue = currentPrice.mulWad(t.positionSize).divWad(t.openPrice);
-        pnl = int256(exitValue) - int256(t.positionSize);
-    } else {
-        // PnL = size - (exitPrice * size / entryPrice)
-        uint256 exitValue = currentPrice.mulWad(t.positionSize).divWad(t.openPrice);
-        pnl = int256(t.positionSize) - int256(exitValue);
-    }
-}
-```
+Rounding directions for every formula are listed in [Guide 2](./02-mathematics.md). Funding rounds up for
+payers and down for receivers, so it also favours the protocol, by at most 1 USDC unit per position.
 
 ---
 
-## 6. Implementation Examples
+## 6. Before Any Deployment
 
-### Liquidation with Reward
+State of the items usually checked before a deployment, as of this review:
 
-```solidity
-function liquidate(uint256 tradeId) external nonReentrant whenNotPaused {
-    Trade storage t = trades[tradeId];
-    
-    // Checks
-    if (t.user == address(0)) revert TradeNotFound(tradeId);
-    
-    (uint256 price,) = oracle.getPrice(t.pairIndex);
-    int256 pnl = _calculatePnL(t, price);
-    
-    // Loss must be >= 90% of collateral
-    uint256 collateralWad = toWad(t.collateral);
-    int256 lossThreshold = -int256(collateralWad.mulWad(LIQUIDATION_THRESHOLD));
-    
-    if (pnl > lossThreshold) {
-        revert NotLiquidatable(uint256(-pnl), uint256(-lossThreshold));
-    }
-    
-    // Effects
-    uint256 remaining = uint256(int256(collateralWad) + pnl);
-    uint256 liquidatorReward = remaining.mulWad(LIQUIDATOR_REWARD_BPS);
-    uint256 vaultShare = remaining - liquidatorReward;
-    
-    address tradeOwner = t.user;
-    openInterest[t.pairIndex] -= t.positionSize;
-    delete trades[tradeId];
-    _removeFromUserTrades(tradeOwner, tradeId);
-    
-    emit TradeLiquidated(tradeId, msg.sender, toUsdc(liquidatorReward));
-    
-    // Interactions
-    vault.receiveLoss(toUsdc(vaultShare));
-    IERC20(usdc).safeTransfer(msg.sender, toUsdc(liquidatorReward));
-}
-```
-
-### Dynamic Spread
-
-```solidity
-/// @dev Apply spread to oracle price. Delegates to SpreadManager for dynamic spread computation.
-///      Long open / Short close: price goes UP (worse for trader)
-///      Long close / Short open: price goes DOWN (worse for trader)
-function _applySpread(uint128 _oraclePrice, bool _isLong, bool _isOpen, uint16 _pairIndex) internal view returns (uint128) {
-    uint256 currentOI = TRADING_STORAGE.getOpenInterest(_pairIndex);
-    uint256 spreadBps = SPREAD_MANAGER.getSpreadBps(_pairIndex, currentOI);
-    bool spreadUp = (_isLong && _isOpen) || (!_isLong && !_isOpen);
-    if (spreadUp) {
-        return uint128((uint256(_oraclePrice) * (BPS_DENOMINATOR + spreadBps)) / BPS_DENOMINATOR);
-    } else {
-        return uint128((uint256(_oraclePrice) * (BPS_DENOMINATOR - spreadBps)) / BPS_DENOMINATOR);
-    }
-}
-```
-
----
-
-## 7. Pre-Deployment Checklist
-
-### Security
-
-- [ ] **Access Control:** All admin functions protected with roles
-- [ ] **Pausable:** Trading can be paused in emergency
-- [ ] **Reentrancy Guards:** All functions with external transfers
-- [ ] **CEI Pattern:** State updated before external calls
-- [ ] **Integer Overflow:** Solidity 0.8+ (native checks)
-- [ ] **Oracle Validation:** Staleness and deviation verified
-
-### Configuration
-
-- [ ] **Timelock:** Critical parameter changes with 24-48h delay
-- [ ] **Multisig:** Admin keys in multisig (e.g., 3/5)
-- [ ] **Circuit Breakers:** Configured for extreme movements
-- [ ] **Emergency Withdrawal:** Function for LPs to withdraw without delay in emergency
-
-### Testing
-
-- [ ] **Unit Tests:** Coverage >95%
-- [ ] **Fuzz Testing:** All mathematical functions
-- [ ] **Invariant Tests:**
-  - `totalAssets >= sum(pendingPayouts)`
-  - `sum(openInterest) <= maxGlobalOI`
-  - `sharePrice > 0`
-- [ ] **Fork Tests:** Against mainnet/testnet with real oracles
-
-### Audit
-
-- [ ] **Internal Review:** Code review by at least 2 developers
-- [ ] **Static Analysis:** Slither, Aderyn with no critical findings
-- [ ] **External Audit:** At least 1 audit from reputable firm
-- [ ] **Bug Bounty:** Active program post-launch
+| Item | State |
+|:---|:---|
+| Admin keys in a multisig, timelock on parameter changes | Not in code; single `Ownable` owner per contract |
+| Pausable trading | Independent flags: engine `PAUSE_OPEN`, `PAUSE_SETTLE` (closes, TP/SL and liquidations together, funding frozen); vault `PAUSE_DEPOSIT`, `PAUSE_WITHDRAW` (expiry clock stopped); playbook in [Guide 8](./08-security.md#6-incident-playbook) |
+| Reentrancy guards | See section 4 |
+| Oracle validation | Price age (5 s), future timestamp, confidence, Chainlink deviation and heartbeat, L2 sequencer uptime |
+| Circuit breakers | Not implemented |
+| Emergency withdrawal for LPs | Not implemented |
+| Unit, fuzz, invariant, fork tests | Present; fork suite on Arbitrum One at a pinned block ([test docs](./tests/README.md)) |
+| Invariant tying vault assets, open collateral and fees | Present (`invariant_VaultBalanceMatchesModelledFlows`); the NAV is checked against the balance and the snapshot (`invariant_TotalAssetsIsBalanceMinusSnapshotLiability`) and the snapshot against a brute-force valuation |
+| Static analysis | Slither and Aderyn run; findings not triaged in this round |
+| External audit | Not done |
+| Bug bounty | None |
 
 ---
 
 **See also:**
-- [Guide 6: Future Improvements](./06-improvements.md) - Advanced features
-- [Guide 8: Security](./08-security.md) - Complete threat model
+- [Guide 6: Future Improvements](./06-improvements.md)
+- [Guide 8: Security](./08-security.md)

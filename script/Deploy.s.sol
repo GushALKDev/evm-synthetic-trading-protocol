@@ -20,6 +20,7 @@ import {PythChainlinkOracle} from "../src/PythChainlinkOracle.sol";
 struct DeployConfig {
     address asset; // USDC (6 decimals)
     address pyth; // Pyth contract for the target chain
+    address sequencerUptimeFeed; // Chainlink L2 sequencer uptime feed, address(0) on chains without one
     address owner; // Protocol owner / admin
     address keeper; // SpreadManager volatility keeper
     uint256 assistantFundTargetCap; // Reserve cap; overflow is skimmed to the Vault
@@ -60,8 +61,9 @@ library DeployLib {
     function deploy(DeployConfig memory _cfg) internal returns (Deployed memory d) {
         // --- Core ---
         d.tradingStorage = new TradingStorage(_cfg.asset, _cfg.owner);
-        d.vault = new Vault(_cfg.asset, _cfg.owner);
-        d.oracle = new PythChainlinkOracle(_cfg.pyth, _cfg.owner);
+        d.oracle = new PythChainlinkOracle(_cfg.pyth, _cfg.sequencerUptimeFeed, _cfg.owner);
+        // The Vault reads open positions from TradingStorage and prices them with the oracle for its NAV
+        d.vault = new Vault(_cfg.asset, _cfg.owner, address(d.tradingStorage), address(d.oracle));
         d.spreadManager =
             new SpreadManager(_cfg.baseSpreadBps, _cfg.impactFactor, _cfg.volFactor, _cfg.maxSpreadBps, _cfg.maxVolatilityChangeBps, _cfg.keeper, _cfg.owner);
 
@@ -83,11 +85,13 @@ library DeployLib {
     /**
      * @notice Grant every cross-contract permission the protocol needs to operate
      * @dev Must be called by the owner. Without this the system is deployed but inert: the engine
-     *      cannot touch storage or the Vault, bonding cannot mint, and solvency cannot recapitalize.
+     *      cannot touch storage or the Vault, bonding cannot mint, solvency cannot recapitalize, and Vault
+     *      deposits skip the rescue step (they would neither run the pending injection nor stop for bonding).
      */
     function wire(Deployed memory _d) internal {
         _d.tradingStorage.setTradingEngine(address(_d.engine));
         _d.vault.setTradingEngine(address(_d.engine));
+        _d.vault.setSolvencyManager(address(_d.solvencyManager));
         _d.synth.setMinter(address(_d.bondDepository));
         _d.assistantFund.setSolvencyManager(address(_d.solvencyManager));
         _d.bondDepository.setSolvencyManager(address(_d.solvencyManager));
@@ -105,7 +109,9 @@ library DeployLib {
  *      ```
  *
  *      Required env vars: `PRIVATE_KEY`, `USDC_ADDRESS`, `PYTH_ADDRESS`.
- *      Optional: `OWNER_ADDRESS`, `KEEPER_ADDRESS` (both default to the deployer).
+ *      Optional: `OWNER_ADDRESS`, `KEEPER_ADDRESS` (both default to the deployer) and
+ *      `SEQUENCER_UPTIME_FEED` (defaults to address(0), which disables the sequencer check; on Arbitrum One
+ *      use the Chainlink L2 sequencer uptime feed 0xFdB631F5EE196F0ed6FAa767959853A9F217697D).
  *
  *      Pair feeds are NOT configured here: `oracle.setPairFeed` and `tradingStorage.addPair` need
  *      per-chain Pyth feed IDs and Chainlink aggregators, so they are left as explicit owner actions.
@@ -118,6 +124,7 @@ contract Deploy is Script {
         DeployConfig memory cfg = DeployConfig({
             asset: vm.envAddress("USDC_ADDRESS"),
             pyth: vm.envAddress("PYTH_ADDRESS"),
+            sequencerUptimeFeed: vm.envOr("SEQUENCER_UPTIME_FEED", address(0)),
             owner: vm.envOr("OWNER_ADDRESS", deployer),
             keeper: vm.envOr("KEEPER_ADDRESS", deployer),
             assistantFundTargetCap: 1_000_000 * 10 ** 6, // 1M USDC reserve cap

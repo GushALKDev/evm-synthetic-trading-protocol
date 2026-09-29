@@ -3,10 +3,15 @@ pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {SolvencyManager} from "../../src/SolvencyManager.sol";
+import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 
 contract MockVault {
     uint256 public totalAssets;
     uint256 public collateralizationRatio;
+    bool public isPnlSnapshotFresh = true;
+    uint256 public injected;
+    uint256 public refreshCalls;
+    uint256 public refreshFee;
 
     function setState(uint256 _totalAssets, uint256 _cr) external {
         totalAssets = _totalAssets;
@@ -27,18 +32,65 @@ contract MockVault {
         _hasOverride = true;
     }
 
-    function collateralizationDeficit() external view returns (uint256) {
+    function collateralizationDeficit() public view returns (uint256) {
         if (_hasOverride) return _deficitOverride;
         if (collateralizationRatio == 0 || collateralizationRatio >= 1e18) return 0;
         // nominal = totalAssets * WAD / cr; deficit = nominal - totalAssets
         return (totalAssets * 1e18) / collateralizationRatio - totalAssets;
     }
+
+    /**
+     * @dev Realised ratio and deficit default to the NAV ones (no open PnL). The realised deficit goes down by
+     *      what the AssistantFund injected, as the real Vault's balance would.
+     */
+    uint256 private _realisedCr;
+    uint256 private _realisedDeficit;
+    bool private _hasRealised;
+
+    function setRealised(uint256 _cr, uint256 _deficit) external {
+        _realisedCr = _cr;
+        _realisedDeficit = _deficit;
+        _hasRealised = true;
+    }
+
+    function setFresh(bool _fresh) external {
+        isPnlSnapshotFresh = _fresh;
+    }
+
+    function setRefreshFee(uint256 _fee) external {
+        refreshFee = _fee;
+    }
+
+    function onInjection(uint256 _amount) external {
+        injected += _amount;
+    }
+
+    function realisedCollateralizationRatio() external view returns (uint256) {
+        return _hasRealised ? _realisedCr : collateralizationRatio;
+    }
+
+    function realisedCollateralizationDeficit() external view returns (uint256) {
+        uint256 deficit = _hasRealised ? _realisedDeficit : collateralizationDeficit();
+        return deficit > injected ? deficit - injected : 0;
+    }
+
+    /// @dev Keeps refreshFee and refunds the rest to the caller, like the real Vault
+    function refreshPnlSnapshot(bytes[] calldata) external payable {
+        refreshCalls++;
+        uint256 surplus = msg.value - refreshFee;
+        if (surplus > 0) SafeTransferLib.safeTransferETH(msg.sender, surplus);
+    }
 }
 
 contract MockAssistantFund {
+    MockVault public immutable VAULT;
     uint256 public balance;
     uint256 public lastInjected;
     uint256 public totalInjected;
+
+    constructor(MockVault _vault) {
+        VAULT = _vault;
+    }
 
     function setBalance(uint256 _balance) external {
         balance = _balance;
@@ -49,6 +101,7 @@ contract MockAssistantFund {
         balance -= amount;
         lastInjected = amount;
         totalInjected += amount;
+        VAULT.onInjection(amount);
     }
 }
 
@@ -63,6 +116,10 @@ contract MockBondDepository {
     function activateBonding(uint256 neededUsdc) external {
         isActive = true;
         lastNeeded = neededUsdc;
+    }
+
+    function closeBonding() external {
+        isActive = false;
     }
 }
 
@@ -80,10 +137,11 @@ contract SolvencyManagerTest is Test {
     event Warning(uint256 cr);
     event ReserveInjected(uint256 cr, uint256 amount);
     event BondingTriggered(uint256 cr, uint256 neededUsdc);
+    event ReserveInjectionSkipped(uint256 cr);
 
     function setUp() public {
         vault = new MockVault();
-        fund = new MockAssistantFund();
+        fund = new MockAssistantFund(vault);
         bondDepo = new MockBondDepository();
         manager = new SolvencyManager(address(vault), address(fund), address(bondDepo), owner);
     }
@@ -233,6 +291,25 @@ contract SolvencyManagerTest is Test {
                             DEFICIT VIEW
     //////////////////////////////////////////////////////////////*/
 
+    event BondingClosed(uint256 cr);
+
+    function test_CheckAndAct_ClosesRoundWhenRecovered() public {
+        bondDepo.setActive(true);
+        vault.setState(1_000_000 * 10 ** 6, 100e16);
+
+        vm.expectEmit(false, false, false, true);
+        emit BondingClosed(100e16);
+        manager.checkAndAct();
+        assertFalse(bondDepo.isActive());
+    }
+
+    function test_CheckAndAct_KeepsRoundBelowTarget() public {
+        bondDepo.setActive(true);
+        vault.setState(990_000 * 10 ** 6, 99e16);
+        manager.checkAndAct();
+        assertTrue(bondDepo.isActive());
+    }
+
     function test_DeficitToTarget_ZeroWhenHealthy() public {
         vault.setState(1_100_000 * 10 ** 6, 110e16);
         assertEq(manager.deficitToTarget(), 0);
@@ -242,6 +319,170 @@ contract SolvencyManagerTest is Test {
         vault.setState(970_000 * 10 ** 6, 97e16);
         uint256 expected = (uint256(970_000 * 10 ** 6) * (100e16 - 97e16)) / 97e16;
         assertEq(manager.deficitToTarget(), expected);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    NAV INJECTION, REALISED BONDING
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice A stale PnL snapshot skips the injection
+    function test_CheckAndAct_StaleSnapshotSkipsInjection() public {
+        vault.setState(970_000 * 10 ** 6, 97e16);
+        vault.setFresh(false);
+        fund.setBalance(500_000 * 10 ** 6);
+
+        vm.expectEmit(false, false, false, true);
+        emit ReserveInjectionSkipped(97e16);
+        manager.checkAndAct();
+
+        assertEq(fund.totalInjected(), 0);
+        assertFalse(bondDepo.isActive());
+    }
+
+    /// @notice With a stale snapshot, bonding still opens on a critical realised ratio, for the realised deficit
+    function test_CheckAndAct_StaleSnapshotStillBondsOnRealised() public {
+        vault.setState(900_000 * 10 ** 6, 90e16);
+        vault.setFresh(false);
+        fund.setBalance(40_000 * 10 ** 6);
+
+        manager.checkAndAct();
+
+        assertEq(fund.totalInjected(), 0);
+        assertTrue(bondDepo.isActive());
+        assertEq(bondDepo.lastNeeded(), (uint256(900_000 * 10 ** 6) * 1e18) / 90e16 - 900_000 * 10 ** 6);
+    }
+
+    /// @notice NAV ratio critical, realised ratio above 95%: inject up to the NAV deficit, no bonding
+    function test_CheckAndAct_NavCriticalRealisedAboveCriticalInjectsNoBond() public {
+        vault.setState(900_000 * 10 ** 6, 90e16);
+        vault.setRealised(99e16, 10_000 * 10 ** 6);
+        fund.setBalance(40_000 * 10 ** 6);
+
+        manager.checkAndAct();
+
+        assertEq(fund.totalInjected(), 40_000 * 10 ** 6);
+        assertFalse(bondDepo.isActive());
+    }
+
+    /// @notice Bonding is sized on the realised deficit left after the injection, and reports the realised ratio
+    function test_CheckAndAct_BondsRealisedShortfallAfterInjection() public {
+        vault.setState(850_000 * 10 ** 6, 85e16);
+        vault.setRealised(90e16, 100_000 * 10 ** 6);
+        fund.setBalance(40_000 * 10 ** 6);
+
+        vm.expectEmit(false, false, false, true);
+        emit ReserveInjected(85e16, 40_000 * 10 ** 6);
+        vm.expectEmit(false, false, false, true);
+        emit BondingTriggered(90e16, 60_000 * 10 ** 6);
+        manager.checkAndAct();
+
+        assertEq(bondDepo.lastNeeded(), 60_000 * 10 ** 6);
+    }
+
+    /// @notice An open round closes on a realised ratio of 100%, even with the NAV ratio below 100%
+    function test_CheckAndAct_ClosesRoundOnRealisedRecovery() public {
+        bondDepo.setActive(true);
+        vault.setState(970_000 * 10 ** 6, 97e16);
+        vault.setRealised(100e16, 0);
+
+        vm.expectEmit(false, false, false, true);
+        emit BondingClosed(100e16);
+        manager.checkAndAct();
+        assertFalse(bondDepo.isActive());
+    }
+
+    /// @notice An open round stays open while the realised ratio is below 100%, even with the NAV ratio at 100%
+    function test_CheckAndAct_KeepsRoundWhileRealisedBelowTarget() public {
+        bondDepo.setActive(true);
+        vault.setState(1_000_000 * 10 ** 6, 100e16);
+        vault.setRealised(99e16, 10_000 * 10 ** 6);
+        manager.checkAndAct();
+        assertTrue(bondDepo.isActive());
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        DEPOSIT GATE
+    //////////////////////////////////////////////////////////////*/
+
+    function test_CheckAndActBeforeDeposit_RunsCheckAndReportsRound() public {
+        vault.setState(850_000 * 10 ** 6, 85e16);
+        vault.setRealised(90e16, 100_000 * 10 ** 6);
+        fund.setBalance(40_000 * 10 ** 6);
+
+        assertTrue(manager.checkAndActBeforeDeposit(), "round not reported");
+        assertEq(fund.totalInjected(), 40_000 * 10 ** 6, "injection not run");
+        assertTrue(bondDepo.isActive());
+    }
+
+    function test_CheckAndActBeforeDeposit_NoRoundWhenHealthy() public {
+        vault.setState(1_100_000 * 10 ** 6, 111e16);
+        assertFalse(manager.checkAndActBeforeDeposit());
+    }
+
+    function test_BondingRoundOpenAfterCheck_OpenRoundStaysOpenBelowTarget() public {
+        bondDepo.setActive(true);
+        vault.setState(990_000 * 10 ** 6, 99e16);
+        assertTrue(manager.bondingRoundOpenAfterCheck());
+    }
+
+    function test_BondingRoundOpenAfterCheck_OpenRoundClosesAtTarget() public {
+        bondDepo.setActive(true);
+        vault.setState(970_000 * 10 ** 6, 97e16);
+        vault.setRealised(100e16, 0);
+        assertFalse(manager.bondingRoundOpenAfterCheck());
+    }
+
+    function test_BondingRoundOpenAfterCheck_NoRoundAboveCritical() public {
+        vault.setState(960_000 * 10 ** 6, 96e16);
+        assertFalse(manager.bondingRoundOpenAfterCheck());
+    }
+
+    /// @notice Below 95% realised, a round is due only for the realised deficit the pending injection leaves
+    function test_BondingRoundOpenAfterCheck_ComparesDeficitWithPendingInjection() public {
+        vault.setState(900_000 * 10 ** 6, 90e16);
+        uint256 deficit = vault.realisedCollateralizationDeficit();
+
+        fund.setBalance(deficit - 1);
+        assertTrue(manager.bondingRoundOpenAfterCheck(), "reserve short by 1");
+        fund.setBalance(deficit);
+        assertFalse(manager.bondingRoundOpenAfterCheck(), "reserve covers the deficit");
+
+        vault.setFresh(false);
+        assertTrue(manager.bondingRoundOpenAfterCheck(), "stale snapshot: no injection, round due");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        REFRESH AND CHECK AND ACT
+    //////////////////////////////////////////////////////////////*/
+
+    function test_RefreshAndCheckAndAct_RefreshesActsAndRefunds() public {
+        vault.setState(970_000 * 10 ** 6, 97e16);
+        fund.setBalance(500_000 * 10 ** 6);
+        vault.setRefreshFee(0.1 ether);
+        address caller = makeAddr("caller");
+        vm.deal(caller, 1 ether);
+
+        vm.prank(caller);
+        manager.refreshAndCheckAndAct{value: 1 ether}(new bytes[](0));
+
+        assertEq(vault.refreshCalls(), 1);
+        assertGt(fund.totalInjected(), 0);
+        assertEq(caller.balance, 0.9 ether);
+        assertEq(address(manager).balance, 0);
+    }
+
+    /// @notice Only the ETH this call added is refunded; ETH already held by the manager stays
+    function test_RefreshAndCheckAndAct_KeepsPreexistingEth() public {
+        vault.setState(1_100_000 * 10 ** 6, 110e16);
+        vm.deal(address(manager), 2 ether);
+        address caller = makeAddr("caller");
+        vm.deal(caller, 1 ether);
+
+        vm.prank(caller);
+        manager.refreshAndCheckAndAct{value: 1 ether}(new bytes[](0));
+
+        assertEq(caller.balance, 1 ether);
+        assertEq(address(manager).balance, 2 ether);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -255,10 +496,9 @@ contract SolvencyManagerTest is Test {
         vault.setState(totalAssets, cr);
         uint256 deficit = manager.deficitToTarget();
 
-        // After injecting `deficit`, new totalAssets should reach ~100% nominal liabilities.
-        // nominalLiab = totalAssets * WAD / cr; check (totalAssets + deficit) ~= nominalLiab
+        // After injecting `deficit`, totalAssets reaches the nominal liabilities exactly:
+        // the mock derives deficit = totalAssets * WAD / cr - totalAssets, the same floor division as nominalLiab
         uint256 nominalLiab = (totalAssets * WAD) / cr;
-        // Allow rounding slack of a few wei from integer division
-        assertApproxEqAbs(totalAssets + deficit, nominalLiab, 2);
+        assertEq(totalAssets + deficit, nominalLiab);
     }
 }

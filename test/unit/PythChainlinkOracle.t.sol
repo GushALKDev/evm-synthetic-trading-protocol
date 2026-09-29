@@ -39,7 +39,7 @@ contract PythChainlinkOracleTest is Test {
         mockChainlink.setAnswer(CL_BTC_PRICE);
 
         vm.prank(owner);
-        oracle = new PythChainlinkOracle(address(mockPyth), owner);
+        oracle = new PythChainlinkOracle(address(mockPyth), address(0), owner);
 
         vm.prank(owner);
         oracle.setPairFeed(PAIR_INDEX, BTC_FEED_ID, address(mockChainlink), CHAINLINK_HEARTBEAT);
@@ -82,7 +82,7 @@ contract PythChainlinkOracleTest is Test {
 
     function test_Constructor_RevertOnZeroPyth() public {
         vm.expectRevert(PythChainlinkOracle.InvalidPairFeed.selector);
-        new PythChainlinkOracle(address(0), owner);
+        new PythChainlinkOracle(address(0), address(0), owner);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -167,8 +167,8 @@ contract PythChainlinkOracleTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_GetPrice_RevertOnStalePythPrice() public {
-        // Publish time 31 seconds ago (> MAX_STALENESS of 30)
-        uint64 staleTime = uint64(block.timestamp) - 31;
+        // Publish time 6 seconds ago (> maxPriceAge, default 5)
+        uint64 staleTime = uint64(block.timestamp) - 6;
         bytes[] memory updateData = _createPriceUpdateWithTime(BTC_PRICE, BTC_CONF, BTC_EXPO, staleTime);
 
         vm.expectRevert(abi.encodeWithSelector(PythChainlinkOracle.StalePrice.selector, BTC_FEED_ID, staleTime, block.timestamp));
@@ -183,13 +183,67 @@ contract PythChainlinkOracleTest is Test {
         assertGt(price, 0);
     }
 
-    function test_GetPrice_EdgeStaleness30Seconds() public {
-        // Publish time exactly 30 seconds ago (= MAX_STALENESS, should pass)
-        uint64 edgeTime = uint64(block.timestamp) - 30;
+    function test_GetPrice_EdgeStalenessAtMaxPriceAge() public {
+        // Publish time exactly maxPriceAge (default 5 s) ago, should pass
+        uint64 edgeTime = uint64(block.timestamp) - uint64(oracle.DEFAULT_MAX_PRICE_AGE());
         bytes[] memory updateData = _createPriceUpdateWithTime(BTC_PRICE, BTC_CONF, BTC_EXPO, edgeTime);
 
         uint128 price = _getPrice(updateData);
         assertGt(price, 0);
+    }
+
+    function test_GetPrice_EdgeStalenessAtCeiling() public {
+        // With maxPriceAge raised to the MAX_STALENESS ceiling, a 30 s old price passes and 31 s does not
+        vm.prank(owner);
+        oracle.setMaxPriceAge(30);
+        uint64 edgeTime = uint64(block.timestamp) - 30;
+        assertGt(_getPrice(_createPriceUpdateWithTime(BTC_PRICE, BTC_CONF, BTC_EXPO, edgeTime)), 0);
+
+        vm.warp(block.timestamp + 1);
+        bytes[] memory updateData = _createPriceUpdateWithTime(BTC_PRICE, BTC_CONF, BTC_EXPO, edgeTime);
+        vm.expectRevert(abi.encodeWithSelector(PythChainlinkOracle.StalePrice.selector, BTC_FEED_ID, edgeTime, block.timestamp));
+        oracle.getPrice{value: 1}(PAIR_INDEX, updateData);
+    }
+
+    function test_GetPrice_RevertOnFuturePublishTime() public {
+        uint64 future = uint64(block.timestamp) + 1;
+        bytes[] memory updateData = _createPriceUpdateWithTime(BTC_PRICE, BTC_CONF, BTC_EXPO, future);
+
+        vm.expectRevert(abi.encodeWithSelector(PythChainlinkOracle.PriceFromFuture.selector, BTC_FEED_ID, future, block.timestamp));
+        oracle.getPrice{value: 1 ether}(PAIR_INDEX, updateData);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        MAX PRICE AGE ADMIN TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    event MaxPriceAgeSet(uint256 maxPriceAge);
+
+    function test_MaxPriceAge_Default() public view {
+        assertEq(oracle.maxPriceAge(), 5);
+    }
+
+    function test_SetMaxPriceAge() public {
+        vm.expectEmit(false, false, false, true);
+        emit MaxPriceAgeSet(10);
+        vm.prank(owner);
+        oracle.setMaxPriceAge(10);
+        assertEq(oracle.maxPriceAge(), 10);
+    }
+
+    function test_SetMaxPriceAge_RevertOutOfBounds() public {
+        vm.startPrank(owner);
+        vm.expectRevert(abi.encodeWithSelector(PythChainlinkOracle.InvalidMaxPriceAge.selector, 0));
+        oracle.setMaxPriceAge(0);
+        vm.expectRevert(abi.encodeWithSelector(PythChainlinkOracle.InvalidMaxPriceAge.selector, 31));
+        oracle.setMaxPriceAge(31);
+        vm.stopPrank();
+    }
+
+    function test_SetMaxPriceAge_RevertIfNotOwner() public {
+        vm.prank(alice);
+        vm.expectRevert();
+        oracle.setMaxPriceAge(10);
     }
 
     function test_GetPrice_RevertOnStaleChainlink() public {

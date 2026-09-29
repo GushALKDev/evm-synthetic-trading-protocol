@@ -6,6 +6,7 @@ import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {BondDepository} from "../../src/BondDepository.sol";
 import {SynthToken} from "../../src/SynthToken.sol";
 import {BondingHandler} from "./handlers/BondingHandler.sol";
+import {MockSolvencyVault} from "../mocks/MockSolvencyVault.sol";
 import {ERC20} from "solady/tokens/ERC20.sol";
 
 contract MockUSDC is ERC20 {
@@ -29,7 +30,7 @@ contract MockUSDC is ERC20 {
 /**
  * @title BondingInvariantTest
  * @author GushALKDev
- * @notice Roadmap 12.3 — properties of the bonding / vesting accounting that must hold after any
+ * @notice Roadmap 12.3: properties of the bonding / vesting accounting that must hold after any
  *         sequence of rounds, purchases, claims and admin re-pricing.
  * @dev The critical property is solvency of the vesting escrow: $SYNTH is minted into the
  *      depository's custody at bond time, so it must always hold enough to pay every unclaimed
@@ -42,7 +43,8 @@ contract BondingInvariantTest is StdInvariant, Test {
     BondingHandler handler;
 
     address owner = makeAddr("owner");
-    address vault = makeAddr("vault");
+    MockSolvencyVault mockVault = new MockSolvencyVault();
+    address vault = address(mockVault);
     address solvencyManager = makeAddr("solvencyManager");
 
     uint256 constant DISCOUNT_BPS = 500; // 5%
@@ -68,7 +70,7 @@ contract BondingInvariantTest is StdInvariant, Test {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Escrow solvency — the depository can always honour every unclaimed vesting position
+     * @notice Escrow solvency: the depository can always honour every unclaimed vesting position
      * @dev $SYNTH is minted into the depository at bond time and released as it vests. Its balance
      *      must therefore cover everything promised but not yet claimed; below that, a bonder's
      *      claim would revert on transfer and their USDC would have bought nothing.
@@ -79,7 +81,7 @@ contract BondingInvariantTest is StdInvariant, Test {
     }
 
     /**
-     * @notice Supply integrity — $SYNTH is only ever created by bonding
+     * @notice Supply integrity: $SYNTH is only ever created by bonding
      * @dev Total supply must equal everything the depository promised: minting is minter-gated and
      *      the only minter is the depository. A larger supply would mean an unaccounted mint path.
      */
@@ -88,7 +90,7 @@ contract BondingInvariantTest is StdInvariant, Test {
     }
 
     /**
-     * @notice Vesting monotonicity — nobody can claim more than they were promised
+     * @notice Vesting monotonicity: nobody can claim more than they were promised
      * @dev Guards the per-position accounting: claimedSynth must never exceed totalSynth, otherwise
      *      linear vesting would be paying out beyond the bond.
      */
@@ -107,23 +109,30 @@ contract BondingInvariantTest is StdInvariant, Test {
     }
 
     /**
-     * @notice Round cap integrity — a round never raises more USDC than it was opened for
-     * @dev activateBonding sets the cap and bond() clamps to it, so the raised total must stay at or
-     *      below the sum of caps. Over-raising would dilute $SYNTH beyond the approved deficit.
+     * @notice Round cap integrity: a round never raises more USDC than it was opened for
+     * @dev activateBonding sets the cap and bond() clamps to it, so the current round's raise stays at or
+     *      below its cap and the total raise at or below the sum of all caps. Every USDC raised is in the
+     *      Vault. Over-raising would dilute $SYNTH beyond the approved deficit.
      */
     function invariant_RaisedWithinCap() public view {
-        // Every USDC raised landed in the Vault; it can never exceed what bonders actually paid.
+        assertLe(handler.ghostRoundRaised(), handler.ghostRoundCap(), "round raised above its cap");
+        assertLe(handler.ghostUsdcRaised(), handler.ghostCapsTotal(), "total raised above the sum of caps");
         assertEq(usdc.balanceOf(vault), handler.ghostUsdcRaised(), "vault USDC diverged from bonded raise");
     }
 
-    /// @notice Surfaces action coverage so a silently idle suite is visible
-    function invariant_CallSummary() public view {
-        console.log("activate  :", handler.calls("activateBonding"));
-        console.log("bond      :", handler.calls("bond"));
-        console.log("claim     :", handler.calls("claim"));
-        console.log("warp      :", handler.calls("warp"));
-        console.log("promised  :", handler.ghostTotalPromised());
-        console.log("claimed   :", handler.ghostTotalClaimed());
-        console.log("raised    :", handler.ghostUsdcRaised());
+    /**
+     * @notice A bond takes min(amount, remaining cap, Vault deficit), and the bond that takes all that is
+     *         available closes the round, so no bond is sold once the Vault is back at 100% CR
+     */
+    function invariant_BondsNeverExceedDeficit() public view {
+        assertEq(handler.ghostMismatches(), 0, "bond raised above the deficit or left the round open");
+    }
+
+    /// @notice Run summary, logged after each run (forge shows the last run's logs with -vv)
+    function afterInvariant() public view {
+        assertLe(handler.ghostTotalClaimed(), handler.ghostTotalPromised(), "claimed more than promised");
+        console.log("activate / bond / claim:", handler.calls("activateBonding"), handler.calls("bond"), handler.calls("claim"));
+        console.log("promised / claimed:", handler.ghostTotalPromised(), handler.ghostTotalClaimed());
+        console.log("raised:", handler.ghostUsdcRaised());
     }
 }

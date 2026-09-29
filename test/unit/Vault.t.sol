@@ -3,6 +3,8 @@ pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {Vault} from "../../src/Vault.sol";
+import {TradingStorage} from "../../src/TradingStorage.sol";
+import {MockOracle} from "../mocks/MockOracle.sol";
 import {ERC20} from "solady/tokens/ERC20.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 
@@ -25,10 +27,14 @@ contract MockUSDC is ERC20 {
 }
 
 contract VaultTest is Test {
+    uint8 constant PAUSE_DEPOSIT = 1; // Vault.PAUSE_DEPOSIT
+    uint8 constant PAUSE_WITHDRAW = 2; // Vault.PAUSE_WITHDRAW
     using SafeTransferLib for address;
 
     Vault vault;
     MockUSDC usdc;
+    TradingStorage tradingStorage;
+    MockOracle mockOracle;
 
     address owner = makeAddr("owner");
     address alice = makeAddr("alice");
@@ -40,16 +46,18 @@ contract VaultTest is Test {
     event WithdrawalCancelled(address indexed owner);
     event PayoutSent(address indexed receiver, uint256 amount);
     event TradingEngineUpdated(address indexed newEngine);
-    event Paused(address account);
-    event Unpaused(address account);
+    event PauseFlagsUpdated(uint8 flags);
 
     function setUp() public {
         vm.warp(1 days);
 
         usdc = new MockUSDC();
 
+        mockOracle = new MockOracle();
+        tradingStorage = new TradingStorage(address(usdc), owner);
+
         vm.prank(owner);
-        vault = new Vault(address(usdc), owner);
+        vault = new Vault(address(usdc), owner, address(tradingStorage), address(mockOracle));
 
         vm.prank(owner);
         vault.setTradingEngine(tradingEngine);
@@ -143,7 +151,7 @@ contract VaultTest is Test {
 
         vm.stopPrank();
 
-        (uint256 reqShares, uint256 reqEpoch) = vault.withdrawalRequests(alice);
+        (uint256 reqShares, uint256 reqEpoch,) = vault.withdrawalRequests(alice);
 
         assertEq(reqShares, shares);
         assertEq(reqEpoch, 0);
@@ -190,13 +198,13 @@ contract VaultTest is Test {
         // First request for 1000 shares
         vault.requestWithdrawal(1000 * 1e18);
 
-        (uint256 reqShares1,) = vault.withdrawalRequests(alice);
+        (uint256 reqShares1,,) = vault.withdrawalRequests(alice);
         assertEq(reqShares1, 1000 * 1e18);
 
         // Second request for 500 shares overwrites
         vault.requestWithdrawal(500 * 1e18);
 
-        (uint256 reqShares2,) = vault.withdrawalRequests(alice);
+        (uint256 reqShares2,,) = vault.withdrawalRequests(alice);
         assertEq(reqShares2, 500 * 1e18);
 
         vm.stopPrank();
@@ -276,7 +284,7 @@ contract VaultTest is Test {
         vm.prank(alice);
         vault.executeWithdrawal();
 
-        (uint256 reqShares,) = vault.withdrawalRequests(alice);
+        (uint256 reqShares,,) = vault.withdrawalRequests(alice);
         assertEq(reqShares, 0);
 
         // Cannot execute again
@@ -299,12 +307,12 @@ contract VaultTest is Test {
         uint256 shares = vault.balanceOf(alice);
         vault.requestWithdrawal(shares);
 
-        (uint256 reqShares,) = vault.withdrawalRequests(alice);
+        (uint256 reqShares,,) = vault.withdrawalRequests(alice);
         assertEq(reqShares, shares);
 
         vault.cancelWithdrawal();
 
-        (reqShares,) = vault.withdrawalRequests(alice);
+        (reqShares,,) = vault.withdrawalRequests(alice);
         assertEq(reqShares, 0);
 
         assertEq(vault.balanceOf(alice), shares);
@@ -477,7 +485,8 @@ contract VaultTest is Test {
 
         uint256 assetsAfter = vault.previewRedeem(sharesBefore);
 
-        // Same shares now worth ~2x assets (allow 1 wei rounding)
+        // Tolerance of 1 justified: Solady converts with assets = shares * (totalAssets + 1) / (supply + 1e12).
+        // The virtual +1 asset does not double with the donation, so 2x floors to 2 * 1e9 - 1 here.
         assertApproxEqAbs(assetsAfter, assetsBefore * 2, 1);
     }
 
@@ -485,123 +494,182 @@ contract VaultTest is Test {
                             PAUSE TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_Pause_BlocksDeposit() public {
+    function _setFlags(uint8 _flags) internal {
         vm.prank(owner);
-        vault.pause();
+        vault.setPauseFlags(_flags);
+    }
+
+    function _pausedError(uint8 _flag) internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(Vault.EnforcedPause.selector, _flag);
+    }
+
+    function test_Pause_BlocksDeposit() public {
+        _setFlags(PAUSE_DEPOSIT);
 
         vm.startPrank(alice);
         usdc.approve(address(vault), 1000 * 10 ** 6);
-
-        vm.expectRevert(Vault.EnforcedPause.selector);
+        vm.expectRevert(_pausedError(PAUSE_DEPOSIT));
         vault.deposit(1000 * 10 ** 6, alice);
-
         vm.stopPrank();
     }
 
     function test_Pause_BlocksMint() public {
-        vm.prank(owner);
-        vault.pause();
+        _setFlags(PAUSE_DEPOSIT);
 
         vm.startPrank(alice);
         usdc.approve(address(vault), 1000 * 10 ** 6);
-
-        vm.expectRevert(Vault.EnforcedPause.selector);
+        vm.expectRevert(_pausedError(PAUSE_DEPOSIT));
         vault.mint(1000 * 1e18, alice);
-
         vm.stopPrank();
     }
 
-    function test_Pause_BlocksRequestWithdrawal() public {
-        vm.startPrank(alice);
-        usdc.approve(address(vault), 1000 * 10 ** 6);
-        vault.deposit(1000 * 10 ** 6, alice);
+    function test_Pause_WithdrawBlocksRequestWithdrawal() public {
+        _deposit(alice, 1000 * 10 ** 6);
         uint256 shares = vault.balanceOf(alice);
-        vm.stopPrank();
-
-        vm.prank(owner);
-        vault.pause();
+        _setFlags(PAUSE_WITHDRAW);
 
         vm.prank(alice);
-        vm.expectRevert(Vault.EnforcedPause.selector);
+        vm.expectRevert(_pausedError(PAUSE_WITHDRAW));
         vault.requestWithdrawal(shares);
     }
 
-    function test_Pause_EmitsEvent() public {
+    function test_Pause_WithdrawBlocksExecution() public {
+        _deposit(alice, 1000 * 10 ** 6);
+        uint256 aliceShares = vault.balanceOf(alice);
+        vm.prank(alice);
+        vault.requestWithdrawal(aliceShares);
+        vm.warp(block.timestamp + 3 * vault.EPOCH_LENGTH());
+        _setFlags(PAUSE_WITHDRAW);
+        assertFalse(vault.canExecuteWithdrawal(alice), "canExecuteWithdrawal ignores the flag");
+
+        vm.prank(alice);
+        vm.expectRevert(_pausedError(PAUSE_WITHDRAW));
+        vault.executeWithdrawal();
+        vm.prank(alice);
+        vm.expectRevert(_pausedError(PAUSE_WITHDRAW));
+        vault.refreshAndExecuteWithdrawal(new bytes[](0));
+    }
+
+    function test_Pause_WithdrawKeepsCancelOpen() public {
+        _deposit(alice, 1000 * 10 ** 6);
+        uint256 shares = vault.balanceOf(alice);
+        vm.prank(alice);
+        vault.requestWithdrawal(shares);
+        _setFlags(PAUSE_WITHDRAW | PAUSE_DEPOSIT);
+
+        vm.prank(alice);
+        vault.cancelWithdrawal();
+        assertEq(vault.balanceOf(alice), shares);
+    }
+
+    function test_Pause_DepositDoesNotBlockWithdrawals() public {
+        _deposit(alice, 1000 * 10 ** 6);
+        _setFlags(PAUSE_DEPOSIT);
+        uint256 aliceShares = vault.balanceOf(alice);
+        vm.prank(alice);
+        vault.requestWithdrawal(aliceShares);
+        vm.warp(block.timestamp + 3 * vault.EPOCH_LENGTH());
+        assertTrue(vault.canExecuteWithdrawal(alice));
+        vm.prank(alice);
+        vault.executeWithdrawal();
+        assertEq(vault.balanceOf(alice), 0);
+    }
+
+    function test_Pause_DoesNotBlockSendPayout() public {
+        _deposit(alice, 1000 * 10 ** 6);
+        _setFlags(PAUSE_DEPOSIT | PAUSE_WITHDRAW);
+        vm.prank(tradingEngine);
+        vault.sendPayout(bob, 100 * 10 ** 6);
+        assertEq(usdc.balanceOf(bob) >= 100 * 10 ** 6, true);
+    }
+
+    /// @notice The local flag constants of this file match the vault's
+    function test_PauseFlagConstants() public view {
+        assertEq(vault.PAUSE_DEPOSIT(), PAUSE_DEPOSIT);
+        assertEq(vault.PAUSE_WITHDRAW(), PAUSE_WITHDRAW);
+    }
+
+    function test_SetSolvencyManager_ZeroAddressReverts() public {
+        vm.prank(owner);
+        vm.expectRevert(Vault.ZeroAddress.selector);
+        vault.setSolvencyManager(address(0));
+    }
+
+    function test_SetPauseFlags_EmitsEvent() public {
         vm.expectEmit(false, false, false, true);
-        emit Paused(owner);
-
-        vm.prank(owner);
-        vault.pause();
+        emit PauseFlagsUpdated(3);
+        _setFlags(3);
     }
 
-    function test_Pause_RevertIfAlreadyPaused() public {
-        vm.prank(owner);
-        vault.pause();
-
-        vm.prank(owner);
-        vm.expectRevert(Vault.EnforcedPause.selector);
-        vault.pause();
-    }
-
-    function test_Pause_RevertIfNotOwner() public {
+    function test_SetPauseFlags_RevertIfNotOwner() public {
         vm.prank(alice);
         vm.expectRevert();
-        vault.pause();
+        vault.setPauseFlags(1);
     }
 
-    function test_Unpause_AllowsOperations() public {
+    function test_SetPauseFlags_RevertOnUnknownBits() public {
         vm.prank(owner);
-        vault.pause();
+        vm.expectRevert(abi.encodeWithSelector(Vault.InvalidPauseFlags.selector, uint8(4)));
+        vault.setPauseFlags(4);
+    }
 
-        vm.prank(owner);
-        vault.unpause();
-
-        vm.startPrank(alice);
-        usdc.approve(address(vault), 1000 * 10 ** 6);
-        vault.deposit(1000 * 10 ** 6, alice);
-        vm.stopPrank();
-
+    function test_SetPauseFlags_ClearAllowsOperations() public {
+        _setFlags(3);
+        _setFlags(0);
+        assertEq(vault.pauseFlags(), 0);
+        _deposit(alice, 1000 * 10 ** 6);
         assertEq(vault.balanceOf(alice), 1000 * 1e18);
     }
 
-    function test_Unpause_EmitsEvent() public {
-        vm.prank(owner);
-        vault.pause();
-
-        vm.expectEmit(false, false, false, true);
-        emit Unpaused(owner);
-
-        vm.prank(owner);
-        vault.unpause();
-    }
-
-    function test_Unpause_RevertIfNotPaused() public {
-        vm.prank(owner);
-        vm.expectRevert(Vault.ExpectedPause.selector);
-        vault.unpause();
-    }
-
-    function test_Unpause_RevertIfNotOwner() public {
-        vm.prank(owner);
-        vault.pause();
-
+    /// @notice Time under PAUSE_WITHDRAW extends the expiry by whole epochs, rounded up
+    function test_WithdrawPause_ExtendsExpiryByWholeEpochs() public {
+        _deposit(alice, 1000 * 10 ** 6);
+        uint256 aliceShares = vault.balanceOf(alice);
         vm.prank(alice);
-        vm.expectRevert();
-        vault.unpause();
+        vault.requestWithdrawal(aliceShares);
+        uint256 unlock = vault.getWithdrawalUnlockEpoch(alice);
+        assertEq(vault.getWithdrawalExpiryEpoch(alice), unlock + 1);
+
+        _setFlags(PAUSE_WITHDRAW);
+        vm.warp(block.timestamp + 1 hours);
+        assertEq(vault.getWithdrawalExpiryEpoch(alice), unlock + 2, "one hour of pause is not rounded up to an epoch");
+        vm.warp(block.timestamp + 1 days);
+        _setFlags(0);
+        assertEq(vault.getWithdrawalExpiryEpoch(alice), unlock + 3, "25 hours of pause is not two epochs");
+
+        // A later pause adds to the earlier one
+        _setFlags(PAUSE_WITHDRAW);
+        vm.warp(block.timestamp + 23 hours);
+        _setFlags(0);
+        assertEq(vault.getWithdrawalExpiryEpoch(alice), unlock + 3, "48 hours in total is two epochs");
+        assertEq(vault.getWithdrawalExpiryEpoch(bob), 0);
     }
 
-    function test_Paused_ReturnsCorrectState() public {
-        assertFalse(vault.paused());
+    /// @notice Time paused before a request does not extend it
+    function test_WithdrawPause_BeforeRequestDoesNotExtend() public {
+        _deposit(alice, 1000 * 10 ** 6);
+        _setFlags(PAUSE_WITHDRAW);
+        vm.warp(block.timestamp + 5 days);
+        _setFlags(0);
 
-        vm.prank(owner);
-        vault.pause();
+        uint256 aliceShares = vault.balanceOf(alice);
+        vm.prank(alice);
+        vault.requestWithdrawal(aliceShares);
+        assertEq(vault.getWithdrawalExpiryEpoch(alice), vault.getWithdrawalUnlockEpoch(alice) + 1);
+    }
 
-        assertTrue(vault.paused());
+    /// @notice Setting the flag again while it is set does not restart the pause clock
+    function test_WithdrawPause_ResettingFlagKeepsClock() public {
+        _deposit(alice, 1000 * 10 ** 6);
+        uint256 aliceShares = vault.balanceOf(alice);
+        vm.prank(alice);
+        vault.requestWithdrawal(aliceShares);
+        uint256 unlock = vault.getWithdrawalUnlockEpoch(alice);
 
-        vm.prank(owner);
-        vault.unpause();
-
-        assertFalse(vault.paused());
+        _setFlags(PAUSE_WITHDRAW);
+        vm.warp(block.timestamp + 30 hours);
+        _setFlags(PAUSE_WITHDRAW | PAUSE_DEPOSIT);
+        assertEq(vault.getWithdrawalExpiryEpoch(alice), unlock + 3, "30 hours is not two epochs");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -878,7 +946,7 @@ contract VaultTest is Test {
 
     function test_Constructor_RevertOnZeroAsset() public {
         vm.expectRevert(Vault.ZeroAddress.selector);
-        new Vault(address(0), owner);
+        new Vault(address(0), owner, address(tradingStorage), address(mockOracle));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -925,10 +993,121 @@ contract VaultTest is Test {
         assertEq(vault.collateralizationRatio(), expected);
     }
 
-    function _deposit(address user, uint256 amount) internal {
+    /*//////////////////////////////////////////////////////////////
+                    ERC-4626 MAX FUNCTIONS VS ACTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_MaxDeposit_MatchesDeposit() public {
+        assertEq(vault.maxDeposit(alice), type(uint256).max);
+        _deposit(alice, 1_000 * 10 ** 6);
+
+        _setFlags(PAUSE_DEPOSIT);
+        assertEq(vault.maxDeposit(alice), 0);
+        vm.prank(alice);
+        vm.expectRevert(_pausedError(PAUSE_DEPOSIT));
+        vault.deposit(1, alice);
+    }
+
+    function test_MaxMint_MatchesMint() public {
+        assertEq(vault.maxMint(alice), type(uint256).max);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), type(uint256).max);
+        vault.mint(1e18, alice);
+        vm.stopPrank();
+
+        _setFlags(PAUSE_DEPOSIT);
+        assertEq(vault.maxMint(alice), 0);
+        vm.prank(alice);
+        vm.expectRevert(_pausedError(PAUSE_DEPOSIT));
+        vault.mint(1e18, alice);
+    }
+
+    function testFuzz_MaxWithdraw_MatchesWithdraw(uint256 assets) public {
+        _deposit(alice, 1_000 * 10 ** 6);
+        assertEq(vault.maxWithdraw(alice), 0);
+        vm.prank(alice);
+        vm.expectRevert(Vault.UseRequestWithdrawalFlow.selector);
+        vault.withdraw(assets, alice, alice);
+    }
+
+    function testFuzz_MaxRedeem_MatchesRedeem(uint256 shares) public {
+        _deposit(alice, 1_000 * 10 ** 6);
+        assertEq(vault.maxRedeem(alice), 0);
+        vm.prank(alice);
+        vm.expectRevert(Vault.UseRequestWithdrawalFlow.selector);
+        vault.redeem(shares, alice, alice);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    WITHDRAWAL ESCROW AND WINDOW
+    //////////////////////////////////////////////////////////////*/
+
+    function test_ExecuteWithdrawal_LastEpochOfWindowSucceeds() public {
+        uint256 shares = _deposit(alice, 1_000 * 10 ** 6);
+        vm.prank(alice);
+        vault.requestWithdrawal(shares);
+
+        // Unlock epoch starts 3 epochs after the request epoch; move to its last second
+        uint256 unlockTime = vault.DEPLOY_TIMESTAMP() + (vault.currentEpoch() + 3) * vault.EPOCH_LENGTH();
+        vm.warp(unlockTime + vault.EPOCH_LENGTH() - 1);
+        assertTrue(vault.canExecuteWithdrawal(alice));
+
+        vm.prank(alice);
+        vault.executeWithdrawal();
+        assertEq(vault.balanceOf(address(vault)), 0, "escrow not burned");
+        assertEq(usdc.balanceOf(alice), 10_000 * 10 ** 6);
+    }
+
+    function test_ExecuteWithdrawal_RevertAfterWindow() public {
+        uint256 shares = _deposit(alice, 1_000 * 10 ** 6);
+        vm.prank(alice);
+        vault.requestWithdrawal(shares);
+        uint256 expiryEpoch = vault.currentEpoch() + 3 + 1;
+
+        vm.warp(vault.DEPLOY_TIMESTAMP() + expiryEpoch * vault.EPOCH_LENGTH());
+        assertFalse(vault.canExecuteWithdrawal(alice));
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(Vault.WithdrawalExpired.selector, expiryEpoch));
+        vault.executeWithdrawal();
+    }
+
+    function test_RequestWithdrawal_EscrowsShares() public {
+        uint256 shares = _deposit(alice, 1_000 * 10 ** 6);
+        vm.prank(alice);
+        vault.requestWithdrawal(shares / 4);
+
+        assertEq(vault.balanceOf(address(vault)), shares / 4);
+        assertEq(vault.balanceOf(alice), shares - shares / 4);
+    }
+
+    function test_RequestWithdrawal_ReplacingReturnsPreviousEscrow() public {
+        uint256 shares = _deposit(alice, 1_000 * 10 ** 6);
+        vm.startPrank(alice);
+        vault.requestWithdrawal(shares);
+        vault.requestWithdrawal(shares / 2);
+        vm.stopPrank();
+
+        assertEq(vault.balanceOf(address(vault)), shares / 2);
+        assertEq(vault.balanceOf(alice), shares - shares / 2);
+        (uint256 requested,,) = vault.withdrawalRequests(alice);
+        assertEq(requested, shares / 2);
+    }
+
+    function test_CancelWithdrawal_ReturnsEscrow() public {
+        uint256 shares = _deposit(alice, 1_000 * 10 ** 6);
+        vm.startPrank(alice);
+        vault.requestWithdrawal(shares);
+        vault.cancelWithdrawal();
+        vm.stopPrank();
+
+        assertEq(vault.balanceOf(alice), shares);
+        assertEq(vault.balanceOf(address(vault)), 0);
+    }
+
+    function _deposit(address user, uint256 amount) internal returns (uint256 shares) {
         vm.startPrank(user);
         usdc.approve(address(vault), amount);
-        vault.deposit(amount, user);
+        shares = vault.deposit(amount, user);
         vm.stopPrank();
     }
 }

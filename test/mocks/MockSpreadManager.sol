@@ -3,7 +3,7 @@ pragma solidity 0.8.24;
 
 /**
  * @title MockSpreadManager
- * @notice Simplified SpreadManager mock for TradingEngine tests — returns preset spread BPS
+ * @notice Simplified SpreadManager mock for TradingEngine tests: returns preset spread BPS
  */
 contract MockSpreadManager {
     uint256 private _spreadBps;

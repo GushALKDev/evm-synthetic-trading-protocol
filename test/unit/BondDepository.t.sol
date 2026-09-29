@@ -6,6 +6,7 @@ import {ERC20} from "solady/tokens/ERC20.sol";
 import {Ownable} from "solady/auth/Ownable.sol";
 import {BondDepository} from "../../src/BondDepository.sol";
 import {SynthToken} from "../../src/SynthToken.sol";
+import {MockSolvencyVault} from "../mocks/MockSolvencyVault.sol";
 
 contract MockUSDC is ERC20 {
     function name() public pure override returns (string memory) {
@@ -31,7 +32,8 @@ contract BondDepositoryTest is Test {
     MockUSDC usdc;
 
     address owner = makeAddr("owner");
-    address vault = makeAddr("vault");
+    MockSolvencyVault mockVault = new MockSolvencyVault();
+    address vault = address(mockVault);
     address solvencyManager = makeAddr("solvencyManager");
     address alice = makeAddr("alice");
 
@@ -119,6 +121,14 @@ contract BondDepositoryTest is Test {
         vm.prank(alice);
         vm.expectRevert(BondDepository.CallerNotSolvencyManager.selector);
         bond.activateBonding(100_000 * 10 ** 6);
+    }
+
+    function test_ActivateBonding_RevertWhenSolvencyManagerNotSet() public {
+        vm.prank(owner);
+        BondDepository unwired = new BondDepository(address(usdc), vault, address(synth), DISCOUNT_BPS, owner);
+        vm.prank(solvencyManager);
+        vm.expectRevert(BondDepository.SolvencyManagerNotSet.selector);
+        unwired.activateBonding(1_000 * 10 ** 6);
     }
 
     function test_ActivateBonding_ZeroAmountReverts() public {
@@ -220,6 +230,71 @@ contract BondDepositoryTest is Test {
         bond.bond(1000 * 10 ** 6);
     }
 
+    /*//////////////////////////////////////////////////////////////
+                    ROUND CLOSE ON CR RECOVERY
+    //////////////////////////////////////////////////////////////*/
+
+    function test_Bond_ClampedToVaultDeficitAndCloses() public {
+        vm.prank(solvencyManager);
+        bond.activateBonding(10_000 * 10 ** 6);
+        mockVault.setDeficit(4_000 * 10 ** 6);
+
+        vm.expectEmit(false, false, false, false);
+        emit RoundClosed();
+        vm.prank(alice);
+        bond.bond(10_000 * 10 ** 6);
+
+        assertEq(usdc.balanceOf(vault), 4_000 * 10 ** 6, "raised more than the deficit");
+        assertEq(bond.remainingCap(), 0);
+        assertFalse(bond.isActive());
+    }
+
+    function test_Bond_BelowDeficitKeepsRoundOpen() public {
+        vm.prank(solvencyManager);
+        bond.activateBonding(10_000 * 10 ** 6);
+        mockVault.setDeficit(4_000 * 10 ** 6);
+
+        vm.prank(alice);
+        bond.bond(1_000 * 10 ** 6);
+        assertEq(bond.remainingCap(), 9_000 * 10 ** 6);
+        assertTrue(bond.isActive());
+    }
+
+    function test_Bond_RevertWhenVaultRecovered() public {
+        vm.prank(solvencyManager);
+        bond.activateBonding(10_000 * 10 ** 6);
+        mockVault.setDeficit(0);
+
+        vm.prank(alice);
+        vm.expectRevert(BondDepository.NoActiveRound.selector);
+        bond.bond(1_000 * 10 ** 6);
+    }
+
+    function test_CloseBonding() public {
+        vm.prank(solvencyManager);
+        bond.activateBonding(10_000 * 10 ** 6);
+
+        vm.expectEmit(false, false, false, false);
+        emit RoundClosed();
+        vm.prank(solvencyManager);
+        bond.closeBonding();
+        assertFalse(bond.isActive());
+    }
+
+    function test_CloseBonding_OnlySolvencyManager() public {
+        vm.prank(solvencyManager);
+        bond.activateBonding(10_000 * 10 ** 6);
+        vm.prank(alice);
+        vm.expectRevert(BondDepository.CallerNotSolvencyManager.selector);
+        bond.closeBonding();
+    }
+
+    function test_CloseBonding_RevertWithoutRound() public {
+        vm.prank(solvencyManager);
+        vm.expectRevert(BondDepository.NoActiveRound.selector);
+        bond.closeBonding();
+    }
+
     function test_Bond_ZeroAmountReverts() public {
         vm.prank(solvencyManager);
         bond.activateBonding(100_000 * 10 ** 6);
@@ -262,11 +337,12 @@ contract BondDepositoryTest is Test {
         uint256 synthOut = _bond(1000 * 10 ** 6);
 
         vm.warp(block.timestamp + VESTING / 2);
-        assertApproxEqAbs(bond.claimable(alice, 0), synthOut / 2, 1);
+        // vested = synthOut * (VESTING / 2) / VESTING, and VESTING is even, so it floors exactly to synthOut / 2
+        assertEq(bond.claimable(alice, 0), synthOut / 2);
 
         vm.prank(alice);
         uint256 claimed = bond.claim(0);
-        assertApproxEqAbs(claimed, synthOut / 2, 1);
+        assertEq(claimed, synthOut / 2);
         assertEq(synth.balanceOf(alice), claimed);
         assertEq(bond.bondAt(alice, 0).claimedSynth, claimed);
     }
@@ -532,5 +608,35 @@ contract BondDepositoryTest is Test {
         bond.activateBonding(usdcIn);
         vm.prank(alice);
         (, synthOut) = bond.bond(usdcIn);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        INVALID INPUT REVERTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_BondAt_InvalidIdReverts() public {
+        vm.expectRevert(abi.encodeWithSelector(BondDepository.InvalidBondId.selector, uint256(0)));
+        bond.bondAt(alice, 0);
+    }
+
+    function test_Claimable_InvalidIdReverts() public {
+        vm.expectRevert(abi.encodeWithSelector(BondDepository.InvalidBondId.selector, uint256(3)));
+        bond.claimable(alice, 3);
+    }
+
+    function test_SetSolvencyManager_ZeroAddressReverts() public {
+        vm.prank(owner);
+        vm.expectRevert(BondDepository.ZeroAddress.selector);
+        bond.setSolvencyManager(address(0));
+    }
+
+    /// @notice A discount that floors the effective price to 0 is rejected, as a reference price that does
+    function test_SetDiscountBps_EffectivePriceZeroReverts() public {
+        vm.startPrank(owner);
+        bond.setDiscountBps(0);
+        bond.setReferencePrice(1);
+        vm.expectRevert(abi.encodeWithSelector(BondDepository.EffectivePriceZero.selector, uint256(1), uint256(1)));
+        bond.setDiscountBps(1);
+        vm.stopPrank();
     }
 }

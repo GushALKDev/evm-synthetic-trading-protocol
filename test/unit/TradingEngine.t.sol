@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {TradingEngine} from "../../src/TradingEngine.sol";
 import {TradingStorage} from "../../src/TradingStorage.sol";
 import {Vault} from "../../src/Vault.sol";
 import {MockOracle} from "../mocks/MockOracle.sol";
 import {MockSpreadManager} from "../mocks/MockSpreadManager.sol";
+import {FundingLib} from "../../src/libraries/FundingLib.sol";
 import {ERC20} from "solady/tokens/ERC20.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 
@@ -29,6 +30,8 @@ contract MockUSDC is ERC20 {
 }
 
 contract TradingEngineTest is Test {
+    uint8 constant PAUSE_OPEN = 1; // TradingEngine.PAUSE_OPEN
+    uint8 constant PAUSE_SETTLE = 2; // TradingEngine.PAUSE_SETTLE
     using SafeTransferLib for address;
 
     TradingEngine engine;
@@ -76,8 +79,7 @@ contract TradingEngineTest is Test {
     event TpUpdated(uint256 indexed tradeId, uint128 newTp);
     event SlUpdated(uint256 indexed tradeId, uint128 newSl);
     event TreasuryUpdated(address indexed newTreasury);
-    event Paused(address account);
-    event Unpaused(address account);
+    event PauseFlagsUpdated(uint8 flags);
 
     function setUp() public {
         EMPTY_UPDATE = new bytes[](0);
@@ -89,7 +91,7 @@ contract TradingEngineTest is Test {
 
         vm.startPrank(owner);
         tradingStorage = new TradingStorage(address(usdc), owner);
-        vault = new Vault(address(usdc), owner);
+        vault = new Vault(address(usdc), owner, address(tradingStorage), address(mockOracle));
         engine = new TradingEngine(address(tradingStorage), address(vault), address(mockOracle), address(usdc), treasuryAddr, address(mockSpreadManager), owner);
 
         tradingStorage.setTradingEngine(address(engine));
@@ -166,6 +168,14 @@ contract TradingEngineTest is Test {
      */
     function _closeFee(uint64 effectiveCollateral, uint16 leverage) internal pure returns (uint256) {
         return (uint256(effectiveCollateral) * uint256(leverage) * 8) / 10_000;
+    }
+
+    /**
+     * @dev Open a 10 USDC x10 short so the long side is heavier but both sides have OI (funding needs both)
+     */
+    function _openSmallShort(address _user) internal returns (uint32 tradeId) {
+        vm.prank(_user);
+        tradeId = engine.openTrade(DEFAULT_PAIR_INDEX, false, 10 * 10 ** 6, 10, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -349,6 +359,46 @@ contract TradingEngineTest is Test {
         engine.openTrade(DEFAULT_PAIR_INDEX, true, DEFAULT_COLLATERAL, 101, DEFAULT_LONG_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE);
     }
 
+    /**
+     * @notice The open fee stays below the collateral for every leverage the engine accepts
+     * @dev The fee rate is a constant (no owner setter) and leverage above MAX_LEVERAGE reverts before the fee is
+     *      computed, so fee = collateral * leverage * OPEN_FEE_BPS / 10,000 <= 8% of collateral. This is why the
+     *      former FeeExceedsCollateral check could not be reached and was removed.
+     */
+    function testFuzz_OpenFee_BelowCollateralForEveryAcceptedLeverage(uint64 _collateral, uint16 _leverage) public view {
+        _leverage = uint16(bound(_leverage, 1, engine.MAX_LEVERAGE()));
+        uint256 fee = (uint256(_collateral) * _leverage * engine.OPEN_FEE_BPS()) / engine.BPS_DENOMINATOR();
+        assertLe(fee * 100, uint256(_collateral) * 8);
+        if (_collateral > 0) assertLt(fee, _collateral);
+    }
+
+    /// @notice A pair limit below MAX_LEVERAGE is enforced on its own
+    function test_OpenTrade_RevertOnLeverageExceedsPairMax() public {
+        vm.prank(owner);
+        tradingStorage.updatePair(DEFAULT_PAIR_INDEX, 50, 10_000_000 * 1e18, true);
+
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.LeverageExceedsMax.selector, uint16(60), uint16(50)));
+        engine.openTrade(DEFAULT_PAIR_INDEX, true, DEFAULT_COLLATERAL, 60, DEFAULT_LONG_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE);
+    }
+
+    function test_OpenTrade_RevertOnSlippageExceeded() public {
+        // Expected 1% below the execution price with a 0.5% tolerance
+        uint128 expected = uint128((uint256(DEFAULT_LONG_OPEN_PRICE) * 99) / 100);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.SlippageExceeded.selector, DEFAULT_LONG_OPEN_PRICE, expected, DEFAULT_SLIPPAGE_BPS));
+        engine.openTrade(DEFAULT_PAIR_INDEX, true, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, expected, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE);
+    }
+
+    function test_CloseTrade_RevertOnSlippageExceeded() public {
+        uint32 tradeId = _openDefaultTrade(alice);
+        uint128 closeExec = _longClosePrice(DEFAULT_ORACLE_PRICE);
+        uint128 expected = uint128((uint256(closeExec) * 101) / 100);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.SlippageExceeded.selector, closeExec, expected, DEFAULT_SLIPPAGE_BPS));
+        engine.closeTrade(tradeId, expected, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
+    }
+
     function test_OpenTrade_RevertOnInactivePair() public {
         vm.prank(owner);
         tradingStorage.updatePair(0, 100, 10_000_000 * 1e18, false);
@@ -369,10 +419,10 @@ contract TradingEngineTest is Test {
 
     function test_OpenTrade_RevertWhenPaused() public {
         vm.prank(owner);
-        engine.pause();
+        engine.setPauseFlags(PAUSE_OPEN);
 
         vm.prank(alice);
-        vm.expectRevert(TradingEngine.EnforcedPause.selector);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.EnforcedPause.selector, PAUSE_OPEN));
         engine.openTrade(DEFAULT_PAIR_INDEX, true, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE);
     }
 
@@ -443,7 +493,7 @@ contract TradingEngineTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
-                        CLOSE TRADE TESTS — PROFIT
+                        CLOSE TRADE TESTS: PROFIT
     //////////////////////////////////////////////////////////////*/
 
     function test_CloseTrade_LongProfit() public {
@@ -497,12 +547,19 @@ contract TradingEngineTest is Test {
 
         // Close at same oracle price
         uint128 closeExec = _longClosePrice(DEFAULT_ORACLE_PRICE);
+        uint256 aliceBefore = usdc.balanceOf(alice);
 
         vm.prank(alice);
         engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
 
-        // With spread on both open and close, trader should have a small loss even at same oracle price
-        // Open: 50025e18, Close: 49975e18 → net loss due to spread + close fee
+        // Open at 50,025 and close at 49,975: the spread on both sides is a loss at an unchanged oracle price
+        uint256 size = uint256(DEFAULT_EFFECTIVE_COLLATERAL) * DEFAULT_LEVERAGE;
+        uint256 exitValue = (uint256(closeExec) * size) / uint256(DEFAULT_LONG_OPEN_PRICE);
+        uint256 spreadLoss = size - exitValue;
+        uint256 expectedPayout = uint256(DEFAULT_EFFECTIVE_COLLATERAL) - spreadLoss - _closeFee(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE);
+        assertEq(closeExec, 49_975 * 1e18);
+        assertGt(spreadLoss, 0);
+        assertEq(usdc.balanceOf(alice) - aliceBefore, expectedPayout);
     }
 
     function test_CloseTrade_EmitsEvent_Profit() public {
@@ -528,7 +585,7 @@ contract TradingEngineTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
-                        CLOSE TRADE TESTS — LOSS
+                        CLOSE TRADE TESTS: LOSS
     //////////////////////////////////////////////////////////////*/
 
     function test_CloseTrade_LongPartialLoss() public {
@@ -635,7 +692,7 @@ contract TradingEngineTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
-                        CLOSE TRADE TESTS — PROFIT CAP
+                        CLOSE TRADE TESTS: PROFIT CAP
     //////////////////////////////////////////////////////////////*/
 
     function test_CloseTrade_ProfitCapped() public {
@@ -657,13 +714,13 @@ contract TradingEngineTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
-                      CLOSE TRADE TESTS — BREAKEVEN
+                      CLOSE TRADE TESTS: BREAKEVEN
     //////////////////////////////////////////////////////////////*/
 
     function test_CloseTrade_SpreadCausesSmallLoss() public {
         uint32 tradeId = _openDefaultTrade(alice);
 
-        // Close at same oracle price — spread on both sides causes a small loss
+        // Close at same oracle price: spread on both sides causes a small loss
         uint128 closeExec = _longClosePrice(DEFAULT_ORACLE_PRICE);
 
         uint256 aliceBefore = usdc.balanceOf(alice);
@@ -680,7 +737,7 @@ contract TradingEngineTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
-                      CLOSE TRADE TESTS — REVERTS
+                      CLOSE TRADE TESTS: REVERTS
     //////////////////////////////////////////////////////////////*/
 
     function test_CloseTrade_RevertOnTradeNotFound() public {
@@ -701,10 +758,10 @@ contract TradingEngineTest is Test {
         uint32 tradeId = _openDefaultTrade(alice);
 
         vm.prank(owner);
-        engine.pause();
+        engine.setPauseFlags(PAUSE_SETTLE);
 
         vm.prank(alice);
-        vm.expectRevert(TradingEngine.EnforcedPause.selector);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.EnforcedPause.selector, PAUSE_SETTLE));
         engine.closeTrade(tradeId, _longClosePrice(DEFAULT_ORACLE_PRICE), DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
     }
 
@@ -758,15 +815,30 @@ contract TradingEngineTest is Test {
         engine.updateTp(tradeId, 60_000 * 1e18, EMPTY_UPDATE);
     }
 
-    function test_UpdateTp_RevertWhenPaused() public {
+    /// @notice updateTp is not paused by any flag
+    function test_UpdateTp_WorksWithAllFlagsSet() public {
         uint32 tradeId = _openDefaultTrade(alice);
 
         vm.prank(owner);
-        engine.pause();
+        engine.setPauseFlags(PAUSE_OPEN | PAUSE_SETTLE);
 
         vm.prank(alice);
-        vm.expectRevert(TradingEngine.EnforcedPause.selector);
         engine.updateTp(tradeId, 60_000 * 1e18, EMPTY_UPDATE);
+        assertEq(tradingStorage.getTrade(tradeId).tp, 60_000 * 1e18);
+    }
+
+    function test_UpdateTp_RevertWhenAlreadyTriggeredForShort() public {
+        uint32 tradeId = _openSmallShort(alice);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.TpAlreadyTriggered.selector, DEFAULT_ORACLE_PRICE, DEFAULT_ORACLE_PRICE));
+        engine.updateTp(tradeId, DEFAULT_ORACLE_PRICE, EMPTY_UPDATE);
+    }
+
+    function test_UpdateSl_RevertWhenAlreadyTriggeredForShort() public {
+        uint32 tradeId = _openSmallShort(alice);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.SlAlreadyTriggered.selector, DEFAULT_ORACLE_PRICE, DEFAULT_ORACLE_PRICE));
+        engine.updateSl(tradeId, DEFAULT_ORACLE_PRICE, EMPTY_UPDATE);
     }
 
     function test_UpdateTp_RevertOnInvalidTpForLong() public {
@@ -837,15 +909,16 @@ contract TradingEngineTest is Test {
         engine.updateSl(tradeId, 40_000 * 1e18, EMPTY_UPDATE);
     }
 
-    function test_UpdateSl_RevertWhenPaused() public {
+    /// @notice updateSl is not paused by any flag
+    function test_UpdateSl_WorksWithAllFlagsSet() public {
         uint32 tradeId = _openDefaultTrade(alice);
 
         vm.prank(owner);
-        engine.pause();
+        engine.setPauseFlags(PAUSE_OPEN | PAUSE_SETTLE);
 
         vm.prank(alice);
-        vm.expectRevert(TradingEngine.EnforcedPause.selector);
         engine.updateSl(tradeId, 40_000 * 1e18, EMPTY_UPDATE);
+        assertEq(tradingStorage.getTrade(tradeId).sl, 40_000 * 1e18);
     }
 
     function test_UpdateSl_RevertOnInvalidSlForLong() public {
@@ -867,71 +940,132 @@ contract TradingEngineTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
+                      OPENING BLOCKED BY THE ORACLE
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice openTrade asks the oracle whether opening is allowed (the sequencer grace period on Arbitrum)
+    function test_OpenTrade_RevertWhenOracleBlocksOpening() public {
+        mockOracle.setOpenBlocked(true);
+        vm.prank(alice);
+        vm.expectRevert(MockOracle.OpenNotAllowed.selector);
+        engine.openTrade(DEFAULT_PAIR_INDEX, true, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE);
+    }
+
+    /// @notice The opening check does not apply to closes, TP/SL updates or liquidations
+    function test_OracleBlocksOpening_CloseUpdateAndLiquidateStillWork() public {
+        uint32 closeId = _openDefaultTrade(alice);
+        uint32 liqId = _openDefaultTrade(bob);
+        mockOracle.setOpenBlocked(true);
+
+        vm.startPrank(alice);
+        engine.updateSl(closeId, 0, EMPTY_UPDATE);
+        engine.closeTrade(closeId, _longClosePrice(DEFAULT_ORACLE_PRICE), DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
+        vm.stopPrank();
+        assertEq(tradingStorage.getTrade(closeId).user, address(0));
+
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, (DEFAULT_ORACLE_PRICE * 90) / 100);
+        vm.prank(bob);
+        engine.updateSl(liqId, 0, EMPTY_UPDATE);
+        engine.liquidate(liqId, EMPTY_UPDATE);
+        assertEq(tradingStorage.getTrade(liqId).user, address(0));
+    }
+
+    /*//////////////////////////////////////////////////////////////
                           PAUSE TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_Pause() public {
-        vm.prank(owner);
-        engine.pause();
-        assertTrue(engine.paused());
+    /// @notice The local flag constants of this file match the engine's
+    function test_PauseFlagConstants() public view {
+        assertEq(engine.PAUSE_OPEN(), PAUSE_OPEN);
+        assertEq(engine.PAUSE_SETTLE(), PAUSE_SETTLE);
     }
 
-    function test_Pause_EmitsEvent() public {
+    function test_SetPauseFlags() public {
+        uint8 both = PAUSE_OPEN | PAUSE_SETTLE;
+        vm.prank(owner);
+        engine.setPauseFlags(both);
+        assertEq(engine.pauseFlags(), both);
+
+        vm.prank(owner);
+        engine.setPauseFlags(0);
+        assertEq(engine.pauseFlags(), 0);
+    }
+
+    function test_SetPauseFlags_EmitsEvent() public {
         vm.expectEmit(false, false, false, true);
-        emit Paused(owner);
+        emit PauseFlagsUpdated(2);
 
         vm.prank(owner);
-        engine.pause();
+        engine.setPauseFlags(2);
     }
 
-    function test_Unpause() public {
-        vm.prank(owner);
-        engine.pause();
-
-        vm.prank(owner);
-        engine.unpause();
-        assertFalse(engine.paused());
-    }
-
-    function test_Unpause_EmitsEvent() public {
-        vm.prank(owner);
-        engine.pause();
-
-        vm.expectEmit(false, false, false, true);
-        emit Unpaused(owner);
-
-        vm.prank(owner);
-        engine.unpause();
-    }
-
-    function test_Pause_RevertIfNotOwner() public {
+    function test_SetPauseFlags_RevertIfNotOwner() public {
         vm.prank(alice);
         vm.expectRevert();
-        engine.pause();
+        engine.setPauseFlags(1);
     }
 
-    function test_Unpause_RevertIfNotOwner() public {
+    function test_SetPauseFlags_RevertOnUnknownBits() public {
         vm.prank(owner);
-        engine.pause();
-
-        vm.prank(alice);
-        vm.expectRevert();
-        engine.unpause();
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.InvalidPauseFlags.selector, uint8(4)));
+        engine.setPauseFlags(4);
     }
 
-    function test_Pause_RevertIfAlreadyPaused() public {
-        vm.prank(owner);
-        engine.pause();
+    /// @notice PAUSE_OPEN alone does not touch the funding state
+    function test_SetPauseFlags_OpenOnlyLeavesFundingUntouched() public {
+        _openDefaultTrade(alice);
+        vm.warp(block.timestamp + 1 hours);
+        uint256 lastUpdated = tradingStorage.getFundingLastUpdated(DEFAULT_PAIR_INDEX);
 
         vm.prank(owner);
-        vm.expectRevert(TradingEngine.EnforcedPause.selector);
-        engine.pause();
+        engine.setPauseFlags(PAUSE_OPEN);
+        assertEq(tradingStorage.getFundingLastUpdated(DEFAULT_PAIR_INDEX), lastUpdated);
     }
 
-    function test_Unpause_RevertIfNotPaused() public {
+    /// @notice Setting PAUSE_SETTLE accrues up to now; clearing it moves the timestamp without accruing
+    function test_SetPauseFlags_SettleAccruesThenFreezesFunding() public {
+        _openDefaultTrade(alice);
+        _openSmallShort(bob);
+        vm.warp(block.timestamp + 1 hours);
+
         vm.prank(owner);
-        vm.expectRevert(TradingEngine.ExpectedPause.selector);
-        engine.unpause();
+        engine.setPauseFlags(PAUSE_SETTLE);
+        assertEq(tradingStorage.getFundingLastUpdated(DEFAULT_PAIR_INDEX), block.timestamp, "not accrued when the pause started");
+        int256 indexAtPause = tradingStorage.getCumulativeFundingIndex(DEFAULT_PAIR_INDEX, true);
+        assertGt(indexAtPause, 0, "no funding accrued before the pause");
+
+        vm.warp(block.timestamp + 5 days);
+        vm.prank(owner);
+        engine.setPauseFlags(0);
+        assertEq(tradingStorage.getFundingLastUpdated(DEFAULT_PAIR_INDEX), block.timestamp, "timestamp not moved past the pause");
+        assertEq(tradingStorage.getCumulativeFundingIndex(DEFAULT_PAIR_INDEX, true), indexAtPause, "funding accrued during the pause");
+    }
+
+    /// @notice setFundingFactor while settlement is paused accrues nothing for the paused time
+    function test_SetFundingFactor_WhileSettlePausedDoesNotAccrue() public {
+        _openDefaultTrade(alice);
+        _openSmallShort(bob);
+        vm.prank(owner);
+        engine.setPauseFlags(PAUSE_SETTLE);
+        int256 indexAtPause = tradingStorage.getCumulativeFundingIndex(DEFAULT_PAIR_INDEX, true);
+
+        vm.warp(block.timestamp + 1 days);
+        vm.prank(owner);
+        engine.setFundingFactor(2e14);
+        assertEq(tradingStorage.getCumulativeFundingIndex(DEFAULT_PAIR_INDEX, true), indexAtPause);
+    }
+
+    /// @notice An open while settlement is paused (PAUSE_OPEN clear) accrues nothing for the paused time
+    function test_OpenTrade_WhileSettlePausedDoesNotAccrue() public {
+        _openDefaultTrade(alice);
+        _openSmallShort(bob);
+        vm.prank(owner);
+        engine.setPauseFlags(PAUSE_SETTLE);
+        int256 indexAtPause = tradingStorage.getCumulativeFundingIndex(DEFAULT_PAIR_INDEX, true);
+
+        vm.warp(block.timestamp + 1 days);
+        _openDefaultTrade(alice);
+        assertEq(tradingStorage.getCumulativeFundingIndex(DEFAULT_PAIR_INDEX, true), indexAtPause);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1157,7 +1291,7 @@ contract TradingEngineTest is Test {
     function test_Fee_CloseFeeDeductedFromPayout() public {
         uint32 tradeId = _openDefaultTrade(alice);
 
-        // Close at slight profit (50.5k) — treasury should receive close fee share
+        // Close at slight profit (50.5k): treasury should receive close fee share
         uint128 closeOracle = 50_500 * 1e18;
         mockOracle.setPrice(DEFAULT_PAIR_INDEX, closeOracle);
         uint128 closeExec = _longClosePrice(closeOracle);
@@ -1201,6 +1335,7 @@ contract TradingEngineTest is Test {
 
         uint256 treasuryBefore = usdc.balanceOf(treasuryAddr);
         uint256 vaultBefore = usdc.balanceOf(address(vault));
+        uint256 aliceBefore = usdc.balanceOf(alice);
 
         vm.prank(alice);
         engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
@@ -1210,8 +1345,11 @@ contract TradingEngineTest is Test {
         uint256 expectedTreasuryFee = closeFeeVal - expectedVaultFee;
 
         assertEq(usdc.balanceOf(treasuryAddr) - treasuryBefore, expectedTreasuryFee);
-        // Vault receives fee share but pays out profit, net negative
-        // Just check the fee share was sent (vault delta accounts for profit payout too)
+        // The vault receives its fee share and pays the profit above the collateral left after the fee:
+        // vault delta = vaultFee - (payout - (collateral - closeFee))
+        uint256 payout = usdc.balanceOf(alice) - aliceBefore;
+        uint256 profitFromVault = payout - (uint256(DEFAULT_EFFECTIVE_COLLATERAL) - closeFeeVal);
+        assertEq(int256(usdc.balanceOf(address(vault))) - int256(vaultBefore), int256(expectedVaultFee) - int256(profitFromVault));
     }
 
     function test_Fee_EmitsFeesDistributedOnOpen() public {
@@ -1472,8 +1610,10 @@ contract TradingEngineTest is Test {
     }
 
     function test_Funding_LongPaysWhenLongsHeavier() public {
-        // Alice opens long (only longs, no shorts → longs heavier)
+        // Alice opens long, Bob a smaller short → longs heavier. Funding needs both sides: with no
+        // short open, no funding accrues (FundingLib.calculateIndexDeltas).
         uint32 tradeId = _openDefaultTrade(alice);
+        _openSmallShort(bob);
 
         // Warp time so funding accrues
         vm.warp(block.timestamp + 3600);
@@ -1511,7 +1651,7 @@ contract TradingEngineTest is Test {
             DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, shortTp, shortSl, EMPTY_UPDATE
         );
 
-        // Warp time — more longs than shorts (but now both sides exist, long OI from alice + short OI from bob)
+        // Warp time: more longs than shorts (but now both sides exist, long OI from alice + short OI from bob)
         // Both opened with same collateral/leverage, but long OI was first (timestamp set before short)
         // After second open, long and short OI are equal. Need to create a long-heavier scenario.
         // Open another long for alice to make longs heavier
@@ -1592,8 +1732,9 @@ contract TradingEngineTest is Test {
     }
 
     function test_Funding_AccumulatesWithTime() public {
-        // Open long
+        // Open long with a smaller short counterparty (longs heavier)
         uint32 tradeId = _openDefaultTrade(alice);
+        _openSmallShort(bob);
 
         // Close after 1 hour
         vm.warp(block.timestamp + 3600);
@@ -1616,10 +1757,11 @@ contract TradingEngineTest is Test {
     }
 
     function test_Funding_ExtremeFundingCausesFullLoss() public {
-        // Open long with default collateral — only longs, no shorts (max imbalance)
+        // Long heavier than a small short counterparty (skew ~98%)
         uint32 tradeId = _openDefaultTrade(alice);
+        _openSmallShort(bob);
 
-        // Warp very long time to accumulate massive funding (longs heavier)
+        // One year near the 0.01%/h ceiling is ~86% of notional, ~860% of collateral at 10x
         vm.warp(block.timestamp + 365 days);
 
         uint128 closeExec = _longClosePrice(DEFAULT_ORACLE_PRICE);
@@ -1631,8 +1773,12 @@ contract TradingEngineTest is Test {
         assertEq(usdc.balanceOf(alice), aliceBefore);
     }
 
-    function test_Funding_CreditIncreasesProfit_CappedAt9x() public {
-        // Open long and short to create imbalance favoring longs receiving funding
+    /**
+     * @notice The 9x cap applies to price PnL only; a funding credit is paid on top of the capped payout
+     * @dev Decision 1 (round 2): funding is a transfer between traders, settled after the cap in both
+     *      directions. Before round 2 the credit was truncated by the cap.
+     */
+    function test_Funding_CreditPaidOutsideProfitCap() public {
         // 2 shorts, 1 long → shorts heavier → long receives funding
         uint128 shortTp = 45_000 * 1e18;
         uint128 shortSl = 55_000 * 1e18;
@@ -1650,19 +1796,35 @@ contract TradingEngineTest is Test {
 
         vm.warp(block.timestamp + 3600);
 
-        // Close at huge profit (price doubles)
+        // Close at huge profit (price doubles): price PnL alone exceeds the 9x cap
         uint128 closeOracle = 100_000 * 1e18;
         mockOracle.setPrice(DEFAULT_PAIR_INDEX, closeOracle);
         uint128 closeExec = _longClosePrice(closeOracle);
 
+        vm.recordLogs();
         uint256 aliceBefore = usdc.balanceOf(alice);
         vm.prank(alice);
         engine.closeTrade(tradeId, closeExec, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
         uint256 received = usdc.balanceOf(alice) - aliceBefore;
 
-        // Even with funding credit, payout is capped at 9x collateral (minus close fee)
+        int256 fundingOwed = _lastTradeClosedFunding();
+        assertLt(fundingOwed, 0, "long should receive funding");
+
         uint256 closeFeeVal = _closeFee(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE);
-        assertLe(received, uint256(DEFAULT_EFFECTIVE_COLLATERAL) * 9 - closeFeeVal);
+        assertEq(received, uint256(DEFAULT_EFFECTIVE_COLLATERAL) * 9 + uint256(-fundingOwed) - closeFeeVal);
+    }
+
+    /// @dev fundingOwedUsdc of the last TradeClosed event in the recorded logs
+    function _lastTradeClosedFunding() internal view returns (int256 fundingOwed) {
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 topic = TradeClosed.selector;
+        for (uint256 i = logs.length; i > 0; --i) {
+            if (logs[i - 1].topics[0] == topic) {
+                (,,,, fundingOwed) = abi.decode(logs[i - 1].data, (uint128, int256, uint256, uint256, int256));
+                return fundingOwed;
+            }
+        }
+        revert("no TradeClosed event");
     }
 
     function test_Funding_BalancedOI_ZeroFunding() public {
@@ -1678,7 +1840,7 @@ contract TradingEngineTest is Test {
 
         vm.warp(block.timestamp + 3600);
 
-        // Close short — funding should be zero since OI is balanced
+        // Close short: funding should be zero since OI is balanced
         uint128 closeExec = _shortClosePrice(DEFAULT_ORACLE_PRICE);
 
         uint256 bobBefore = usdc.balanceOf(bob);
@@ -1803,36 +1965,117 @@ contract TradingEngineTest is Test {
         assertGt(aliceReceived, noFundingPayout);
     }
 
-    function testFuzz_Funding_FundsConservation(uint128 closeOracle) public {
-        closeOracle = uint128(bound(closeOracle, 25_000 * 1e18, 100_000 * 1e18));
+    /**
+     * @notice Funding with unbalanced OI: USDC is conserved, the heavier side pays, the lighter side
+     *         receives, and the total credited never exceeds the total charged
+     * @dev The long is 1.5x to 10x the short, so funding always accrues. Sum of both fundingOwed values
+     *      (payer positive, receiver negative) is the rounding dust, which is at most 1 unit per position.
+     */
+    function testFuzz_Funding_FundsConservation(uint128 closeOracle, uint256 longCollateral, uint256 elapsed) public {
+        closeOracle = uint128(bound(closeOracle, 45_000 * 1e18, 55_000 * 1e18));
+        longCollateral = bound(longCollateral, 150 * 10 ** 6, 1_000 * 10 ** 6);
+        elapsed = bound(elapsed, 1 hours, 30 days);
 
         uint256 totalBefore = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage))
             + usdc.balanceOf(treasuryAddr);
 
-        _openDefaultTrade(alice); // long
-        uint128 shortTp = 25_000 * 1e18;
-        uint128 shortSl = 75_000 * 1e18;
-        vm.prank(bob);
-        engine.openTrade(
-            DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, shortTp, shortSl, EMPTY_UPDATE
+        vm.prank(alice);
+        uint32 longId = engine.openTrade(
+            DEFAULT_PAIR_INDEX, true, uint64(longCollateral), DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE
         );
+        vm.prank(bob);
+        uint32 shortId = engine.openTrade(
+            DEFAULT_PAIR_INDEX, false, DEFAULT_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_SHORT_OPEN_PRICE, DEFAULT_SLIPPAGE_BPS, 0, 0, EMPTY_UPDATE
+        );
+        assertGt(tradingStorage.getOpenInterestLong(DEFAULT_PAIR_INDEX), tradingStorage.getOpenInterestShort(DEFAULT_PAIR_INDEX), "OI not unbalanced");
 
-        vm.warp(block.timestamp + 3600);
-
+        vm.warp(block.timestamp + elapsed);
         mockOracle.setPrice(DEFAULT_PAIR_INDEX, closeOracle);
 
-        uint128 closeExec1 = _longClosePrice(closeOracle);
+        vm.recordLogs();
         vm.prank(alice);
-        engine.closeTrade(0, closeExec1, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
-
-        uint128 closeExec2 = _shortClosePrice(closeOracle);
+        engine.closeTrade(longId, _longClosePrice(closeOracle), DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
+        int256 longFunding = _lastTradeClosedFunding();
+        vm.recordLogs();
         vm.prank(bob);
-        engine.closeTrade(1, closeExec2, DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
+        engine.closeTrade(shortId, _shortClosePrice(closeOracle), DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
+        int256 shortFunding = _lastTradeClosedFunding();
 
         uint256 totalAfter = usdc.balanceOf(alice) + usdc.balanceOf(bob) + usdc.balanceOf(address(vault)) + usdc.balanceOf(address(tradingStorage))
             + usdc.balanceOf(treasuryAddr);
+        assertEq(totalBefore, totalAfter, "USDC not conserved");
 
-        assertEq(totalBefore, totalAfter);
+        assertGt(longFunding, 0, "heavier long did not pay");
+        assertLt(shortFunding, 0, "lighter short did not receive");
+        assertGe(longFunding + shortFunding, 0, "credited more than charged");
+        assertLe(longFunding + shortFunding, 2, "dust above one unit per position");
+    }
+
+    /// @notice With OI on one side only there is no counterparty, so no funding accrues
+    function test_Funding_OneSidedOI_NoFunding() public {
+        uint32 tradeId = _openDefaultTrade(alice);
+        vm.warp(block.timestamp + 30 days);
+
+        vm.recordLogs();
+        vm.prank(alice);
+        engine.closeTrade(tradeId, _longClosePrice(DEFAULT_ORACLE_PRICE), DEFAULT_SLIPPAGE_BPS, EMPTY_UPDATE);
+        assertEq(_lastTradeClosedFunding(), 0);
+        assertEq(tradingStorage.getCumulativeFundingIndex(DEFAULT_PAIR_INDEX, true), 0);
+        assertEq(tradingStorage.getCumulativeFundingIndex(DEFAULT_PAIR_INDEX, false), 0);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                      FUNDING FACTOR ADMIN TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    event FundingFactorUpdated(uint256 newFundingFactor);
+
+    function test_FundingFactor_DefaultValue() public view {
+        assertEq(engine.fundingFactor(), FundingLib.DEFAULT_FUNDING_FACTOR);
+    }
+
+    function test_SetFundingFactor() public {
+        vm.expectEmit(false, false, false, true);
+        emit FundingFactorUpdated(FundingLib.MAX_FUNDING_FACTOR);
+        vm.prank(owner);
+        engine.setFundingFactor(FundingLib.MAX_FUNDING_FACTOR);
+        assertEq(engine.fundingFactor(), FundingLib.MAX_FUNDING_FACTOR);
+    }
+
+    function test_SetFundingFactor_RevertOutOfBounds() public {
+        uint256 tooLow = FundingLib.MIN_FUNDING_FACTOR - 1;
+        uint256 tooHigh = FundingLib.MAX_FUNDING_FACTOR + 1;
+        vm.startPrank(owner);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.FundingFactorOutOfBounds.selector, tooLow));
+        engine.setFundingFactor(tooLow);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.FundingFactorOutOfBounds.selector, tooHigh));
+        engine.setFundingFactor(tooHigh);
+        vm.stopPrank();
+    }
+
+    function test_SetFundingFactor_RevertIfNotOwner() public {
+        vm.prank(alice);
+        vm.expectRevert();
+        engine.setFundingFactor(FundingLib.MAX_FUNDING_FACTOR);
+    }
+
+    /// @notice Time elapsed before a factor change is accrued at the old factor
+    function test_SetFundingFactor_AccruesElapsedTimeAtOldFactor() public {
+        _openDefaultTrade(alice);
+        _openSmallShort(bob);
+        vm.warp(block.timestamp + 1 hours);
+
+        (int256 expectedLongDelta,) = FundingLib.calculateIndexDeltas(
+            tradingStorage.getOpenInterestLong(DEFAULT_PAIR_INDEX),
+            tradingStorage.getOpenInterestShort(DEFAULT_PAIR_INDEX),
+            1 hours,
+            FundingLib.DEFAULT_FUNDING_FACTOR
+        );
+        vm.prank(owner);
+        engine.setFundingFactor(FundingLib.MAX_FUNDING_FACTOR);
+
+        assertEq(tradingStorage.getCumulativeFundingIndex(DEFAULT_PAIR_INDEX, true), expectedLongDelta);
+        assertEq(tradingStorage.getFundingLastUpdated(DEFAULT_PAIR_INDEX), block.timestamp);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1886,7 +2129,7 @@ contract TradingEngineTest is Test {
         MockSpreadManager zeroSpreadManager = new MockSpreadManager(0);
         vm.startPrank(owner);
         TradingStorage ts2 = new TradingStorage(address(usdc), owner);
-        Vault v2 = new Vault(address(usdc), owner);
+        Vault v2 = new Vault(address(usdc), owner, address(ts2), address(mockOracle));
         TradingEngine engine2 =
             new TradingEngine(address(ts2), address(v2), address(mockOracle), address(usdc), treasuryAddr, address(zeroSpreadManager), owner);
         ts2.setTradingEngine(address(engine2));
@@ -1924,6 +2167,13 @@ contract TradingEngineTest is Test {
     );
 
     // Threshold = effectiveCollateral * 9000 / 10000
+    /// @dev Liquidator reward on the default position: max(10% of remaining, 0.5% of collateral)
+    function _expectedLiqReward(uint256 remaining) internal pure returns (uint256) {
+        uint256 reward = (remaining * 1000) / 10_000;
+        uint256 minReward = (uint256(DEFAULT_EFFECTIVE_COLLATERAL) * 50) / 10_000;
+        return reward < minReward ? minReward : reward;
+    }
+
     function _liqThreshold(uint64 effectiveCollateral) internal pure returns (uint256) {
         return (uint256(effectiveCollateral) * 9000) / 10_000;
     }
@@ -2009,7 +2259,7 @@ contract TradingEngineTest is Test {
         int256 pnl = _calcLongPnl(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, execPrice);
         uint256 loss = uint256(-pnl);
         uint256 remaining = loss >= DEFAULT_EFFECTIVE_COLLATERAL ? 0 : DEFAULT_EFFECTIVE_COLLATERAL - loss;
-        uint256 expectedReward = (remaining * 1000) / 10_000;
+        uint256 expectedReward = _expectedLiqReward(remaining);
         uint256 expectedVault = DEFAULT_EFFECTIVE_COLLATERAL - expectedReward;
 
         vm.prank(bob);
@@ -2028,7 +2278,7 @@ contract TradingEngineTest is Test {
         int256 pnl = _calcLongPnl(DEFAULT_EFFECTIVE_COLLATERAL, DEFAULT_LEVERAGE, DEFAULT_LONG_OPEN_PRICE, execPrice);
         uint256 loss = uint256(-pnl);
         uint256 remaining = loss >= DEFAULT_EFFECTIVE_COLLATERAL ? 0 : DEFAULT_EFFECTIVE_COLLATERAL - loss;
-        uint256 expectedReward = (remaining * 1000) / 10_000;
+        uint256 expectedReward = _expectedLiqReward(remaining);
         uint256 expectedVault = DEFAULT_EFFECTIVE_COLLATERAL - expectedReward;
 
         vm.expectEmit(true, true, true, true);
@@ -2051,10 +2301,11 @@ contract TradingEngineTest is Test {
         assertEq(tradingStorage.getOpenInterest(DEFAULT_PAIR_INDEX), 0);
     }
 
-    function test_Liquidate_LossExceedsCollateral_ZeroReward() public {
+    /// @dev Round 2: past 100% loss the liquidator is paid the 0.5% floor (it was 0 before round 2)
+    function test_Liquidate_LossExceedsCollateral_PaysMinReward() public {
         uint32 tradeId = _openDefaultTrade(alice);
 
-        // Push loss beyond 100% of collateral → remaining = 0, reward = 0, all to vault
+        // Push loss beyond 100% of collateral → remaining = 0, reward = 0.5% of collateral, rest to vault
         uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 10_500); // 105% loss
         mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
 
@@ -2064,14 +2315,15 @@ contract TradingEngineTest is Test {
         vm.prank(bob);
         engine.liquidate(tradeId, EMPTY_UPDATE);
 
-        assertEq(usdc.balanceOf(bob), bobBefore); // no reward
-        assertEq(usdc.balanceOf(address(vault)) - vaultBefore, DEFAULT_EFFECTIVE_COLLATERAL);
+        uint256 minReward = (uint256(DEFAULT_EFFECTIVE_COLLATERAL) * 50) / 10_000;
+        assertEq(usdc.balanceOf(bob) - bobBefore, minReward);
+        assertEq(usdc.balanceOf(address(vault)) - vaultBefore, DEFAULT_EFFECTIVE_COLLATERAL - minReward);
     }
 
     function test_Liquidate_RevertWhenNotLiquidatable() public {
         uint32 tradeId = _openDefaultTrade(alice);
 
-        // Only 50% loss — below the 90% threshold
+        // Only 50% loss, below the 90% threshold
         uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 5000);
         mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
 
@@ -2096,14 +2348,13 @@ contract TradingEngineTest is Test {
         engine.liquidate(999, EMPTY_UPDATE);
     }
 
-    function test_Liquidate_WorksWhilePaused() public {
-        // Liquidation is the solvency valve and must stay live even while trading is paused.
+    function test_Liquidate_WorksWhileOpenPaused() public {
         uint32 tradeId = _openDefaultTrade(alice);
         uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 9200);
         mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
 
         vm.prank(owner);
-        engine.pause();
+        engine.setPauseFlags(PAUSE_OPEN);
 
         uint256 bobBefore = usdc.balanceOf(bob);
         vm.prank(bob);
@@ -2111,6 +2362,19 @@ contract TradingEngineTest is Test {
 
         assertGt(usdc.balanceOf(bob), bobBefore);
         assertEq(tradingStorage.getTrade(tradeId).user, address(0));
+    }
+
+    /// @notice PAUSE_SETTLE blocks liquidation together with closeTrade
+    function test_Liquidate_RevertWhenSettlePaused() public {
+        uint32 tradeId = _openDefaultTrade(alice);
+        mockOracle.setPrice(DEFAULT_PAIR_INDEX, _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 9200));
+
+        vm.prank(owner);
+        engine.setPauseFlags(PAUSE_SETTLE);
+
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.EnforcedPause.selector, PAUSE_SETTLE));
+        engine.liquidate(tradeId, EMPTY_UPDATE);
     }
 
     function test_Liquidate_Permissionless_OwnerCanLiquidate() public {
@@ -2154,19 +2418,19 @@ contract TradingEngineTest is Test {
 
     function test_OpenTrade_RevertWhenPreLiquidatable() public {
         // A spread large enough to open straight into the liquidation zone must be rejected.
-        // At 100x leverage, a ~90 bps spread already means 90% instant loss.
+        // At 100x, 100 bps to open and 100 bps to close is ~200% of the collateral net of fees.
         mockSpreadManager.setSpreadBps(100); // 1% spread
         uint16 highLeverage = 100;
 
         vm.prank(alice);
-        vm.expectRevert();
+        vm.expectPartialRevert(TradingEngine.NotLiquidatable.selector);
         engine.openTrade(
             DEFAULT_PAIR_INDEX,
             true,
             DEFAULT_COLLATERAL,
             highLeverage,
-            0, // no expected price constraint
-            10_000, // 100% slippage tolerance so slippage doesn't revert first
+            DEFAULT_ORACLE_PRICE, // expected price at the oracle price...
+            10_000, // ...and 100% slippage tolerance, so only the guard can revert
             0,
             0,
             EMPTY_UPDATE
@@ -2174,7 +2438,7 @@ contract TradingEngineTest is Test {
     }
 
     function test_OpenTrade_AllowsNormalSpread() public {
-        // Default 5 bps spread at 10x = 0.05% instant loss, far below threshold — must succeed
+        // Default 5 bps spread at 10x = 0.05% instant loss, far below threshold, must succeed
         uint32 tradeId = _openDefaultTrade(alice);
         assertEq(tradingStorage.getTrade(tradeId).user, alice);
     }
@@ -2252,7 +2516,7 @@ contract TradingEngineTest is Test {
 
         uint256 loss = uint256(-expectedPnl);
         uint256 remaining = loss >= DEFAULT_EFFECTIVE_COLLATERAL ? 0 : DEFAULT_EFFECTIVE_COLLATERAL - loss;
-        uint256 expectedReward = (remaining * 1000) / 10_000;
+        uint256 expectedReward = _expectedLiqReward(remaining);
         uint256 expectedVault = DEFAULT_EFFECTIVE_COLLATERAL - expectedReward;
 
         vm.expectEmit(true, true, true, true);
@@ -2282,8 +2546,9 @@ contract TradingEngineTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_Liquidate_FundingInducedWhilePriceSolvent() public {
-        // Only a long is open → max OI imbalance → the long pays funding over time.
+        // Long much heavier than a small short → the long pays funding over time.
         uint32 tradeId = _openDefaultTrade(alice);
+        _openSmallShort(bob);
 
         // Keep the oracle at entry so price PnL is ~0 (a solvent position by price alone).
         mockOracle.setPrice(DEFAULT_PAIR_INDEX, DEFAULT_ORACLE_PRICE);
@@ -2293,8 +2558,8 @@ contract TradingEngineTest is Test {
         vm.expectRevert();
         engine.liquidate(tradeId, EMPTY_UPDATE);
 
-        // Accrue funding for 4h — enough for funding alone to exceed the 90% threshold.
-        vm.warp(block.timestamp + 4 hours);
+        // At ~0.0098%/h on 10x notional, funding reaches the 90% threshold after ~38 days; wait 60.
+        vm.warp(block.timestamp + 60 days);
 
         uint256 bobBefore = usdc.balanceOf(bob);
         uint256 vaultBefore = usdc.balanceOf(address(vault));
@@ -2308,8 +2573,9 @@ contract TradingEngineTest is Test {
         assertEq(total, DEFAULT_EFFECTIVE_COLLATERAL);
     }
 
-    function test_Liquidate_UnderwaterVaultMadeWhole() public {
-        // Deep loss (>100%) so remaining = 0: liquidator gets nothing, the full collateral backs the vault.
+    /// @dev Round 2: the liquidator now receives the 0.5% floor; the vault receives the rest of the collateral
+    function test_Liquidate_Underwater_VaultGetsCollateralMinusMinReward() public {
+        // Deep loss (>100%) so remaining = 0: liquidator gets the floor, the rest of the collateral backs the vault.
         uint32 tradeId = _openDefaultTrade(alice);
         uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 12_000); // 120% loss
         vm.assume(liqOracle > 0);
@@ -2323,14 +2589,14 @@ contract TradingEngineTest is Test {
         vm.prank(bob);
         engine.liquidate(tradeId, EMPTY_UPDATE);
 
-        // Liquidator reward is 0 when the position is fully underwater.
-        assertEq(usdc.balanceOf(bob), bobBefore);
+        // Liquidator reward is the 0.5% floor when the position is fully underwater.
+        uint256 minReward = (uint256(DEFAULT_EFFECTIVE_COLLATERAL) * 50) / 10_000;
+        assertEq(usdc.balanceOf(bob) - bobBefore, minReward);
 
-        // The entire effective collateral moved from storage into the vault, and the vault's
-        // balance-based accounting absorbed it exactly (made whole).
+        // The entire effective collateral left storage; the vault absorbed all of it except the reward.
         assertEq(storageBefore - usdc.balanceOf(address(tradingStorage)), DEFAULT_EFFECTIVE_COLLATERAL);
-        assertEq(usdc.balanceOf(address(vault)) - vaultBalBefore, DEFAULT_EFFECTIVE_COLLATERAL);
-        assertEq(vault.totalAssets() - vaultTotalBefore, DEFAULT_EFFECTIVE_COLLATERAL);
+        assertEq(usdc.balanceOf(address(vault)) - vaultBalBefore, DEFAULT_EFFECTIVE_COLLATERAL - minReward);
+        assertEq(vault.totalAssets() - vaultTotalBefore, DEFAULT_EFFECTIVE_COLLATERAL - minReward);
     }
 
     function testFuzz_Liquidate_ShortRoundingFavorsPool(uint256 lossBps) public {
@@ -2368,14 +2634,14 @@ contract TradingEngineTest is Test {
         int256 pnlFloor = int256(size) - int256(exitFloor); // floor mirror (weakly smaller loss)
         uint256 lossFloor = pnlFloor < 0 ? uint256(-pnlFloor) : 0;
         uint256 remainingFloor = lossFloor >= DEFAULT_EFFECTIVE_COLLATERAL ? 0 : DEFAULT_EFFECTIVE_COLLATERAL - lossFloor;
-        uint256 vaultFloorLowerBound = DEFAULT_EFFECTIVE_COLLATERAL - (remainingFloor * 1000) / 10_000;
+        uint256 vaultFloorLowerBound = DEFAULT_EFFECTIVE_COLLATERAL - _expectedLiqReward(remainingFloor);
 
         assertGe(usdc.balanceOf(address(vault)) - vaultBefore, vaultFloorLowerBound);
     }
 
     function test_Liquidate_RevertOnOracleOutage() public {
         // A stale / high-deviation oracle makes getPrice revert; liquidation must revert too
-        // (no liquidating at an unverified price) — the accepted outage behavior.
+        // (no liquidating at an unverified price), the accepted outage behavior.
         uint32 tradeId = _openDefaultTrade(alice);
         uint128 liqOracle = _oracleForLongLoss(DEFAULT_LONG_OPEN_PRICE, 9200);
         mockOracle.setPrice(DEFAULT_PAIR_INDEX, liqOracle);
@@ -2589,10 +2855,10 @@ contract TradingEngineTest is Test {
         mockOracle.setPrice(DEFAULT_PAIR_INDEX, oracle);
 
         vm.prank(owner);
-        engine.pause();
+        engine.setPauseFlags(PAUSE_SETTLE);
 
         vm.prank(bob);
-        vm.expectRevert(TradingEngine.EnforcedPause.selector);
+        vm.expectRevert(abi.encodeWithSelector(TradingEngine.EnforcedPause.selector, PAUSE_SETTLE));
         engine.executeLimit(tradeId, EMPTY_UPDATE);
     }
 

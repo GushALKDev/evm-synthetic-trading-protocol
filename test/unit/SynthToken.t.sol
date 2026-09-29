@@ -113,6 +113,21 @@ contract SynthTokenTest is Test {
         token.mint(alice, 100e18);
     }
 
+    /// @notice Changing the minter revokes the previous one
+    function test_Mint_PreviousMinterRevokedBySetMinter() public {
+        vm.startPrank(owner);
+        token.setMinter(minter);
+        token.setMinter(alice);
+        vm.stopPrank();
+
+        vm.prank(minter);
+        vm.expectRevert(SynthToken.CallerNotMinter.selector);
+        token.mint(minter, 100e18);
+        vm.prank(alice);
+        token.mint(alice, 100e18);
+        assertEq(token.totalSupply(), 100e18);
+    }
+
     function test_Mint_OwnerCannotMint() public {
         vm.prank(owner);
         token.setMinter(minter);

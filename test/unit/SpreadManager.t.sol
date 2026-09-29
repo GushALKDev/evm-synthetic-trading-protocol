@@ -106,7 +106,7 @@ contract SpreadManagerTest is Test {
         assertEq(spread, 11);
     }
 
-    function test_GetSpreadBps_CappedAtMax() public {
+    function test_GetSpreadBps_CappedAtMax() public view {
         // Very high OI to push spread above max
         uint256 hugeOI = 1_000_000_000 * 1e18; // 1B
         uint256 spread = sm.getSpreadBps(0, hugeOI);
@@ -201,7 +201,7 @@ contract SpreadManagerTest is Test {
     function test_UpdateVolatility_FirstTimeSkipsBoundsCheck() public {
         // First update can set any value (no bounds check)
         vm.prank(keeper);
-        sm.updateVolatility(0, 50e16); // 50% — would fail bounds if current was non-zero
+        sm.updateVolatility(0, 50e16); // 50%, would fail bounds if current was non-zero
         assertEq(sm.getPairVolatility(0), 50e16);
     }
 

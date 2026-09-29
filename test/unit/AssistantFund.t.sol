@@ -73,7 +73,7 @@ contract AssistantFundTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_ReceivesFeesAsPlainTransfer() public {
-        // Fees arrive as a plain USDC transfer (treasury pointed here) — no hook needed
+        // Fees arrive as a plain USDC transfer (treasury pointed here), no hook needed
         usdc.mint(address(fund), 500 * 10 ** 6);
         assertEq(fund.balance(), 500 * 10 ** 6);
     }

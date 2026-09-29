@@ -1,7 +1,7 @@
 {
   "name": "synthetic-trading-protocol",
   "version": "1.0.0",
-  "description": "[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT) [![Solidity](https://img.shields.io/badge/Solidity-0.8.24-363636.svg)](https://docs.soliditylang.org/) [![Foundry](https://img.shields.io/badge/Built%20with-Foundry-FFDB1C.svg)](https://getfoundry.sh/)",
+  "description": "Leveraged synthetic trading protocol in Solidity: ERC-4626 LP vault as counterparty, Pyth prices anchored to Chainlink",
   "main": "index.js",
   "directories": {
     "doc": "docs",
@@ -12,12 +12,9 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "author": "Gustavo Martín (GushALKDev)",
+  "license": "MIT",
   "type": "commonjs",
-  "devDependencies": {
-    "solhint": "^6.0.3"
-  },
   "dependencies": {
     "@pythnetwork/pyth-sdk-solidity": "^4.3.1"
   }

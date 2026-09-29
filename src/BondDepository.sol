@@ -3,7 +3,9 @@ pragma solidity 0.8.24;
 
 import {Ownable} from "solady/auth/Ownable.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
+import {SafeCastLib} from "solady/utils/SafeCastLib.sol";
 import {ISynthToken} from "./interfaces/ISynthToken.sol";
+import {ISolvencyVault} from "./interfaces/ISolvency.sol";
 
 /**
  * @title BondDepository
@@ -12,13 +14,16 @@ import {ISynthToken} from "./interfaces/ISynthToken.sol";
  *         rounds. The raised USDC is injected straight into the Vault; the discounted $SYNTH is vested
  *         to bonders linearly over a configurable window.
  * @dev A round is opened only by the SolvencyManager via activateBonding(neededUsdc), which sets the
- *      remaining cap for that round. Bonders call bond(usdcAmount) until the cap is exhausted, at which
- *      point the round auto-closes. $SYNTH is priced off a keeper-maintained referencePrice (USDC per
- *      SYNTH, proxy for a TWAP) with a capped discount.
+ *      remaining cap for that round. A bond takes at most min(remaining cap, Vault realised collateralization
+ *      deficit), so a round never raises more than is needed to bring the realised ratio (USDC balance per
+ *      share, open trader PnL ignored) back to 100%. The round closes when that amount is exhausted (the cap is
+ *      used up or the bond restores the realised ratio to 100%), or when the SolvencyManager finds the realised
+ *      ratio back at 100% through other inflows and calls closeBonding. $SYNTH is
+ *      priced off an owner-set referencePrice (USDC per SYNTH, a stand-in for a TWAP) with a capped discount.
  *
  *      Vesting rationale (PoC): the sell-side discount makes an instant "bond → dump on market" a
- *      near risk-free arbitrage that pushes the token price down, and — since bonds re-price against
- *      that same referencePrice — can feed on itself (the classic OlympusDAO bond-and-dump). Linear
+ *      near risk-free arbitrage that pushes the token price down, and, since bonds re-price against
+ *      that same referencePrice, can feed on itself (the classic OlympusDAO bond-and-dump). Linear
  *      vesting over VESTING_PERIOD breaks the *atomic* arbitrage (buy and sell in one tx) and spreads
  *      any sell pressure across time instead of a single dump, at the cost of making bonds less
  *      attractive during an acute crisis. VESTING_PERIOD is owner-configurable (default 48h, capped at
@@ -106,7 +111,6 @@ contract BondDepository is Ownable {
     error SolvencyManagerNotSet();
     error DiscountTooHigh(uint256 discountBps);
     error VestingPeriodTooLong(uint256 vestingPeriod);
-    error ReferencePriceUnset();
     error EffectivePriceZero(uint256 referencePrice, uint256 discountBps);
     error NoActiveRound();
     error RoundAlreadyActive();
@@ -173,13 +177,13 @@ contract BondDepository is Ownable {
 
     /**
      * @notice Open a bonding round to raise up to `_neededUsdc` for the Vault
-     * @dev Only the SolvencyManager may call. Reverts if a round is already active or price is unset.
+     * @dev Only the SolvencyManager may call. Reverts if a round is already active.
+     *      No check on referencePrice: it starts at 2 USDC and setReferencePrice rejects 0.
      * @param _neededUsdc Target USDC to raise in this round (the round cap)
      */
     function activateBonding(uint256 _neededUsdc) external onlySolvencyManager {
         if (_neededUsdc == 0) revert ZeroAmount();
         if (remainingCap != 0) revert RoundAlreadyActive();
-        if (referencePrice == 0) revert ReferencePriceUnset();
 
         remainingCap = _neededUsdc;
         emit BondingActivated(_neededUsdc);
@@ -189,9 +193,10 @@ contract BondDepository is Ownable {
      * @notice Buy discounted $SYNTH by depositing USDC; the USDC is injected into the Vault
      * @dev Permissionless. USDC is pulled from the caller and sent to the Vault; the discounted $SYNTH
      *      is minted to this contract and vested to the caller linearly over vestingPeriod (claimed
-     *      via claim). The deposit is clamped to the remaining round cap; the round closes when the cap
-     *      is exhausted. CEI: state (cap, position) updated before external mint/transfers.
-     * @param _usdcAmount USDC the caller wishes to bond (clamped to remainingCap)
+     *      via claim). The deposit is clamped to min(remainingCap, Vault realised deficit); the round closes when
+     *      that amount is exhausted. Reverts NoActiveRound when either is zero. CEI: state (cap, position)
+     *      updated before external mint/transfers.
+     * @param _usdcAmount USDC the caller wishes to bond (clamped to min(remainingCap, realised deficit))
      * @return bondId Index of the created vesting position for msg.sender
      * @return synthOut Amount of $SYNTH vesting to the caller
      */
@@ -199,20 +204,25 @@ contract BondDepository is Ownable {
         if (_usdcAmount == 0) revert ZeroAmount();
         uint256 cap = remainingCap;
         if (cap == 0) revert NoActiveRound();
+        uint256 deficit = ISolvencyVault(VAULT).realisedCollateralizationDeficit();
+        uint256 available = deficit < cap ? deficit : cap;
+        if (available == 0) revert NoActiveRound();
 
         // Checks / Effects
-        uint256 usdcIn = _usdcAmount > cap ? cap : _usdcAmount;
+        uint256 usdcIn = _usdcAmount > available ? available : _usdcAmount;
         synthOut = quoteBond(usdcIn);
-        uint256 newCap = cap - usdcIn;
+        // Taking all that is available either uses up the cap or restores the Vault to 100%: close the round
+        uint256 newCap = usdcIn == available ? 0 : cap - usdcIn;
         remainingCap = newCap;
 
+        // Safe cast: timestamps fit uint64 for about 5.8e11 years
         uint64 start = uint64(block.timestamp);
+        // forge-lint: disable-next-line(unsafe-typecast) safe: vestingPeriod is at most MAX_VESTING_PERIOD (BondDepository.sol:356)
         uint64 end = uint64(block.timestamp + vestingPeriod);
         bondId = _bonds[msg.sender].length;
-        // The uint128 cast cannot truncate in practice: with the smallest effective price the setters
-        // allow (1), overflowing would need a round of ~3.4e14 USDC, far above the total USDC supply.
-        // Kept as uint128 to pack the position into 2 slots.
-        _bonds[msg.sender].push(BondPosition({totalSynth: uint128(synthOut), claimedSynth: 0, start: start, end: end}));
+        // SafeCastLib: with the smallest effective price the setters allow (1), a uint128 overflow needs a round of
+        // about 3.4e14 USDC; the position stays uint128 to pack into 2 slots
+        _bonds[msg.sender].push(BondPosition({totalSynth: SafeCastLib.toUint128(synthOut), claimedSynth: 0, start: start, end: end}));
 
         // Interactions: USDC to Vault, $SYNTH minted into this contract's custody for vesting
         ASSET.safeTransferFrom(msg.sender, VAULT, usdcIn);
@@ -236,9 +246,20 @@ contract BondDepository is Ownable {
         claimed = _vested(pos) - pos.claimedSynth;
         if (claimed == 0) revert NothingToClaim();
 
+        // forge-lint: disable-next-line(unsafe-typecast) safe: claimed is at most totalSynth, a uint128 (BondDepository.sol:155)
         pos.claimedSynth += uint128(claimed);
         address(SYNTH).safeTransfer(msg.sender, claimed);
         emit Claimed(msg.sender, _bondId, claimed);
+    }
+
+    /**
+     * @notice Close the active round because the Vault is back at 100% CR
+     * @dev Only the SolvencyManager may call; it does so from checkAndAct when CR >= DEFICIT_CR.
+     */
+    function closeBonding() external onlySolvencyManager {
+        if (remainingCap == 0) revert NoActiveRound();
+        remainingCap = 0;
+        emit RoundClosed();
     }
 
     /*//////////////////////////////////////////////////////////////

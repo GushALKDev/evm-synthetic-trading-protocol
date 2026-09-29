@@ -21,10 +21,54 @@ jobs:
         with:
           submodules: recursive
 
+      # The Pyth SDK declares engines node >=22.14
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
+          cache: npm
+
+      # Required: the Pyth Solidity SDK is an npm dependency, remapped from node_modules/ in foundry.toml
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          # Pinned to the version every published number was measured with (test counts, gas, the gas bound in
+          # EdgeCases.t.sol); forge 1.8.x charges cold storage between top-level test calls and groups invariants
+          version: v1.7.1
+
+      - name: Check formatting
+        run: forge fmt --check
+        id: fmt
+
+      - name: Run Forge build
+        run: |
+          forge --version
+          forge build --sizes
+        id: build
+
+      # Fork tests run only when the FORK_RPC_URL secret is set (Arbitrum One archive RPC); otherwise they skip
+      - name: Run Forge tests
+        env:
+          FORK_RPC_URL: ${{ secrets.FORK_RPC_URL }}
+        run: |
+          forge test -vvv
+        id: test
+
+  gas:
+    name: Gas benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
           cache: npm
 
       - name: Install npm dependencies
@@ -33,15 +77,13 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: stable
+          # Pinned to the version every published number was measured with (test counts, gas, the gas bound in
+          # EdgeCases.t.sol); forge 1.8.x charges cold storage between top-level test calls and groups invariants
+          version: v1.7.1
 
-      - name: Run Forge build
-        run: |
-          forge --version
-          forge build --sizes
-        id: build
-
-      - name: Run Forge tests
-        run: |
-          forge test -vvv
-        id: test
+      # Pass/fail only: every benchmark must succeed. Gas values are written to snapshots/ and not compared with the
+      # committed ones (forge compares only when FORGE_SNAPSHOT_CHECK is set, and it is not set here).
+      - name: Run gas benchmarks
+        env:
+          FOUNDRY_PROFILE: gas
+        run: forge test

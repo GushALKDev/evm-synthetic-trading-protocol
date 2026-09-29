@@ -6,7 +6,7 @@ import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 
 /**
  * @title MockOracle
- * @notice Simplified IOracle mock for TradingEngine tests — returns preset prices without Pyth encoding.
+ * @notice Simplified IOracle mock for TradingEngine tests: returns preset prices without Pyth encoding.
  *         Charges a configurable fee (default 0) from msg.value and refunds the surplus, mirroring the
  *         real oracle's payable fee flow.
  */
@@ -14,11 +14,13 @@ contract MockOracle is IOracle {
     using SafeTransferLib for address;
 
     error OracleUnavailable();
+    error OpenNotAllowed();
 
     mapping(uint256 => uint128) private _prices;
     mapping(uint256 => uint128) private _confs;
     uint256 public fee;
     bool public shouldRevert;
+    bool public openBlocked;
 
     function setPrice(uint256 pairIndex, uint128 price) external {
         _prices[pairIndex] = price;
@@ -33,6 +35,11 @@ contract MockOracle is IOracle {
         return _prices[pairIndex];
     }
 
+    /// @notice Read the preset confidence band (used by test handlers)
+    function peekConf(uint256 pairIndex) external view returns (uint128) {
+        return _confs[pairIndex];
+    }
+
     function setFee(uint256 _fee) external {
         fee = _fee;
     }
@@ -40,6 +47,15 @@ contract MockOracle is IOracle {
     /// @notice Simulate an oracle outage (stale/deviation) so getPrice reverts, like the real oracle.
     function setShouldRevert(bool _shouldRevert) external {
         shouldRevert = _shouldRevert;
+    }
+
+    /// @notice Simulate a condition that blocks new positions only (the real oracle's sequencer grace period)
+    function setOpenBlocked(bool _openBlocked) external {
+        openBlocked = _openBlocked;
+    }
+
+    function checkOpenAllowed() external view {
+        if (openBlocked) revert OpenNotAllowed();
     }
 
     function getPrice(uint256 pairIndex, bytes[] calldata) external payable returns (uint128, uint128) {

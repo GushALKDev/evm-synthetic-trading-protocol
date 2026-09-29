@@ -57,6 +57,7 @@ contract SolvencyIntegrationTest is Test {
         DeployConfig memory cfg = DeployConfig({
             asset: address(usdc),
             pyth: makeAddr("pyth"), // never called: these tests do not price trades
+            sequencerUptimeFeed: address(0),
             owner: owner,
             keeper: keeper,
             assistantFundTargetCap: 1_000_000 * 10 ** 6,
@@ -91,6 +92,7 @@ contract SolvencyIntegrationTest is Test {
         assertEq(d.synth.minter(), address(d.bondDepository), "synth minter");
         assertEq(d.assistantFund.solvencyManager(), address(d.solvencyManager), "fund manager");
         assertEq(d.bondDepository.solvencyManager(), address(d.solvencyManager), "bond manager");
+        assertEq(address(d.vault.solvencyManager()), address(d.solvencyManager), "vault deposit gate");
     }
 
     /// @dev The fee split only funds the reserve if treasury points at the AssistantFund
@@ -139,7 +141,8 @@ contract SolvencyIntegrationTest is Test {
         uint256 deficit = d.solvencyManager.deficitToTarget();
         d.solvencyManager.checkAndAct();
 
-        assertApproxEqAbs(d.vault.collateralizationRatio(), WAD, 1e12, "CR not restored to ~100%");
+        // Exact: supply is 1e24 shares (a multiple of 1e12), so injecting supply / 1e12 - assets restores CR to 1e18
+        assertEq(d.vault.collateralizationRatio(), WAD, "CR not restored to 100%");
         assertFalse(d.bondDepository.isActive(), "bonding opened while reserve sufficed");
         assertEq(d.assistantFund.balance(), 50_000 * 10 ** 6 - deficit, "wrong amount drawn from reserve");
     }
@@ -234,7 +237,7 @@ contract SolvencyIntegrationTest is Test {
     /**
      * @dev Regression: a fully drained Vault (totalAssets == 0 with shares outstanding) makes CR == 0.
      *      The deficit used to be computed as `totalAssets * (WAD - cr) / cr`, which panicked (0x12)
-     *      on that exact state — the rescue was uncallable precisely when it was most needed.
+     *      on that exact state: the rescue was uncallable precisely when it was most needed.
      */
     function test_TotalInsolvency_RescueStillCallable() public {
         _drain(usdc.balanceOf(address(d.vault))); // drain everything
@@ -302,7 +305,7 @@ contract SolvencyIntegrationTest is Test {
 
     /// @dev Bonding a full round always restores the Vault to at least 100%
     function testFuzz_Bonding_AlwaysRestoresToTarget(uint256 _drainAmount) public {
-        // Lower bound puts CR at 94% — always under CRITICAL_CR (95%), so bonding always opens
+        // Lower bound puts CR at 94%, always under CRITICAL_CR (95%), so bonding always opens
         uint256 drainAmount = bound(_drainAmount, 60_000 * 10 ** 6, LP_DEPOSIT / 2);
         _drain(drainAmount);
 
