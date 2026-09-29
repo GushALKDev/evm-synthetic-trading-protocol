@@ -505,8 +505,8 @@ failed against the code before their fix; the other tests in the same files pass
 
 ## Getting started
 
-Requirements: [Foundry](https://getfoundry.sh/) (CI uses the `stable` toolchain; this review used forge
-1.7.1), Node.js 22.14 or later with npm (the Pyth SDK declares `engines: node >=22.14.0`; CI uses Node 22),
+Requirements: [Foundry](https://getfoundry.sh/) forge 1.7.1 (CI pins `v1.7.1`, the version every number in
+this README was measured with; forge 1.8.x measures gas and counts invariant campaigns differently), Node.js 22.14 or later with npm (the Pyth SDK declares `engines: node >=22.14.0`; CI uses Node 22),
 Git. For the fork tests, an Arbitrum One RPC URL that serves historical state (archive).
 
 ```bash

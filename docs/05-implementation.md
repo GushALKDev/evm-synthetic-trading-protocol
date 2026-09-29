@@ -27,7 +27,7 @@ has been replaced by the actual structures.
 | Component | Version or setting | Source |
 |:---|:---|:---|
 | Solidity | 0.8.24, fixed by `pragma solidity 0.8.24;` in every file | `src/`, `test/`, `script/` |
-| Foundry | forge 1.7.1 used in this review; CI installs the `stable` toolchain | `.github/workflows/test.yml` |
+| Foundry | forge 1.7.1, pinned in CI (`version: v1.7.1`) | `.github/workflows/test.yml` |
 | Solady | v0.1.26 (git submodule) | `foundry.lock`, `.gitmodules` |
 | forge-std | v1.14.0 (git submodule) | `foundry.lock`, `.gitmodules` |
 | Pyth SDK | `@pythnetwork/pyth-sdk-solidity` `^4.3.1` (npm), remapped from `node_modules/`; `npm ci` is required before `forge build` | `package.json`, `foundry.toml` |
