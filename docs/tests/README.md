@@ -566,7 +566,7 @@ These are the author's records of earlier fixes. The regression tests named here
    `test_TotalInsolvency_RescueStillCallable`, `test_TotalInsolvency_DeficitEqualsNominalLiabilities`,
    `test_TotalInsolvency_BondingRestoresFromZero`.
 
-Findings fixed in round 2 are listed in the root README under "Review notes".
+Findings fixed in round 2 are listed in [Guide 10: Review Notes](../10-review-notes.md).
 
 ---
 

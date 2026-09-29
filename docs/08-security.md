@@ -19,6 +19,7 @@ a bug bounty. None of those exist in the code; this version describes what does.
 5. [Pause Flags](#5-pause-flags)
 6. [Incident Playbook](#6-incident-playbook)
 7. [Before an Audit](#7-before-an-audit)
+8. [Trust Assumptions and Known Limitations](#8-trust-assumptions-and-known-limitations)
 
 ---
 
@@ -103,10 +104,14 @@ All state-changing functions except the admin ones are `onlyTradingEngine`. Owne
 
 - Set `tradingEngine` on the vault and on storage to any address, which can then transfer all LP USDC and
   all trader collateral.
+- Set `solvencyManager` on the vault to any address; every deposit path calls it before minting. Until it is
+  set (`DeployLib.wire` sets it), deposits skip the rescue step: they neither run a pending injection first
+  nor stop for bonding.
 - Set the $SYNTH minter to any address, which can mint without limit.
 - Set oracle feeds and the price age limit (up to 30 s), spread parameters and keeper, pair leverage (up to
   `MAX_LEVERAGE` = 100) and OI caps, the funding factor (within bounds; the per-hour ceiling is a
-  constant), the treasury, the reserve cap, and bond price, discount and vesting.
+  constant), the treasury, the reserve cap, and the bond reference price, discount (up to 10%) and vesting period (up
+  to 7 days).
 - Set the maximum PnL snapshot age between 1 s and the immutable ceiling of 3,600 s, which widens or narrows
   the window in which an LP can act on an older snapshot.
 - Add pairs up to `MAX_PAIRS` (20), the bound on the snapshot loop.
@@ -383,6 +388,91 @@ Figures measured at commit `47d848f`; the commands and the full output are in th
 | Contract size | `TradingEngine` 17,701 bytes with the optimizer (200 runs), 6,875 under the limit (`forge build --sizes`) |
 | Architecture documentation | This set of guides |
 | External audit | Not done |
+
+---
+
+## 8. Trust Assumptions and Known Limitations
+
+What the design accepts rather than defends. The owner's powers are listed in [section 2](#what-the-owner-can-do).
+
+**Keepers and off-chain actors.** Liquidation and TP/SL execution rely on third-party bots. The
+liquidator reward is `max(10% of the collateral left after the loss, 0.5% of the collateral)`: 1% at the
+threshold, never below 0.5%, also past a 100% loss, always paid from the position's collateral. The
+spread volatility input depends on one keeper address. `checkAndAct` and `skim` have no reward.
+
+**Oracle assumptions.** Prices depend on Pyth publishers, Wormhole-signed updates and Chainlink. If the
+Pyth price is too old, its confidence band is too wide, the Chainlink answer is stale, the two disagree
+by more than 3%, or the L2 sequencer is down, every price-consuming call reverts, including
+`closeTrade`, `executeLimit` and `liquidate`. For one hour after the sequencer comes back, only `openTrade`
+reverts: a position cannot be topped up, so a liquidation realises the same loss as a close (only the reward
+differs), and blocking liquidations would let positions run past 100% loss at the vault's expense. Fetching Pyth updates from Hermes requires an API key since
+the Pyth Core upgrade of 2026-08-26.
+
+**LP risk.** LPs are the counterparty to trader PnL and can lose part of their deposit.
+
+**Withdrawal lock.** Withdrawals go through `requestWithdrawal`, which escrows the shares, and
+`executeWithdrawal` in the epoch that starts 3 epochs later, which pays at the conservative NAV of the
+execution moment and needs a fresh PnL snapshot. After that epoch the request expires, later by the time
+spent under `PAUSE_WITHDRAW` since the request (whole epochs, rounded up); `cancelWithdrawal` or a new
+request returns the shares.
+
+**Known limitations.**
+
+- **Funding bad debt.** Funding receivers are credited as it accrues, while a payer settles at close or
+  liquidation. If a payer ends with a loss above its collateral, the unpaid part of its funding is covered
+  by the vault: `unpaid = max(0, fundingOwed - max(0, collateral + min(PnL, 8 x collateral) - reward))`.
+  At a flat price, with the 0.01% per hour ceiling, 100x and liquidation at 90%, this needs the payer to
+  stay unliquidated for more than 9.5 hours after crossing the threshold, and then grows by at most 1% of
+  its collateral per hour ([Guide 2](./02-mathematics.md#residual-funding-a-payer-cannot-pay)).
+- **Oracle latency window.** Within `maxPriceAge` (5 s) the caller still chooses which Pyth update to
+  submit, so a trader can open on a price up to 5 seconds old and close on the current one. The round trip
+  costs about 26 BPS of notional with the deploy parameters.
+- **Deposits have no lock.** A deposit first runs the pending AssistantFund injection and mints at the NAV,
+  so a new LP cannot take part of an injection pending when it deposits, or enter at a price that ignores
+  open trader profit. Two effects remain. The NAV does not add net trader losses, so a new LP can enter
+  while traders are net losing and share in those losses when they settle: a deposit `D` into a NAV `A` takes
+  `D x L / (A + D)` of a later realised loss `L`, from the LPs already in. And below 100% coverage with the
+  AssistantFund empty, a new LP also shares in injections that fees fund later.
+- **NAV biases.** The NAV ignores the 9x payout cap (it overstates trader profit by
+  `sum max(0, pnl_i - 8 x collateral_i)`, conservative) and clamps losses per pair side, not per position:
+  a position past 100% loss that is not yet liquidated offsets winners on its side, understating the
+  liability by at most its excess loss `E = sum max(0, -pnl_i - collateral_i)`. E is zero until a position
+  passes 100% loss without being liquidated, so it is bounded by liquidation latency
+  ([Guide 2, section 8.2](./02-mathematics.md#82-known-biases-of-the-nav)).
+- **Snapshot age window.** `deposit`, `mint` and `executeWithdrawal` accept a snapshot up to
+  `maxPnlSnapshotAge` old (60 s by default, owner-set up to 3,600 s) if no position opened or closed since.
+  Within that window an LP can act on the stored snapshot or refresh first with a Pyth update of their
+  choice (within the oracle's `maxPriceAge`); the difference is the price move since the snapshot times the
+  open quantity. `totalAssets` and the previews use the latest snapshot even when it is stale.
+- **Deposits are refused while bonding is open or due.** A deposit reverts with `BondingRoundOpen` while a
+  round is open, or when the realised ratio is below 95% and the AssistantFund cannot cover the realised
+  deficit (the check would open a round). A round that finds no bonders (for example with an unattractive
+  `referencePrice`) keeps deposits closed until the realised ratio recovers through fees or trader losses, or
+  the round fills. Withdrawals keep working at the NAV. There is no owner override
+  ([Guide 7](./07-vault-ssl.md#known-biases-and-the-deposit-freeze)).
+- **Pause flags.** `PAUSE_SETTLE` stops closes, TP/SL execution and liquidations together and freezes
+  funding, but prices keep moving: positions can pass 100% loss while it is set and settle with bad debt when
+  it is cleared, and the NAV's optimistic bias (the excess loss `E` above) grows meanwhile. Vault flags do not
+  stop settlements, and engine flags do not stop LP flows, so the owner has to set both when an incident
+  affects both sides. `PAUSE_WITHDRAW` extends pending requests' expiry in whole epochs, rounded up. No flag
+  protects against the owner ([sections 5 and 6](#5-pause-flags)).
+- **`claim` has no pause lever, by decision.** A bug in the vesting math could move escrowed $SYNTH between
+  bonders; the depository's escrow holds only $SYNTH, so no USDC is at risk from `claim`. A pause on `claim`
+  would itself trap bonders' vested $SYNTH ([section 6](#6-incident-playbook)).
+- **Thin-side funding.** When one side of a pair is small, each unit on that side receives the heavier side's
+  rate times `OI_heavy / OI_light` per hour; the total credited to the light side is at most what the heavy
+  side pays ([Guide 2](./02-mathematics.md#thin-side-funding)).
+- **ERC-4626 integrators.** `deposit`, `mint` and `executeWithdrawal` need a fresh PnL snapshot while trades
+  are open, and any open or close invalidates it, so a plain call usually reverts with `StalePnlSnapshot`.
+  Integrators should use `refreshAndDeposit`, `refreshAndMint` and `refreshAndExecuteWithdrawal`, which
+  refresh and act in one transaction.
+- **Aggregate scale.** A position whose quantity (size / open price, 18 decimals) does not fit a uint128
+  reverts on open (at a 1 wei price the bound is 340.282366 USDC of notional,
+  `test_StoreTrade_QuantityAtUint128Bound`); the snapshot math overflows only when (price + conf) times a
+  side's quantity exceeds 2^256, which needs the price to move by a factor above about 1e20 from the open
+  price (`test_PairPnl_OverflowOnlyAboveTwoToThe256`).
+- **A winning close can revert.** `closeTrade` and `executeLimit` revert with `InsufficientVaultBalance`
+  when the vault holds less USDC than the profit owed, until the vault is refilled.
 
 ---
 

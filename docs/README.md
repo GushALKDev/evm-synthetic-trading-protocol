@@ -3,9 +3,10 @@
 **Status:** Proof of concept. Not audited and not deployed. Educational project, not for use with real
 funds.
 
-The root [README](../README.md) has the implementation status table, trust assumptions and the measured
-test results. These guides go into more detail. Where a guide describes something that is not in the
-code, it says so.
+The root [README](../README.md) is the overview. These guides go into detail: the implementation status
+table is in Guide 9, the trust assumptions in Guide 8, the review findings in Guide 10 and the measured
+test results in the test suite documentation. Where a guide describes something that is not in the code,
+it says so.
 
 ---
 
@@ -57,9 +58,16 @@ code, it says so.
     - Threat model
     - Access control as implemented
     - Invariants present in the test suite
-    - Known limitations
+    - Pause flags and incident playbook
+    - Trust assumptions and known limitations
 
-9. **[Test suite](./tests/README.md)**
+9. **[Implementation status](./09-implementation-status.md)**
+    - Every feature as implemented, partial, designed only or not found, with the evidence in the code
+
+10. **[Review notes](./10-review-notes.md)**
+    - The findings of the review rounds, with cause, fix, tests and commit
+
+11. **[Test suite](./tests/README.md)**
     - Test groups and counts
     - Regression tests for the round 2 and 2b findings
     - Invariants, handler call distribution and tolerances
@@ -84,6 +92,8 @@ docs/
 ├── 06-improvements.md
 ├── 07-vault-ssl.md
 ├── 08-security.md
+├── 09-implementation-status.md
+├── 10-review-notes.md
 └── tests/
     └── README.md          Test suite
 ```
@@ -93,7 +103,7 @@ docs/
 ## Suggested reading order
 
 - **Developers:** 01, 02, 03, 05, 08.
-- **Reviewers:** 03, 07, 08, tests/README, 04, 02.
+- **Reviewers:** 09, 03, 07, 08, 10, tests/README, 04, 02.
 
 ---
 

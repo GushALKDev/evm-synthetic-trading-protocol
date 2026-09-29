@@ -412,6 +412,10 @@ close reverts. A pull ("claim") pattern is not used.
 `forge build --sizes`, which fails if a contract passes the limit. No proxy or diamond pattern is used;
 contracts are not upgradeable.
 
+The other runtime sizes at the same commit: `Vault` 14,080, `TradingStorage` 10,286, `BondDepository`
+5,217, `PythChainlinkOracle` 5,120, `SolvencyManager` 4,759, `SynthToken` 3,561, `SpreadManager` 2,660 and
+`AssistantFund` 2,090 bytes.
+
 ---
 
 **See also:**
