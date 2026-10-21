@@ -23,7 +23,7 @@ export const links = {
   repo: 'https://github.com/GushALKDev/evm-synthetic-trading-protocol',
   docs: 'https://github.com/GushALKDev/evm-synthetic-trading-protocol/blob/main/docs/README.md',
   author: 'https://www.linkedin.com/in/gustavomaral/',
-  ethFaucet: 'https://docs.base.org/base-chain/network-information/network-faucets',
+  ethFaucet: 'https://docs.base.org/get-started/get-funds',
   pythUpgrade: 'https://docs.pyth.network/price-feeds/core/upgrade/preparing',
 }
 
