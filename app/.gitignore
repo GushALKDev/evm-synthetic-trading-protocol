@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+# Local chain deployments (anvil) are not committed
+src/config/deployments/31337.json
+test-results/
+playwright-report/
+*.tsbuildinfo
+# Wrangler local state
+.wrangler/

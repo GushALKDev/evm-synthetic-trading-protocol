@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Synthetic Trading on Base Sepolia</title>
+    <meta
+      name="description"
+      content="Open leveraged long and short positions on BTC, ETH and LINK against a USDC vault that takes the other side, live on Base Sepolia. A proof of concept by Gustavo Martín."
+    />
+    <meta name="theme-color" content="#edf0ee" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0e1412" media="(prefers-color-scheme: dark)" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta property="og:title" content="Synthetic Trading, a perpetuals proof of concept" />
+    <meta
+      property="og:description"
+      content="Leveraged longs and shorts against a single USDC vault, live on Base Sepolia. Conservative NAV, funding between traders, liquidations and TP/SL anyone can execute."
+    />
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>This app needs JavaScript to read the protocol from the chain.</noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
