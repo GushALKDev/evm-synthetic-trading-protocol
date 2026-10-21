@@ -32,7 +32,9 @@ export ETH_CL_FEED=$(feed 400000000000)
 export LINK_CL_FEED=$(feed 2000000000)
 echo "Feeds: BTC $BTC_CL_FEED, ETH $ETH_CL_FEED, LINK $LINK_CL_FEED"
 
-forge script script/testnet/DeployTestnet.s.sol --rpc-url "$RPC" --unlocked --sender "$SENDER" --broadcast -q
+# --slow sends each transaction once the previous one is mined: sent all at once, anvil has been seen to keep a
+# transaction queued behind a nonce that was already mined, and the run then waits forever for its receipt
+forge script script/testnet/DeployTestnet.s.sol --rpc-url "$RPC" --unlocked --sender "$SENDER" --broadcast --slow -q
 echo "Wrote app/src/config/deployments/31337.json"
-forge script script/testnet/SeedTrades.s.sol --rpc-url "$RPC" --unlocked --sender "$SENDER" --broadcast -q
+forge script script/testnet/SeedTrades.s.sol --rpc-url "$RPC" --unlocked --sender "$SENDER" --broadcast --slow -q
 echo "Opened the seed trades"
