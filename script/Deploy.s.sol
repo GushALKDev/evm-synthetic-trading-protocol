@@ -117,24 +117,17 @@ library DeployLib {
  *      per-chain Pyth feed IDs and Chainlink aggregators, so they are left as explicit owner actions.
  */
 contract Deploy is Script {
-    function run() external returns (Deployed memory d) {
+    function run() external virtual returns (Deployed memory d) {
         uint256 pk = vm.envUint("PRIVATE_KEY");
         address deployer = vm.addr(pk);
 
-        DeployConfig memory cfg = DeployConfig({
-            asset: vm.envAddress("USDC_ADDRESS"),
-            pyth: vm.envAddress("PYTH_ADDRESS"),
-            sequencerUptimeFeed: vm.envOr("SEQUENCER_UPTIME_FEED", address(0)),
-            owner: vm.envOr("OWNER_ADDRESS", deployer),
-            keeper: vm.envOr("KEEPER_ADDRESS", deployer),
-            assistantFundTargetCap: 1_000_000 * 10 ** 6, // 1M USDC reserve cap
-            bondDiscountBps: 500, // 5%
-            baseSpreadBps: 5, // 0.05%
-            impactFactor: 3e5, // ~3 bps at 10M OI
-            volFactor: 100, // ~3 bps at 3% volatility
-            maxSpreadBps: 100, // 1% ceiling
-            maxVolatilityChangeBps: 5000 // 50% max change per keeper update
-        });
+        DeployConfig memory cfg = _deployConfig(
+            vm.envAddress("USDC_ADDRESS"),
+            vm.envAddress("PYTH_ADDRESS"),
+            vm.envOr("SEQUENCER_UPTIME_FEED", address(0)),
+            vm.envOr("OWNER_ADDRESS", deployer),
+            vm.envOr("KEEPER_ADDRESS", deployer)
+        );
 
         vm.startBroadcast(pk);
         d = DeployLib.deploy(cfg);
@@ -144,6 +137,30 @@ contract Deploy is Script {
 
         _log(d, cfg.owner == deployer);
         return d;
+    }
+
+    /**
+     * @notice Protocol parameters of every deployment; only the addresses passed in depend on the chain
+     */
+    function _deployConfig(address _asset, address _pyth, address _sequencerUptimeFeed, address _owner, address _keeper)
+        internal
+        pure
+        returns (DeployConfig memory)
+    {
+        return DeployConfig({
+            asset: _asset,
+            pyth: _pyth,
+            sequencerUptimeFeed: _sequencerUptimeFeed,
+            owner: _owner,
+            keeper: _keeper,
+            assistantFundTargetCap: 1_000_000 * 10 ** 6, // 1M USDC reserve cap
+            bondDiscountBps: 500, // 5%
+            baseSpreadBps: 5, // 0.05%
+            impactFactor: 3e5, // ~3 bps at 10M OI
+            volFactor: 100, // ~3 bps at 3% volatility
+            maxSpreadBps: 100, // 1% ceiling
+            maxVolatilityChangeBps: 5000 // 50% max change per keeper update
+        });
     }
 
     function _log(Deployed memory _d, bool _wired) internal pure {
