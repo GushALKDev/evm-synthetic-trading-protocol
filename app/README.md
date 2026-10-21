@@ -40,7 +40,7 @@ check), the app reads the Chainlink answer of each pair the call prices, encodes
 confidence half-width and the latest block's timestamp (`src/lib/pyth.ts`), and sends it with the call. Engine calls
 carry one entry for the trade's pair; the vault's refresh paths carry one per pair. Each entry costs DemoPyth's 1 wei fee.
 
-What DemoPyth checks, for every entry, when the call lands:
+What DemoPyth checks, for every entry, when the call lands, and again for the stored price whenever the oracle reads it:
 
 - the feed id has a Chainlink aggregator registered by the deployer (the same one the oracle uses as the anchor);
 - the price equals that aggregator's latest answer, the exponent is minus its decimals, and the confidence is exactly
@@ -56,7 +56,9 @@ The oracle contract is the repository's own, unchanged. The deploy script raises
 to 30 s with the owner setter, the most the contract allows, because a wallet signature takes longer than 5 s. It still
 rejects a confidence above 2%. Its 3% deviation check still runs, but cannot fire on this deployment, since the price is
 the anchor. If Chainlink publishes a new answer between the app's read and the landing, DemoPyth reverts with
-`PriceNotChainlinkAnswer` and the app says so; sending again works.
+`PriceNotChainlinkAnswer` and the app says so; sending again works. So the time to sign is 30 s or until the next
+Chainlink round, whichever comes first. A call that brings no update reverts the same way once Chainlink has moved, so no
+call reads a previous answer.
 
 Base Sepolia has no Chainlink L2 sequencer uptime feed
 ([Chainlink's list](https://docs.chain.link/data-feeds/l2-sequencer-feeds)), so the oracle is deployed with
