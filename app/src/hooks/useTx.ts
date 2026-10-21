@@ -37,6 +37,18 @@ const isRevert = (err: unknown) =>
   err instanceof BaseError && !!err.walk((e) => e instanceof ContractFunctionRevertedError || e instanceof ExecutionRevertedError)
 
 /**
+ * Reverts that a fresh build can clear: the update was stamped ahead of the node that simulated it, or Chainlink
+ * published between the read and the simulation. A public RPC can serve those reads from different nodes.
+ */
+const TRANSIENT_PRICE_ERRORS = new Set(['FuturePublishTime', 'PriceFromFuture', 'PriceNotChainlinkAnswer'])
+
+export function isTransientPriceError(err: unknown): boolean {
+  if (!(err instanceof BaseError)) return false
+  const reverted = err.walk((e) => e instanceof ContractFunctionRevertedError) as ContractFunctionRevertedError | null
+  return TRANSIENT_PRICE_ERRORS.has(reverted?.data?.errorName ?? '')
+}
+
+/**
  * Reads the latest Chainlink answers of the given pairs and the latest block's timestamp, and returns the DemoPyth
  * update for a price-dependent call plus the fee to attach: one entry per pair, SINGLE_UPDATE_FEE each. The first
  * oracle read of the call pays for every entry; any surplus is refunded.
@@ -82,14 +94,16 @@ export function useTx(errorContext: ErrorContext) {
       const id = toasts.push({ tone: 'pending', title: label, body: 'Checking the call against the chain…' })
       try {
         // A public RPC spreads requests over several nodes, so the call right after an approval can reach one that
-        // has not imported the approval's block yet and revert on the old allowance. That call retries a revert for a
-        // few blocks before reporting it, rebuilding it each time so its price update stays fresh.
+        // has not imported the approval's block yet and revert on the old allowance, and a price update can be
+        // stamped or read on a node ahead of the one that simulates it. Those reverts are retried for a few blocks,
+        // rebuilding the call each time so its price update stays fresh, all before the wallet is asked to sign.
         let prepared
         for (let attempt = 1; !prepared; attempt++) {
           try {
             prepared = await prepare(build, address)
           } catch (err) {
-            if (!opts.afterApproval || attempt >= CATCH_UP_TRIES || !isRevert(err)) throw err
+            const retry = (opts.afterApproval && isRevert(err)) || isTransientPriceError(err)
+            if (!retry || attempt >= CATCH_UP_TRIES) throw err
             await new Promise((r) => setTimeout(r, CATCH_UP_MS))
           }
         }

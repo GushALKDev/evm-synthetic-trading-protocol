@@ -167,3 +167,16 @@ describe('format', () => {
     expect(relativeTime(7_199)).toBe('1 h 59 min')
   })
 })
+
+describe('retries before signing', () => {
+  const revert = (errorName: string, args: readonly unknown[]) =>
+    new ContractFunctionRevertedError({ abi: engineAbi as never, functionName: 'openTrade', data: encodeErrorResult({ abi: engineAbi as never, errorName, args } as never) })
+
+  it('retries only the price reverts a fresh build can clear', async () => {
+    const { isTransientPriceError } = await import('../hooks/useTx')
+    expect(isTransientPriceError(revert('PriceNotChainlinkAnswer', [`0x${'22'.repeat(32)}`, 1n, 2n]))).toBe(true)
+    expect(isTransientPriceError(revert('FuturePublishTime', [`0x${'22'.repeat(32)}`, 2n, 1n]))).toBe(true)
+    expect(isTransientPriceError(revert('NotLiquidatable', [7n, 1n, 2n]))).toBe(false)
+    expect(isTransientPriceError(new Error('x'))).toBe(false)
+  })
+})
