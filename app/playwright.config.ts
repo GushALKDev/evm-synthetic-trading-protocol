@@ -1,0 +1,24 @@
+import { defineConfig, devices } from '@playwright/test'
+
+// The account the wagmi mock connector signs with: anvil's default account 2, unlocked on the local node.
+// The suite needs a local chain with a fresh deployment: ./scripts/local-chain.sh
+export const E2E_ACCOUNT = '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC'
+const PORT = 5174
+
+export default defineConfig({
+  testDir: 'e2e',
+  timeout: 180_000,
+  expect: { timeout: 30_000 },
+  // One chain, one account: the flows run in order and share its state
+  workers: 1,
+  fullyParallel: false,
+  reporter: [['list']],
+  use: { baseURL: `http://127.0.0.1:${PORT}`, trace: 'retain-on-failure' },
+  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  webServer: {
+    command: `VITE_CHAIN_ID=31337 VITE_E2E_ACCOUNT=${E2E_ACCOUNT} npx vite --port ${PORT} --strictPort --host 127.0.0.1`,
+    url: `http://127.0.0.1:${PORT}`,
+    reuseExistingServer: !process.env.CI,
+    timeout: 60_000,
+  },
+})
