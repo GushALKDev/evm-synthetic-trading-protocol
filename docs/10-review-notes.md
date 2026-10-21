@@ -3,7 +3,7 @@
 **Prerequisites:** [Guide 9: Implementation Status](./09-implementation-status.md)
 **Next:** [Test suite](./tests/README.md)
 
-**Status:** Proof of concept. Not audited and not deployed.
+**Status:** Proof of concept. Not audited and not deployed on any mainnet.
 
 ---
 

@@ -149,7 +149,8 @@ contract DeployTestnet is Deploy, TestnetPrices {
 
     /**
      * @dev The three demo pairs. Base Sepolia feeds by default; any other chain must export all three.
-     *      maxOI is generous on purpose: twenty faucet claims at 100x fill 20M, and updatePair can raise it.
+     *      maxOI is generous on purpose: one claim at 100x opens 920,000 USD after the fee, so filling 20M takes about
+     *      22 addresses' claims, and updatePair can raise it.
      */
     function _pairs() internal view returns (PairSpec[3] memory pairs) {
         bool baseSepolia = block.chainid == BASE_SEPOLIA_CHAIN_ID;

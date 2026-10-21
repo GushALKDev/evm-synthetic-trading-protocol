@@ -3,7 +3,7 @@
 **Prerequisites:** [Guide 4: Trade-offs and Risks](./04-tradeoffs.md)
 **Next:** [Guide 6: Future Improvements](./06-improvements.md)
 
-**Status:** Proof of concept. Not audited and not deployed.
+**Status:** Proof of concept. Not audited and not deployed on any mainnet.
 
 This guide describes the code as it is. Earlier versions of this file contained design-time sketches
 (role-based access control, a `receiveLoss` vault function, WAD-based PnL); none of that was built, and it

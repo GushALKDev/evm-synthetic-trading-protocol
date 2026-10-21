@@ -3,7 +3,7 @@
 **Prerequisites:** [Guide 7: Vault and Solvency](./07-vault-ssl.md)
 **Next:** [Documentation Index](./README.md)
 
-**Status:** Proof of concept. Not audited and not deployed. There is no bug bounty.
+**Status:** Proof of concept. Not audited and not deployed on any mainnet. There is no bug bounty.
 
 Earlier versions of this guide described roles, a timelock, circuit breakers, an emergency withdrawal and
 a bug bounty. None of those exist in the code; this version describes what does.

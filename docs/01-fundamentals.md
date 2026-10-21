@@ -2,7 +2,7 @@
 
 **Next:** [Guide 2: Protocol Mathematics](./02-mathematics.md)
 
-**Status:** Proof of concept. Not audited and not deployed.
+**Status:** Proof of concept. Not audited and not deployed on any mainnet.
 
 ---
 

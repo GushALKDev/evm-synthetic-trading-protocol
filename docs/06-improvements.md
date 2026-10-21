@@ -3,7 +3,7 @@
 **Prerequisites:** [Guide 5: Implementation](./05-implementation.md)
 **Next:** [Guide 7: Vault and Solvency](./07-vault-ssl.md)
 
-**Status:** Proof of concept. Not audited and not deployed. Nothing in this guide is implemented.
+**Status:** Proof of concept. Not audited and not deployed on any mainnet. Nothing in this guide is implemented.
 
 ---
 

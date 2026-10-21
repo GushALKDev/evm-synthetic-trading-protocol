@@ -11,8 +11,10 @@ oracle-priced markets using USDC collateral. A single ERC-4626 vault, funded by 
 trader profits are paid out of it. The architecture follows gTrade by Gains Network (single vault as
 counterparty, oracle execution, separate storage and trading contracts).
 
-> **Proof of concept. Not audited and not deployed.** The findings of the internal review
+> **Proof of concept. Not audited and not deployed on any mainnet.** The findings of the internal review
 > rounds are fixed or documented. It is an educational project and must not be used with real funds.
+
+<!-- Live demo on Base Sepolia, once deployed: https://synthetic-trading-poc.<account>.workers.dev -->
 
 ---
 
@@ -93,6 +95,20 @@ Formulas: [Guide 2, section 8](./docs/02-mathematics.md#8-collateralization-rati
 
 ---
 
+## Demo app
+
+[`app/`](./app) is a web app for this protocol on Base Sepolia, with testnet USDC from a faucet: open and close
+longs and shorts on BTC, ETH and LINK, set take profit and stop loss, liquidate or execute other traders' positions,
+deposit into the vault and withdraw after the lock, and bond when a round opens. It draws the vault against every open
+trade (what it holds against what it owes to liquidity providers and traders) next to the three solvency thresholds,
+and computes every preview with the contracts' own rounding, checked to the wei against a local deployment. Pyth's
+Hermes API needs a key since August 2026, so the testnet deployment
+([`script/testnet/`](./script/testnet)) replaces Pyth with a testnet-only stand-in that accepts only the current
+Chainlink answer; the oracle contract is the repository's own, unchanged. What it shows, how to run it and how to deploy
+it: [app/README.md](./app/README.md).
+
+---
+
 ## Implementation status
 
 Most of the design is implemented and tested. Open interest caps are static per pair (no global cap) and any
@@ -170,6 +186,7 @@ forge test --match-path "test/regression/*"    # regression tests for the review
 forge test --match-path "test/invariant/*"     # invariant suites
 FORK_RPC_URL= FOUNDRY_PROFILE=coverage forge coverage --report summary   # coverage profile lifts the size limit
 FOUNDRY_PROFILE=gas forge test                 # gas benchmarks, written to snapshots/
+FOUNDRY_PROFILE=testnet forge test             # testnet tooling (script/testnet), kept out of the 818
 ```
 
 | Variable | Used by | Required |
@@ -247,7 +264,9 @@ test/
 script/
   Deploy.s.sol              Deploys and wires the contracts
   analysis/                 Pyth update age measurement (read-only RPC)
+  testnet/                  Base Sepolia demo: Pyth and USDC stand-ins, deploy and seed scripts, their tests
 snapshots/                  Gas benchmark results
+app/                        Demo web app for Base Sepolia (React, wagmi, viem), its parity and end-to-end tests
 ```
 
 ## License

@@ -1,6 +1,6 @@
 # Test Suite
 
-**Status:** Proof of concept. Not audited and not deployed.
+**Status:** Proof of concept. Not audited and not deployed on any mainnet.
 
 All numbers below were measured on 2026-09-29 at commit `47d848f` (branch `fix/pause-flags`) after
 `npm ci`, with forge 1.7.1 and solc 0.8.24. Mock-mode numbers are taken with `FORK_RPC_URL` empty. Later

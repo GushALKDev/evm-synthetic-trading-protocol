@@ -1,6 +1,6 @@
 # Documentation Index: Synthetic Trading Protocol
 
-**Status:** Proof of concept. Not audited and not deployed. Educational project, not for use with real
+**Status:** Proof of concept. Not audited and not deployed on any mainnet. Educational project, not for use with real
 funds.
 
 The root [README](../README.md) is the overview. These guides go into detail: the implementation status
