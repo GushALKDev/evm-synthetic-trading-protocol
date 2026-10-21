@@ -231,7 +231,7 @@ export function TradeTicket({ model, pairIndex, onPair, onConnect, onFaucet }: {
             <div className="row">
               <dt>Open fee</dt>
               <dd>
-                {formatFixed(quote.fee, 6, 2)} USDC <span className="faint">0.08% of the size</span>
+                {formatFixed(quote.fee, 6, 2)} USDC <span className="faint">0.08% of collateral times leverage</span>
               </dd>
             </div>
             <div className="row">

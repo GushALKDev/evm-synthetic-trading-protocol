@@ -18,7 +18,7 @@ export function FaucetDialog({ model, onClose, onConnect }: { model: Model; onCl
   return (
     <Dialog title="Test USDC" onClose={onClose}>
       <p className="muted">
-        The faucet hands out 10,000 testnet USDC, once a day per address. It has no value. Transactions also need a little {chain.name} ETH
+        The faucet hands out 10,000 testnet USDC, once every 24 hours per address. It has no value. Transactions also need a little {chain.name} ETH
         for gas.
       </p>
 
@@ -41,7 +41,7 @@ export function FaucetDialog({ model, onClose, onConnect }: { model: Model; onCl
             {actions.busy ? 'Claiming…' : 'Claim 10,000 test USDC'}
           </button>
           {!canClaim && acc ? (
-            <p className="hint">You already claimed today. Next claim after {new Date(Number(next) * 1000).toLocaleString()}.</p>
+            <p className="hint">You claimed in the last 24 hours. Next claim after {new Date(Number(next) * 1000).toLocaleString()}.</p>
           ) : null}
         </div>
       )}

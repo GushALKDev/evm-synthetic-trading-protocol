@@ -429,8 +429,8 @@ export function VaultPage({ model, onConnect, onFaucet }: { model: Model; onConn
           <div className="hero-head">
             <h1>The vault takes the other side of every trade.</h1>
             <p className="hero-sub">
-              Liquidity providers deposit USDC and hold sUSDC shares. Their share price counts what traders could take today, never what they might
-              lose. When it falls below 1.0 a reserve fund tops it up, and a bond sale follows if the realised ratio drops under 95%.
+              Liquidity providers deposit USDC and hold sUSDC shares. Their share price subtracts the traders' net open profit and never adds a net
+              open loss. When it falls below 1.0 a reserve fund tops it up, and a bond sale follows if the realised ratio drops under 95%.
             </p>
           </div>
           <Ledger model={model} />

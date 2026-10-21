@@ -137,8 +137,9 @@ function PositionCard({ model, t }: { model: Model; t: TradeView }) {
         </div>
       </dl>
       <p className="position-outcome">
-        If closed now: <strong>{formatFixed(close.payout, 6, 2)} USDC</strong> back for {formatFixed(t.position.collateral, 6, 2)} posted,{' '}
-        <span className={tone(t.netResult)}>{formatSigned(t.netResult, 6, 2)}</span> after the {formatFixed(close.closeFee, 6, 2)} USDC close fee.
+        If closed now: <strong>{formatFixed(close.payout, 6, 2)} USDC</strong> back on {formatFixed(t.position.collateral, 6, 2)} USDC of collateral
+        after the open fee, <span className={tone(t.netResult)}>{formatSigned(t.netResult, 6, 2)}</span> after funding and the{' '}
+        {formatFixed(close.closeFee, 6, 2)} USDC close fee.
       </p>
       <div className="position-actions">
         <button
@@ -219,8 +220,10 @@ export function AllPositions({ model, onConnect }: { model: Model; onConnect: ()
         <div className="section-head">
           <h2>Every open position</h2>
           <p>
-            Liquidations and take profit or stop loss executions are open to anyone, and each one pays its caller. The status below is computed at the
-            current Chainlink price, with funding projected to the latest block; the call itself checks it again on chain.
+            Liquidations and take profit or stop loss executions are open to anyone. A liquidation pays its caller at least 0.5% of the
+            position's collateral; an execution pays up to 0.1% of the notional, out of the trader's payout. The status below is computed at the
+            current Chainlink price, with funding projected to the latest block, and the call checks it again on chain. Results compare the
+            payout if closed now with the collateral left after the open fee.
           </p>
         </div>
         <div className="card">

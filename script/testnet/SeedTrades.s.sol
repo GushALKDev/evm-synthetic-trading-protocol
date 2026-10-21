@@ -34,7 +34,8 @@ contract SeedTrades is Script, TestnetPrices {
 
     uint16 internal constant SEED_LEVERAGE = 5;
 
-    /// @dev Covers the open spread (5 bps base plus the OI term) and a Chainlink move between read and landing
+    /// @dev Covers the open spread (5 bps base plus the OI term). A Chainlink move between read and landing is not covered:
+    ///      DemoPyth refuses the old answer, and the run is sent again
     uint16 internal constant SEED_SLIPPAGE_BPS = 100;
 
     /*//////////////////////////////////////////////////////////////

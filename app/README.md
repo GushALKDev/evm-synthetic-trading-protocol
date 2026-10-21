@@ -12,8 +12,9 @@ Proof of concept, not audited. The USDC is a testnet stand-in with no value.
 ## What it shows
 
 - **The vault against every open trade.** What the vault holds (its USDC) against what it owes: liquidity providers at
-  1.0 per share, plus the profit traders would take if every position closed now. The rest is the providers' surplus, or
-  a hatched shortfall. Under it, the NAV ratio and the realised ratio sit on one scale with the thresholds the
+  1.0 per share, plus the traders' net open profit when it is positive (winners minus losers, at the edge of the price
+  band highest for them), which is what the share price subtracts. The rest is the providers' surplus, or a hatched
+  shortfall. Under it, the NAV ratio and the realised ratio sit on one scale with the thresholds the
   SolvencyManager acts on: 95% realised (bonding), 100% and 110% NAV (reserve top-up, healthy).
 - **Positions as the contracts see them.** Entry price with the spread, funding projected to the latest block, the payout
   if closed now with the close fee, and the liquidation price found by searching the Chainlink answers the app would push

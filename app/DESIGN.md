@@ -23,7 +23,7 @@ Data colors this app adds, each distinct from the accent, danger and warn:
 | Owed to liquidity providers | #7C8883 | #6E7B76 | The ledger's "it owes" bar |
 
 Long and short never rely on color alone: every side tag carries the word Long or Short and an arrow, open interest bars
-are labelled with the side and amount, and PnL figures carry an explicit sign. Traders' open profit is drawn as a hatch
+are labelled with the side and amount, and PnL figures carry an explicit sign. Traders' net open profit is drawn as a hatch
 of the holdings grey rather than a fill of its own.
 
 Contrast against the backgrounds, from `node scripts/contrast.mjs`:
@@ -49,7 +49,8 @@ conservative NAV, funding between traders, liquidations and the solvency layers.
 ## The one memorable element
 
 The vault against every open trade, drawn as two bars on one scale: what the vault holds (its USDC) against what it owes
-(liquidity providers at 1.0 per share, plus the profit traders would take if every position closed now). The remainder is
+(liquidity providers at 1.0 per share, plus the traders' net open profit when it is positive, winners minus losers, the
+amount the share price subtracts). The remainder is
 the liquidity providers' surplus, or a hatched shortfall when the vault holds less than it owes. Under the bars, the NAV
 ratio and the realised ratio sit on one scale with the three thresholds the SolvencyManager acts on: 95% on the realised
 ratio (bonding), 100% and 110% on the NAV ratio (reserve top-up, healthy). It is the protocol's own accounting, valued at

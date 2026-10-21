@@ -141,9 +141,9 @@ export function describeError(err: unknown, ctx: ErrorContext): string {
     case 'StalePnlSnapshot':
       return "The vault's snapshot of open PnL is stale, so it cannot price shares. The app refreshes it in the same call; try again."
     case 'BondingRoundOpen':
-      return "Deposits are closed while a bonding round is open or due: the vault's realised ratio is below 95%."
+      return "Deposits are closed while a bonding round is open or due: a round opens below a 95% realised ratio and stays open until the ratio is back at 100%."
     case 'UseRequestWithdrawalFlow':
-      return 'Withdrawals go through a request, a three-day wait and an execution.'
+      return 'Withdrawals go through a request, a wait of up to three days and an execution.'
     case 'InsufficientVaultBalance':
       return `The vault holds ${usdc(a[1])}, less than the ${usdc(a[0])} payout.`
     case 'DepositMoreThanMax':
@@ -165,7 +165,7 @@ export function describeError(err: unknown, ctx: ErrorContext): string {
     // Faucet and tokens
     case 'ClaimTooSoon': {
       const next = new Date(Number(a[1] as bigint) * 1000)
-      return `You already claimed today. The faucet opens again for you at ${next.toLocaleTimeString()} on ${next.toLocaleDateString()}.`
+      return `You claimed less than 24 hours ago. The faucet opens again for you at ${next.toLocaleTimeString()} on ${next.toLocaleDateString()}.`
     }
     case 'InsufficientBalance':
       return a.length === 0

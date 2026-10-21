@@ -96,6 +96,18 @@ test('reads the whole protocol without a wallet', async () => {
   await expect(page.getByRole('heading', { name: 'Where the prices come from' })).toBeVisible()
 })
 
+test('states the mechanics as the contracts implement them', async () => {
+  await go('/')
+  await expect(page.locator('.legend')).toContainText("Traders' net open profit")
+  await go('/how-it-works')
+  const how = page.locator('#how')
+  await expect(how).toContainText("minus the traders' net open profit, when it is positive")
+  await expect(how).toContainText('the vault only carries what a payer cannot cover once its loss exceeds its collateral')
+  await expect(how).toContainText('anyone can move what it holds above')
+  await expect(how).toContainText('a price stamped more than 30 seconds before the call lands')
+  await expect(how).toContainText('A call that brings no update reverts once Chainlink has moved')
+})
+
 test('connects the wallet and claims test USDC, warning about gas only once the balance is known', async () => {
   await go('/')
   await page.locator('.site-header').getByRole('button', { name: 'Connect wallet' }).click()
@@ -115,7 +127,7 @@ test('connects the wallet and claims test USDC, warning about gas only once the 
   await expect(page.locator('.dialog')).toContainText('10,000.00')
   // A second claim the same day is refused before anything is sent
   await expect(page.getByRole('button', { name: 'Claim 10,000 test USDC' })).toBeDisabled()
-  await expect(page.getByText('You already claimed today')).toBeVisible()
+  await expect(page.getByText('You claimed in the last 24 hours')).toBeVisible()
   await page.getByRole('button', { name: 'Close' }).click()
 })
 
@@ -169,7 +181,8 @@ test('liquidates a short after the price moves against it', async () => {
 test('closes a position at the payout the card shows', async () => {
   const id = await open('LINK/USD', 'Long', '500', '5x')
   const card = page.locator(`[data-testid="position-${id}"]`)
-  await expect(card).toContainText('If closed now')
+  // 500 USDC at 5x pays a 2 USDC open fee: the result is measured against the 498 left
+  await expect(card).toContainText('on 498.00 USDC of collateral after the open fee')
   await card.getByRole('button', { name: 'Close position' }).click()
   await expect(toast(`Position #${id} closed`)).toBeVisible()
   await expect(card).toHaveCount(0)

@@ -66,6 +66,12 @@ export function Notice() {
 
 const bps = (x: bigint) => formatBps(x)
 
+/** The anchors' staleness windows, one figure when every pair shares it */
+function formatHeartbeats(model: Model): string {
+  const windows = [...new Set(model.pairs.map((p) => p.heartbeat.toString()))]
+  return windows.map((w) => `${Number(w).toLocaleString('en-US')} s`).join(', ')
+}
+
 export function HowItWorks({ model }: { model: Model }) {
   const c = model.config
   const s = c.spread
@@ -101,9 +107,10 @@ export function HowItWorks({ model }: { model: Model }) {
           <div className="mechanic">
             <h3>A conservative NAV</h3>
             <p>
-              The share price is the vault's USDC balance minus the open profit traders would take if every position closed now, valued at the
-              edge of the oracle's confidence band that is highest for them. Open trader losses are not counted until they settle. That value is a
-              snapshot stored on chain: deposits and withdrawals refresh it in the same call, at the prices they carry.
+              The share price is the vault's USDC balance minus the traders' net open profit, when it is positive: winners minus losers across
+              every pair, at the edge of the oracle's confidence band that is highest for them, before closing costs and the payout cap. A net open
+              loss is not counted until it settles. That value is a snapshot stored on chain: deposits and withdrawals refresh it in the same call,
+              at the prices they carry.
             </p>
           </div>
           <div className="mechanic">
@@ -123,7 +130,8 @@ export function HowItWorks({ model }: { model: Model }) {
               When one side of a pair carries more open interest, it pays the other side, pro rata. The rate is the funding factor, currently{' '}
               {formatPct(c.fundingFactor, 4)} per hour, times the skew (the gap between the two sides over their total), and never above{' '}
               {formatPct(MAX_FUNDING_RATE_PER_HOUR, 2)} of the heavy side's notional per hour. Nothing accrues while either side is empty. It accrues
-              every second and settles when the position closes. The vault neither pays nor earns funding.
+              every second and settles when the position closes. It is a transfer between traders: the vault only carries what a payer cannot
+              cover once its loss exceeds its collateral.
             </p>
           </div>
           <div className="mechanic">
@@ -155,8 +163,8 @@ export function HowItWorks({ model }: { model: Model }) {
             <h3>Three solvency layers</h3>
             <p>
               The vault is the first. Below a {formatPct(DEFICIT_CR, 0)} NAV ratio, a permissionless check moves USDC from the reserve fund, up to the
-              deficit. The fund receives the reserve share of every fee and passes anything above {formatCompact(c.reserveTargetCap, 6)} USDC on to
-              the vault. Below a {formatPct(CRITICAL_CR, 0)} realised ratio
+              deficit, as long as the snapshot is fresh (the check can refresh it first). The fund receives the reserve share of every fee, and
+              anyone can move what it holds above {formatCompact(c.reserveTargetCap, 6)} USDC to the vault. Below a {formatPct(CRITICAL_CR, 0)} realised ratio
               (USDC balance per share, open PnL ignored), a bonding round opens: anyone can buy SYNTH at {formatFixed(discountedPrice, 6, 2)} USDC,{' '}
               {bps(c.discountBps)} under its {formatFixed(c.referencePrice, 6, 2)} reference, vested over {vestingHours.toString()} hours, and the USDC
               goes to the vault until it is back at {formatPct(DEFICIT_CR, 0)}. Deposits are closed while a round is open or due. From{' '}
@@ -182,11 +190,13 @@ export function HowItWorks({ model }: { model: Model }) {
             </p>
             <p>
               DemoPyth checks no signatures, but it only stores a price equal to the current answer of the Chainlink feed registered for it, with a
-              fixed {bps(c.confBps)} confidence half-width, so nobody can pick a price. The oracle contract is the repository's own, unchanged: it
-              still rejects a price older than {c.maxPriceAge.toString()} seconds (raised from its 5 second default to the most the contract allows), a
-              confidence above 2%, or a Chainlink anchor that has not updated within its window. Its 3% deviation check still runs but cannot fire
-              here, since the price is the anchor. If Chainlink publishes a new answer while your transaction is pending, DemoPyth refuses the old
-              one and the call reverts; sending it again works.
+              fixed {bps(c.confBps)} confidence half-width, and checks it again when the oracle reads it, so nobody can pick a price. A call that
+              brings no update reverts once Chainlink has moved, so no call reads a previous answer. The oracle contract is the repository's own,
+              unchanged: it still rejects a price stamped more than {c.maxPriceAge.toString()} seconds before the call lands (raised from its 5
+              second default to the most the contract allows), a confidence above 2%, or a Chainlink answer older than its window,{' '}
+              {formatHeartbeats(model)} on this deployment. Its 3% deviation check still runs but cannot fire here, since the price is the anchor.
+              If Chainlink publishes a new answer while your transaction is pending, DemoPyth refuses the old one and the call reverts; sending it
+              again works.
             </p>
             <p>{chain.name} has no Chainlink sequencer uptime feed, so the oracle's sequencer checks are off on this deployment.</p>
           </div>

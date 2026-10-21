@@ -94,7 +94,7 @@ export function Ledger({ model }: { model: Model }) {
   ]
   const owedSegs: Segment[] = [
     { key: 'lp', label: 'Liquidity providers at 1.0', value: lp, className: 'seg-lp' },
-    { key: 'profit', label: "Traders' open profit", value: profit, className: 'seg-profit' },
+    { key: 'profit', label: "Traders' net open profit", value: profit, className: 'seg-profit' },
     { key: 'surplus', label: 'Surplus for liquidity providers', value: surplus, className: 'seg-surplus', text: true },
   ]
 
@@ -115,7 +115,7 @@ export function Ledger({ model }: { model: Model }) {
             <Bar segments={heldSegs} scale={scale} label="USDC in the vault, and any shortfall" />
             <span className="sheet-total">{formatCompact(held, 6)}</span>
             <span className="sheet-label">It owes</span>
-            <Bar segments={owedSegs} scale={scale} label="Liquidity providers at 1.0 per share, traders' open profit, and the surplus" />
+            <Bar segments={owedSegs} scale={scale} label="Liquidity providers at 1.0 per share, traders' net open profit, and the surplus" />
             <span className="sheet-total">{formatCompact(owed + surplus, 6)}</span>
           </div>
           <div className="legend" style={{ marginTop: 14, marginBottom: 0 }}>
@@ -135,8 +135,8 @@ export function Ledger({ model }: { model: Model }) {
         Amounts in USDC, valued at the current Chainlink prices the way a snapshot refresh would value them. Trader collateral sits in TradingStorage,
         not here.{' '}
         {traderLoss > 0n
-          ? `Traders are down ${formatCompact(traderLoss, 6)} USDC on their open positions; the vault counts none of it until those trades settle.`
-          : 'Open trader losses are not counted until they settle.'}{' '}
+          ? `Traders are down ${formatCompact(traderLoss, 6)} USDC net on their open positions; the vault counts none of it until those trades settle.`
+          : 'Winning and losing positions offset each other, and a net open loss is not counted until it settles.'}{' '}
         {v.openTrades > 0n && v.snapshot.timestamp > 0n
           ? `The snapshot stored on chain is ${relativeTime(Number(v.snapshotAge))} old; deposits and withdrawals refresh it in the same call.`
           : null}
