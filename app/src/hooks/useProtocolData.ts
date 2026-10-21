@@ -11,7 +11,6 @@ import {
   engineAbi,
   faucetCallAbi,
   oracleAbi,
-  solvencyAbi,
   spreadManagerAbi,
   storageAbi,
   tokenAbi,
@@ -171,7 +170,6 @@ export interface LiveData {
   tradeCounter: bigint
   reserveBalance: bigint
   remainingCap: bigint
-  roundDue: boolean
 }
 
 /** Reads per pair in useLive, in the order listed there */
@@ -203,7 +201,6 @@ function useLive(d: Deployment, config: ConfigData | undefined) {
       { address: d.tradingStorage, abi: storageAbi, functionName: 'getTradeCounter' },
       { address: d.usdc, abi: tokenAbi, functionName: 'balanceOf', args: [d.assistantFund] },
       { address: d.bondDepository, abi: bondAbi, functionName: 'remainingCap' },
-      { address: d.solvencyManager, abi: solvencyAbi, functionName: 'bondingRoundOpenAfterCheck' },
     ],
     { enabled: pairs.length > 0, refetchInterval: REFRESH_MS },
   )
@@ -249,7 +246,6 @@ function useLive(d: Deployment, config: ConfigData | undefined) {
       tradeCounter: BigInt(r[b + 6] as number),
       reserveBalance: r[b + 7] as bigint,
       remainingCap: r[b + 8] as bigint,
-      roundDue: r[b + 9] as boolean,
     }
   }, [res.data, pairs])
 

@@ -21,6 +21,8 @@ import {
   type Position,
 } from './trading'
 import {
+  CRITICAL_CR,
+  DEFICIT_CR,
   assetsForShares,
   bondCapacity,
   deficitOf,
@@ -61,7 +63,10 @@ export interface TradeView {
   fundingOwed: bigint
   /** What closeTrade would pay at the current price */
   close: ReturnType<typeof closeOutcome>
-  /** Payout minus the collateral posted: the trader's result if closed now, fees and funding included */
+  /**
+   * Payout minus the collateral stored for the trade, which is what the open fee left: the result if closed now, with
+   * the close fee and funding, without the open fee
+   */
   netResult: bigint
   liquidation: ReturnType<typeof liquidationCheck> & { reward: bigint }
   /** Chainlink price at which liquidate would first succeed, at today's funding and open interest */
@@ -94,6 +99,7 @@ export interface VaultView {
   bondActive: boolean
   remainingCap: bigint
   bondCapacity: bigint
+  /** A bonding round is open, or the solvency check a deposit or refresh runs would open one */
   roundDue: boolean
   depositsPaused: boolean
   withdrawalsPaused: boolean
@@ -189,6 +195,14 @@ export function buildVault(config: ConfigData, live: LiveData, pairs: PairView[]
   const navRatio = ratioOf(liveNav, live.supply)
   const realisedRatio = ratioOf(live.vaultBalance, live.supply)
   const realisedDeficit = deficitOf(live.vaultBalance, live.supply)
+  const injection = pendingInjection(liveNav, live.supply, live.reserveBalance)
+  // SolvencyManager.bondingRoundOpenAfterCheck on the snapshot the deposit itself refreshes. The on-chain view uses the
+  // stored snapshot, and while that is stale it counts no reserve injection, so it can report a round as due that the
+  // deposit's own check would avoid by injecting first.
+  const roundDue =
+    live.remainingCap !== 0n
+      ? realisedRatio !== null && realisedRatio < DEFICIT_CR
+      : realisedRatio !== null && realisedRatio < CRITICAL_CR && realisedDeficit > injection
   return {
     balance: live.vaultBalance,
     supply: live.supply,
@@ -205,13 +219,13 @@ export function buildVault(config: ConfigData, live: LiveData, pairs: PairView[]
     navDeficit: deficitOf(liveNav, live.supply),
     realisedDeficit,
     level: solvencyLevel(navRatio, realisedRatio),
-    pendingInjection: pendingInjection(liveNav, live.supply, live.reserveBalance),
+    pendingInjection: injection,
     reserve: live.reserveBalance,
     reserveTargetCap: config.reserveTargetCap,
     bondActive: live.remainingCap !== 0n,
     remainingCap: live.remainingCap,
     bondCapacity: bondCapacity(live.remainingCap, realisedDeficit),
-    roundDue: live.roundDue,
+    roundDue,
     depositsPaused: (live.vaultPauseFlags & 1) !== 0,
     withdrawalsPaused: (live.vaultPauseFlags & 2) !== 0,
     epoch: epochAt(chainTime, config.deployTimestamp),
