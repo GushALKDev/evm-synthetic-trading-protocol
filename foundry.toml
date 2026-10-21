@@ -13,7 +13,10 @@ optimizer_runs = 200
 # cancun: TradingEngine keeps the ETH refund baseline in transient storage (tstore/tload)
 evm_version = "cancun"
 # Gas benchmarks live in test/gas and run only under the gas profile: FOUNDRY_PROFILE=gas forge test
-no_match_path = "test/gas/*"
+# Testnet tooling tests live in script/testnet/test and run only under the testnet profile
+no_match_path = "{test/gas/*,script/testnet/**}"
+# The testnet scripts write the deployment file the demo app reads, and read it back (script/testnet)
+fs_permissions = [{ access = "read-write", path = "./app/src/config/deployments" }]
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
 
@@ -25,6 +28,13 @@ code_size_limit = 1000000
 [profile.gas]
 match_path = "test/gas/*"
 no_match_path = "test/{unit,integration,invariant,regression,fork}/*"
+
+# Testnet tooling (script/testnet) has its own suite, so the protocol suite figures stay unchanged:
+# FOUNDRY_PROFILE=testnet forge test
+[profile.testnet]
+test = "script/testnet/test"
+match_path = "script/testnet/test/*"
+no_match_path = "test/**"
 
 [fmt]
 line_length = 160
