@@ -57,6 +57,12 @@ jobs:
           forge test -vvv
         id: test
 
+      # The Base Sepolia demo tooling (script/testnet) has its own suite, outside the protocol's figures
+      - name: Run testnet tooling tests
+        env:
+          FOUNDRY_PROFILE: testnet
+        run: forge test -vvv
+
   gas:
     name: Gas benchmarks
     runs-on: ubuntu-latest
@@ -87,3 +93,56 @@ jobs:
         env:
           FOUNDRY_PROFILE: gas
         run: forge test
+
+  app:
+    name: Demo app
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            app/package-lock.json
+
+      # The local deployment compiles the contracts, which import the Pyth SDK from the root npm dependencies
+      - name: Install root npm dependencies
+        working-directory: .
+        run: npm ci
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      # One step, so the anvil node lives through both suites. It is started with its output detached: a background
+      # process that keeps the step's output open can keep the step from finishing.
+      - name: Parity and end-to-end tests against a local deployment
+        run: |
+          anvil --silent --chain-id 31337 > /dev/null 2>&1 &
+          for _ in $(seq 1 50); do cast chain-id >/dev/null 2>&1 && break; sleep 0.2; done
+          ./scripts/local-chain.sh
+          LOCAL_RPC=http://127.0.0.1:8545 npm run parity
+          npx playwright install --with-deps chromium
+          npm run e2e
+
+      - name: Build
+        run: npm run build
