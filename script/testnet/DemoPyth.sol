@@ -14,7 +14,7 @@ import {AggregatorV3Interface} from "../../src/interfaces/AggregatorV3Interface.
  *      (one abi-encoded PythStructs.PriceFeed per entry), and the demo app fills each entry with the Chainlink
  *      answer of the same chain right before the call that needs it.
  *
- *      What it checks, for every entry, when the update lands:
+ *      What it checks, for every entry, when the update lands, and again for the stored price on every read:
  *      - the feed id has a Chainlink aggregator registered by the owner;
  *      - price equals that aggregator's latest answer, expo equals minus its decimals, and conf equals
  *        answer * DEMO_CONF_BPS / BPS_DENOMINATOR. Nobody can store a price of their choosing: with up to 100x
@@ -28,7 +28,8 @@ import {AggregatorV3Interface} from "../../src/interfaces/AggregatorV3Interface.
  *      Consequences on a deployment that uses it:
  *      - the oracle's 3% deviation check still runs, but cannot fire, since the price equals the anchor;
  *      - an update built from a Chainlink answer that changes before it lands reverts with
- *        PriceNotChainlinkAnswer; building it again from the new answer succeeds;
+ *        PriceNotChainlinkAnswer; building it again from the new answer succeeds. A call that brings no update reverts
+ *        the same way once Chainlink has moved, so no call can read a previous answer;
  *      - the last write wins, whatever its publishTime: the update a call carries is the price that call reads.
  *        Pyth keeps the newest publishTime instead, which with unsigned updates would let anyone store a price
  *        stamped one block ahead of the app's and make every call read theirs.
@@ -122,13 +123,17 @@ contract DemoPyth is Ownable {
     }
 
     /**
-     * @notice Latest stored price, with no freshness check: the caller applies its own
+     * @notice Latest stored price, with no age check (the caller applies its own), as long as it is still the
+     *         registered aggregator's current answer
+     * @dev The read repeats the write's check. Without it, a call that brings no update would read the previous answer
+     *      for up to the oracle's price age after Chainlink publishes: open at the old price, close at the new one.
      * @param _id Feed id
-     * @return The stored price. Reverts if the feed has never been updated, like Pyth
+     * @return The stored price. Reverts if the feed has never been updated, like Pyth, or if Chainlink has moved since
      */
     function getPriceUnsafe(bytes32 _id) external view returns (PythStructs.Price memory) {
         PythStructs.Price memory price = _prices[_id];
         if (price.publishTime == 0) revert PriceFeedNotFound(_id);
+        _requireChainlinkMirror(_id, price);
         return price;
     }
 

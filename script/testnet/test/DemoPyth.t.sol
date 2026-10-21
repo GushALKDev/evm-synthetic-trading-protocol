@@ -115,6 +115,15 @@ contract DemoPythTest is Test {
         pyth.updatePriceFeeds{value: 1 wei}(update);
     }
 
+    /// @dev Regression: a call that brings no update read the previous answer for up to the oracle's price age after
+    ///      Chainlink published, which let anyone open at the old price and close at the new one
+    function test_getPriceUnsafe_revertsOnceChainlinkHasMoved() public {
+        pyth.updatePriceFeeds{value: 1 wei}(_mirrored(uint64(block.timestamp)));
+        feed.setAnswer(2_001e8);
+        vm.expectRevert(abi.encodeWithSelector(DemoPyth.PriceNotChainlinkAnswer.selector, ID, int64(ANSWER), int256(2_001e8)));
+        pyth.getPriceUnsafe(ID);
+    }
+
     function test_getPriceUnsafe_revertsForAFeedNeverUpdated() public {
         vm.expectRevert(abi.encodeWithSelector(DemoPyth.PriceFeedNotFound.selector, ID));
         pyth.getPriceUnsafe(ID);

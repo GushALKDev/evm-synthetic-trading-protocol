@@ -489,6 +489,21 @@ contract DeployTestnetTest is Test {
         d.engine.openTrade{value: 1 wei}(ETH, true, 1_000e6, 10, quote, 50, 0, 0, update);
     }
 
+    /// @dev Regression: with no update in the call, the oracle read the answer stored before Chainlink moved. Opening a
+    ///      long there and closing it with the new answer took the move at 100x from the vault, risk free.
+    function test_failure_aCallWithNoUpdateCannotReadTheAnswerBeforeChainlinkMoved() public {
+        _deployAndSeed();
+        _claimAndApprove(GRIEFER, address(d.engine));
+        // The seed trades stored BTC at 100,000 in this block; Chainlink then publishes 101,000
+        _setPrice(btcFeed, 101_000e8);
+        uint128 oldQuote = uint128((100_000e18 * 10_005) / 10_000);
+        bytes32 id = d.oracle.getPairFeed(BTC).pythFeedId;
+
+        vm.prank(GRIEFER);
+        vm.expectRevert(abi.encodeWithSelector(DemoPyth.PriceNotChainlinkAnswer.selector, id, int64(100_000e8), int256(101_000e8)));
+        d.engine.openTrade(BTC, true, 1_000e6, 100, oldQuote, 10, 0, 0, new bytes[](0));
+    }
+
     /// @dev 30 s is the window between the app stamping a price and the transaction landing
     function test_failure_aPriceOlderThan30SecondsIsStale() public {
         _deployAndSeed();
