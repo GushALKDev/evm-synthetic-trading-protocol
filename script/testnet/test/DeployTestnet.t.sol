@@ -198,7 +198,7 @@ contract DeployTestnetTest is Test {
 
         string[3] memory names = ["BTC/USD", "ETH/USD", "LINK/USD"];
         uint16[3] memory maxLeverage = [uint16(100), 100, 50];
-        uint128[3] memory maxOI = [uint128(20_000_000e18), 20_000_000e18, 5_000_000e18];
+        uint128[3] memory maxOI = [uint128(4_000_000e18), 4_000_000e18, 1_000_000e18];
         address[3] memory feeds = [address(btcFeed), address(ethFeed), address(linkFeed)];
         for (uint256 i; i < 3; ++i) {
             TradingStorage.Pair memory pair = d.tradingStorage.getPair(i);
@@ -543,21 +543,21 @@ contract DeployTestnetTest is Test {
         _claimAndApprove(VISITOR, address(d.engine));
         uint32 id = _open(VISITOR, LINK, true, 1_000e6, 10, linkFeed);
 
-        // A griefer funded far beyond the daily drip fills the rest of LINK's 5M cap exactly:
-        // 103,960 USDC less the 4% open fee, at 50x, is 4,990,080 next to the visitor's 9,920
+        // A griefer funded beyond the daily drip fills the rest of LINK's 1M cap exactly:
+        // 20,626.666666 USDC less the 4% open fee is 19,801.6, which at 50x is 990,080 next to the visitor's 9,920
         vm.prank(deployer);
-        faucet.mint(GRIEFER, 103_960e6);
+        faucet.mint(GRIEFER, 20_626_666_666);
         vm.prank(GRIEFER);
         usdc.approve(address(d.engine), type(uint256).max);
         vm.deal(GRIEFER, 1 ether);
-        _open(GRIEFER, LINK, false, 103_960e6, 50, linkFeed);
-        assertEq(d.tradingStorage.getOpenInterest(LINK), 5_000_000e18, "LINK full");
+        _open(GRIEFER, LINK, false, 20_626_666_666, 50, linkFeed);
+        assertEq(d.tradingStorage.getOpenInterest(LINK), 1_000_000e18, "LINK full");
 
         _claimAndApprove(KEEPER, address(d.engine));
         bytes[] memory update = _one(LINK);
         uint128 quote = _openQuote(LINK, true, linkFeed);
         vm.prank(KEEPER);
-        vm.expectRevert(abi.encodeWithSelector(TradingStorage.MaxOpenInterestExceeded.selector, 5_048_000e18, 5_000_000e18));
+        vm.expectRevert(abi.encodeWithSelector(TradingStorage.MaxOpenInterestExceeded.selector, 1_048_000e18, 1_000_000e18));
         d.engine.openTrade{value: 1 wei}(LINK, true, 1_000e6, 50, quote, 50, 0, 0, update);
 
         update = _one(LINK);
@@ -567,8 +567,46 @@ contract DeployTestnetTest is Test {
         assertEq(d.tradingStorage.getTrade(id).user, address(0), "a close still settles");
 
         vm.prank(deployer);
-        d.tradingStorage.updatePair(LINK, 50, 10_000_000e18, true);
+        d.tradingStorage.updatePair(LINK, 50, 2_000_000e18, true);
         _open(KEEPER, LINK, true, 1_000e6, 50, linkFeed);
+    }
+
+    /// @dev The most a one-sided book can take at the caps: every pair filled long at its maximum leverage, then a move
+    ///      past the 9x payout cap. Every close must still be paid. Regression: with 20M caps the first close asked the
+    ///      vault for more than it held and reverted with InsufficientVaultBalance.
+    function test_griefing_aOneSidedBookAtTheCapsStaysWithinTheVault() public {
+        _deployAndSeed();
+        vm.prank(deployer);
+        faucet.mint(GRIEFER, 1_000_000e6);
+        vm.prank(GRIEFER);
+        usdc.approve(address(d.engine), type(uint256).max);
+        vm.deal(GRIEFER, 1 ether);
+
+        MockChainlinkFeed[3] memory feeds = [btcFeed, ethFeed, linkFeed];
+        uint32[3] memory ids;
+        for (uint16 i; i < 3; ++i) {
+            TradingStorage.Pair memory pair = d.tradingStorage.getPair(i);
+            uint256 room = uint256(pair.maxOI) - d.tradingStorage.getOpenInterest(i);
+            // Open interest per unit of collateral at the maximum leverage, net of the open fee
+            uint256 perUnit = (uint256(pair.maxLeverage) * (10_000 - uint256(pair.maxLeverage) * 8)) / 10_000;
+            ids[i] = _open(GRIEFER, i, true, uint64(room / 1e12 / perUnit), pair.maxLeverage, feeds[i]);
+        }
+
+        // 9% up at 100x and 17% up at 50x: past the cap of 8 times the collateral
+        uint256 vaultBefore = usdc.balanceOf(address(d.vault));
+        vm.warp(block.timestamp + 60);
+        _setPrice(btcFeed, 109_000e8);
+        _setPrice(ethFeed, 4_360e8);
+        _setPrice(linkFeed, 23_40000000);
+        for (uint256 i; i < 3; ++i) {
+            bytes[] memory update = _one(i);
+            uint128 closeQuote = uint128((uint256(_price18(feeds[i])) * 9_990) / 10_000);
+            vm.prank(GRIEFER);
+            d.engine.closeTrade{value: 1 wei}(ids[i], closeQuote, 50, update);
+        }
+        emit log_named_uint("vault USDC before the closes", vaultBefore);
+        emit log_named_uint("vault USDC paid out net", vaultBefore - usdc.balanceOf(address(d.vault)));
+        assertGt(usdc.balanceOf(address(d.vault)), 0, "the vault paid every close");
     }
 
     /*//////////////////////////////////////////////////////////////

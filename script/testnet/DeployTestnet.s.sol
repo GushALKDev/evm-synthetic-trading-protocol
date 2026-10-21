@@ -149,8 +149,10 @@ contract DeployTestnet is Deploy, TestnetPrices {
 
     /**
      * @dev The three demo pairs. Base Sepolia feeds by default; any other chain must export all three.
-     *      maxOI is generous on purpose: one claim at 100x opens 920,000 USD after the fee, so filling 20M takes about
-     *      22 addresses' claims, and updatePair can raise it.
+     *      maxOI is sized to the 1M seed liquidity: with every pair filled on one side at its maximum leverage and a move
+     *      past the 9x payout cap, the closes take about 755,000 USDC, less than the vault holds. A lower cap is cheaper
+     *      to fill (one claim at 100x opens 920,000 USD after the fee), a higher one lets a one-sided book take more than
+     *      the vault holds; the owner can move it with updatePair.
      */
     function _pairs() internal view returns (PairSpec[3] memory pairs) {
         bool baseSepolia = block.chainid == BASE_SEPOLIA_CHAIN_ID;
@@ -159,21 +161,21 @@ contract DeployTestnet is Deploy, TestnetPrices {
             pythFeedId: BTC_USD_FEED_ID,
             chainlinkFeed: baseSepolia ? vm.envOr("BTC_CL_FEED", BASE_SEPOLIA_BTC_USD) : vm.envAddress("BTC_CL_FEED"),
             maxLeverage: 100,
-            maxOI: 20_000_000e18
+            maxOI: 4_000_000e18
         });
         pairs[1] = PairSpec({
             name: "ETH/USD",
             pythFeedId: ETH_USD_FEED_ID,
             chainlinkFeed: baseSepolia ? vm.envOr("ETH_CL_FEED", BASE_SEPOLIA_ETH_USD) : vm.envAddress("ETH_CL_FEED"),
             maxLeverage: 100,
-            maxOI: 20_000_000e18
+            maxOI: 4_000_000e18
         });
         pairs[2] = PairSpec({
             name: "LINK/USD",
             pythFeedId: LINK_USD_FEED_ID,
             chainlinkFeed: baseSepolia ? vm.envOr("LINK_CL_FEED", BASE_SEPOLIA_LINK_USD) : vm.envAddress("LINK_CL_FEED"),
             maxLeverage: 50,
-            maxOI: 5_000_000e18
+            maxOI: 1_000_000e18
         });
     }
 

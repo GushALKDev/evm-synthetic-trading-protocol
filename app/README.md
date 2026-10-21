@@ -67,12 +67,18 @@ faucet contract holds the seed liquidity's vault shares and has no function that
 
 ### What a stranger can do on the shared deployment
 
-- **Fill a pair's open interest cap.** BTC and ETH allow 20M USD and LINK 5M. One day's 10,000 USDC at 100x opens 920,000 USD after the 8% open fee, so filling BTC takes about 22 addresses' claims.
-  New positions on that pair then revert, while closes, liquidations and TP/SL still settle
-  (`test_griefing_aFullPairStillSettlesAndTheOwnerCanRaiseIt`). The owner can raise the cap with `updatePair`.
+- **Fill a pair's open interest cap.** BTC and ETH allow 4M USD and LINK 1M. One day's 10,000 USDC at 100x opens
+  920,000 USD after the 8% open fee, so about five addresses fill BTC, though a position at 100x is liquidated by a move
+  under 1%; a fill that lasts at 10x takes about 40 addresses' claims. New positions on a full pair revert, while closes,
+  liquidations and TP/SL still settle (`test_griefing_aFullPairStillSettlesAndTheOwnerCanRaiseIt`), and the owner can
+  move the cap with `updatePair`. The caps are sized to the 1M seed liquidity: higher caps would let a one-sided book take
+  more than the vault holds, and then every winning close would revert until losers settle or new USDC arrives.
 - **Push prices into DemoPyth.** Only the current Chainlink answer is accepted, and a push with an old publish time is
   replaced by the next call's own update (`test_griefing_anEarlierPushIsOverwrittenByTheAppsUpdate`).
-- **Win against the vault.** Only at Chainlink prices. A testnet feed moves when the answer drifts by its deviation
+- **Win against the vault.** Only at the current Chainlink price: a call that brings no price update reverts once
+  Chainlink has moved, so nobody can open at the previous answer and close at the new one. With every pair filled on one
+  side at its maximum leverage and a move past the 9x payout cap, the closes take 754,707 USDC net from the vault
+  (`test_griefing_aOneSidedBookAtTheCapsStaysWithinTheVault`); larger moves at lower leverage can take more. A testnet feed moves when the answer drifts by its deviation
   threshold (0.1% BTC, 0.15% ETH, 0.2% LINK) or after 1,200 s, so a trader watching the real market sees moves before
   the feed; a round trip costs 0.16% in fees plus the spread twice. If winners take the realised ratio below 95%,
   deposits close until a bonding round brings it back, and the vault page offers the permissionless check that opens the
@@ -126,7 +132,7 @@ cast wallet import demo-deployer --interactive    # stores the key encrypted, as
 ```
 
 Fund that address with a little Base Sepolia ETH from one of the
-[Base faucets](https://docs.base.org/base-chain/network-information/network-faucets), then:
+[Base faucets](https://docs.base.org/get-started/get-funds), then:
 
 ```bash
 forge script script/testnet/DeployTestnet.s.sol --rpc-url https://sepolia.base.org --account demo-deployer --broadcast
@@ -134,8 +140,8 @@ forge script script/testnet/DeployTestnet.s.sol --rpc-url https://sepolia.base.o
 
 The script simulates everything first, including a read of every pair's price through the oracle, so a stale or missing
 Chainlink feed stops it before anything is sent. It deploys the faucet and USDC, DemoPyth, and the nine protocol contracts
-with the parameters of `script/Deploy.s.sol`, wires them, lists BTC/USD and ETH/USD (100x, 20M USD open interest cap)
-and LINK/USD (50x, 5M), raises the oracle's price age limit to 30 s, and deposits 1,000,000 USDC on behalf of the faucet
+with the parameters of `script/Deploy.s.sol`, wires them, lists BTC/USD and ETH/USD (100x, 4M USD open interest cap)
+and LINK/USD (50x, 1M), raises the oracle's price age limit to 30 s, and deposits 1,000,000 USDC on behalf of the faucet
 contract. It refuses any chain other than Base Sepolia and anvil. On a broadcast it writes
 `app/src/config/deployments/84532.json`, which the app reads: commit that file. A run without `--broadcast` leaves the
 file alone. If a broadcast stops halfway, delete the file and run it again.
