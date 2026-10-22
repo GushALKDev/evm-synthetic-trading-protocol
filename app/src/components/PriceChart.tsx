@@ -1,7 +1,7 @@
 // Drawn with TradingView Lightweight Charts, Apache License 2.0. Its attribution notice is in app/NOTICE, and the chart
 // keeps the library's attribution logo, which links to https://www.tradingview.com/.
 import { useEffect, useRef, useState } from 'react'
-import { CandlestickSeries, ColorType, LineSeries, LineStyle, LineType, createChart, type IChartApi, type IPriceLine, type ISeriesApi, type UTCTimestamp } from 'lightweight-charts'
+import { CandlestickSeries, ColorType, LineStyle, createChart, type IChartApi, type IPriceLine, type ISeriesApi, type UTCTimestamp } from 'lightweight-charts'
 import { chain } from '../config/chain'
 import type { Candle, Timeframe } from '../lib/chart'
 import { priceDecimals } from '../lib/format'
@@ -38,15 +38,12 @@ function seriesColors() {
   return { upColor: up, downColor: down, wickUpColor: up, wickDownColor: down, borderVisible: false }
 }
 
-const oracleColors = () => ({ color: token('--ink') })
-
 // The chart takes numbers; 18-decimal prices lose nothing visible on the way
 const toNumber = (price18: bigint) => Number(price18) / 1e18
 
 export function PriceChart({
   pair,
   candles,
-  oracle,
   product,
   lines,
   timeframes,
@@ -57,8 +54,6 @@ export function PriceChart({
 }: {
   pair: PairView
   candles: Candle[]
-  /** The Chainlink price per candle, drawn as steps over market candles; empty when the candles are the oracle's */
-  oracle: { time: number; value: number }[]
   /** The market product the candles come from, or null when they are the oracle's own rounds */
   product: string | null
   lines: ChartLine[]
@@ -71,7 +66,6 @@ export function PriceChart({
   const box = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
-  const oracleRef = useRef<ISeriesApi<'Line'> | null>(null)
   const linesRef = useRef<IPriceLine[]>([])
   // Bumped when the color scheme changes, so the price lines are redrawn in the new colors
   const [scheme, setScheme] = useState(0)
@@ -79,15 +73,12 @@ export function PriceChart({
   useEffect(() => {
     const chart = createChart(box.current!, { autoSize: true, ...themeOptions() })
     const series = chart.addSeries(CandlestickSeries, seriesColors())
-    const oracleSeries = chart.addSeries(LineSeries, { ...oracleColors(), lineWidth: 2, lineType: LineType.WithSteps, title: 'Oracle', crosshairMarkerVisible: false })
     chartRef.current = chart
     seriesRef.current = series
-    oracleRef.current = oracleSeries
     const media = window.matchMedia('(prefers-color-scheme: dark)')
     const onScheme = () => {
       chart.applyOptions(themeOptions())
       series.applyOptions(seriesColors())
-      oracleSeries.applyOptions(oracleColors())
       setScheme((n) => n + 1)
     }
     media.addEventListener('change', onScheme)
@@ -96,7 +87,6 @@ export function PriceChart({
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
-      oracleRef.current = null
       linesRef.current = []
     }
   }, [])
@@ -104,7 +94,6 @@ export function PriceChart({
   const precision = priceDecimals(pair.price)
   useEffect(() => {
     seriesRef.current?.applyOptions({ priceFormat: { type: 'price', precision, minMove: 10 ** -precision } })
-    oracleRef.current?.applyOptions({ priceFormat: { type: 'price', precision, minMove: 10 ** -precision } })
     // Grouped like every other price on the page
     const format = (p: number) => p.toLocaleString('en-US', { minimumFractionDigits: precision, maximumFractionDigits: precision })
     chartRef.current?.applyOptions({ localization: { priceFormatter: format } })
@@ -113,10 +102,6 @@ export function PriceChart({
   useEffect(() => {
     seriesRef.current?.setData(candles.map((c) => ({ ...c, time: c.time as UTCTimestamp })))
   }, [candles])
-
-  useEffect(() => {
-    oracleRef.current?.setData(oracle.map((p) => ({ ...p, time: p.time as UTCTimestamp })))
-  }, [oracle])
 
   // Fit the view when the pair or the timeframe changes, once candles are there
   const hasCandles = candles.length > 0
@@ -152,12 +137,6 @@ export function PriceChart({
           ))}
         </div>
         <div className="chart-legend">
-          {product ? (
-            <span data-kind="oracle">
-              <i />
-              Oracle
-            </span>
-          ) : null}
           {(['entry', 'liquidation', 'tp', 'sl'] as const)
             .filter((k) => kinds.has(k))
             .map((k) => (
@@ -174,7 +153,7 @@ export function PriceChart({
         role="img"
         aria-label={
           product
-            ? `${pair.name}, ${timeframe.label} market candles from Coinbase ${product}, with the Chainlink price as a stepped line`
+            ? `${pair.name}, ${timeframe.label} market candles from Coinbase ${product}`
             : `${pair.name}, ${timeframe.label} candles of the Chainlink price`
         }
       >
@@ -191,9 +170,9 @@ export function PriceChart({
       </div>
       {product ? (
         <p className="chart-note">
-          Candles: {product} trades on Coinbase Exchange, live. Stepped line: Chainlink {pair.name} on {chain.name}, the price the protocol
-          executes at. The feed publishes a round when the price moves past its deviation threshold or its heartbeat passes, so the line
-          trails the market and your fill can differ from the last candle. Rising candles are teal and falling ones red; dashed lines preview
+          Candles: {product} trades on Coinbase Exchange, live. The protocol executes at the Chainlink {pair.name} price on {chain.name},
+          shown above the chart as the oracle price. The feed publishes a round when the price moves past its deviation threshold or its
+          heartbeat passes, so your fill can differ from the last candle. Rising candles are teal and falling ones red; dashed lines preview
           the position you are typing.
         </p>
       ) : (

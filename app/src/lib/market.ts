@@ -1,6 +1,6 @@
 // Market candles from Coinbase Exchange's public market data, which needs no key: the history from its REST candles and
 // the candle in progress from its websocket ticker. They show where the market trades; the protocol executes at the
-// Chainlink price, which the chart draws on top as a stepped line.
+// Chainlink price, which the market bar shows.
 import type { Candle, Timeframe } from './chart'
 
 export const MARKET_REST = 'https://api.exchange.coinbase.com'
@@ -58,15 +58,4 @@ export function mergeLive(history: Candle[], live: Candle[]): Candle[] {
     else out.push(c)
   }
   return out
-}
-
-/** One point per candle: the Chainlink price in force at the candle's end, from oracle candles of the same width */
-export function oracleSteps(oracle: Candle[], market: Candle[]): { time: number; value: number }[] {
-  const byTime = new Map(oracle.map((c) => [c.time, c.close]))
-  const steps: { time: number; value: number }[] = []
-  for (const c of market) {
-    const value = byTime.get(c.time)
-    if (value !== undefined) steps.push({ time: c.time, value })
-  }
-  return steps
 }

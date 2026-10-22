@@ -1,5 +1,5 @@
 // The market chart a public network shows, against stubs of Coinbase's REST candles and websocket ticker, so the suite
-// reaches no outside service. The candles sit at the local feed's price, with the oracle drawn over them.
+// reaches no outside service. The candles sit at the local feed's price.
 import { expect, test } from '@playwright/test'
 import { MARKET_PORT } from '../playwright.config'
 import { MARKET_REST, MARKET_WS } from '../src/lib/market'
@@ -7,7 +7,7 @@ import { answerOf } from './chain'
 
 test.use({ baseURL: `http://127.0.0.1:${MARKET_PORT}` })
 
-test('draws market candles with the oracle on top and follows the selected pair', async ({ page }) => {
+test('draws market candles and follows the selected pair', async ({ page }) => {
   const prices = [Number(await answerOf(0)) / 1e8, Number(await answerOf(1)) / 1e8]
   const requested: string[] = []
   await page.route(`${MARKET_REST}/**`, async (route) => {
@@ -37,7 +37,6 @@ test('draws market candles with the oracle on top and follows the selected pair'
 
   await page.goto('/')
   await page.getByText('Proof of concept, not audited').waitFor()
-  await expect(page.locator('.chart-legend')).toContainText('Oracle')
   await expect(page.locator('.chart-note')).toContainText('BTC-USD trades on Coinbase Exchange')
   await expect(page.getByRole('img', { name: /market candles from Coinbase BTC-USD/ })).toBeVisible()
   await expect(page.locator('.chart-state')).toHaveCount(0)

@@ -98,16 +98,15 @@ Formulas: [Guide 2, section 8](./docs/02-mathematics.md#8-collateralization-rati
 ## Demo app
 
 [`app/`](./app) is a web app for this protocol on Base Sepolia, with testnet USDC from a faucet. The trade page is a
-perpetuals terminal: live market candles with the Chainlink price the protocol executes at drawn over them as steps,
-the account's entry, liquidation, take profit and stop loss on it, a trade box, and positions, orders and history
-underneath. Visitors open and close longs and shorts on BTC, ETH and LINK, liquidate or execute other traders'
-positions by hand, deposit into the vault and withdraw after the lock, and bond when a round opens. The Earn page
-draws the vault against every open trade (what it holds against what it owes to liquidity providers and traders) next to the three solvency thresholds. Every preview is
-computed with the contracts' own rounding, checked to the wei against a local deployment. Pyth's
-Hermes API needs a key since August 2026, so the testnet deployment
-([`script/testnet/`](./script/testnet)) replaces Pyth with a testnet-only stand-in that accepts only the current
-Chainlink answer; the oracle contract is the repository's own, unchanged. What it shows, how to run it and how to deploy
-it: [app/README.md](./app/README.md).
+perpetuals terminal: live market candles with the account's entry, liquidation, take profit and stop loss on it, a trade
+box, and positions, orders and history underneath. Visitors open and close longs and shorts on BTC, ETH and LINK,
+liquidate or execute other traders' positions by hand, deposit into the vault and withdraw after the lock, and bond when
+a round opens. The Earn page draws the vault against every open trade (what it holds against what it owes to liquidity
+providers and traders) next to the three solvency thresholds. Every preview is computed with the contracts' own
+rounding, checked to the wei against a local deployment. Pyth's Hermes API needs a key since August 2026, so the testnet
+deployment ([`script/testnet/`](./script/testnet)) replaces Pyth with a testnet-only stand-in that accepts only the
+current Chainlink answer; the oracle contract is the repository's own, unchanged. What it shows, how to run it and how
+to deploy it: [app/README.md](./app/README.md).
 
 ---
 

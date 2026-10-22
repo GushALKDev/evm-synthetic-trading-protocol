@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { applyTick, candlesUrl, mergeLive, oracleSteps, parseCandles } from './market'
+import { applyTick, candlesUrl, mergeLive, parseCandles } from './market'
 
 const c = (time: number, open: number, high: number, low: number, close: number) => ({ time, open, high, low, close })
 
@@ -36,14 +36,5 @@ describe('market candles', () => {
     const live = [c(60, 10, 11, 9, 10), c(120, 10, 13, 10, 12.5), c(180, 12.5, 12.6, 12.4, 12.6)]
     expect(mergeLive(history, live)).toEqual([c(60, 10, 11, 9, 10), c(120, 10, 13, 10, 12.5), c(180, 12.5, 12.6, 12.4, 12.6)])
     expect(mergeLive(history, [])).toEqual(history)
-  })
-
-  it('draws the oracle price at each market candle that has one', () => {
-    const oracle = [c(60, 10, 10, 10, 10), c(120, 10, 10.5, 10, 10.5)]
-    const market = [c(0, 1, 1, 1, 1), c(60, 1, 1, 1, 1), c(120, 1, 1, 1, 1)]
-    expect(oracleSteps(oracle, market)).toEqual([
-      { time: 60, value: 10 },
-      { time: 120, value: 10.5 },
-    ])
   })
 })
