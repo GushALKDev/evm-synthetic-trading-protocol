@@ -26,6 +26,10 @@ Long and short never rely on color alone: every side tag carries the word Long o
 are labelled with the side and amount, and PnL figures carry an explicit sign. Traders' net open profit is drawn as a hatch
 of the holdings grey rather than a fill of its own.
 
+The price chart uses the same tokens: rising candles in the long color and falling ones in danger, with a legend under
+the chart that says so. Price lines carry their own label (Entry #4, Liq #4, TP #4, SL #4): entry in ink-2, liquidation
+in danger, take profit in accent, stop loss in warn; dashed for the position being typed.
+
 Contrast against the backgrounds, from `node scripts/contrast.mjs`:
 
 | Token | Light: ground, surface, sunken | Dark: ground, surface, sunken |
@@ -48,14 +52,16 @@ conservative NAV, funding between traders, liquidations and the solvency layers.
 
 ## The one memorable element
 
-The vault against every open trade, drawn as two bars on one scale: what the vault holds (its USDC) against what it owes
+It lives on the Earn page, where liquidity providers decide. The vault against every open trade, drawn as two bars on
+one scale: what the vault holds (its USDC) against what it owes
 (liquidity providers at 1.0 per share, plus the traders' net open profit when it is positive, winners minus losers, the
 amount the share price subtracts). The remainder is
 the liquidity providers' surplus, or a hatched shortfall when the vault holds less than it owes. Under the bars, the NAV
 ratio and the realised ratio sit on one scale with the three thresholds the SolvencyManager acts on: 95% on the realised
 ratio (bonding), 100% and 110% on the NAV ratio (reserve top-up, healthy). It is the protocol's own accounting, valued at
 the current Chainlink prices the way a snapshot refresh values it, so a move in BTC or a closed trade moves it.
-Everything else stays quiet.
+Everything else stays quiet: the trade page follows the layout traders already know from perpetuals exchanges, and the
+only thing it adds to that layout is the protocol's own prices and levels on the chart.
 
 ## Shared system
 
@@ -67,21 +73,24 @@ with no all-caps labels.
 
 ```
 header        wordmark, network, pages, test USDC, wallet
-              pages: Trade, Vault, All positions, How it works; on a second header row below 1024 px
+              pages: Trade, Earn, Liquidations, How it works; on a second header row below 1024 px
 notice        one line: testnet, tokens without value, not audited, where prices come from
 
-/              hero: headline + the vault ledger
-               grid: open a position, your positions (left, wider) | markets (right)
-/vault         hero: headline + the vault ledger
+/              trading terminal, up to 1480 px wide:
+               market bar: pair selector (left) | oracle price, 24h change, open interest, funding, spread, leverage
+               chart of the Chainlink rounds with the account's levels (left) | trade box (right, 360 px)
+               account panel: Positions, Orders (TP and SL), History
+/earn          hero: headline + the vault ledger
                grid: your liquidity (deposit, request, cancel, withdraw) | solvency layers, bonds
-/positions     every open position, with liquidate and execute buttons and the caller's reward
+/liquidations  every open position, with liquidate and execute buttons and the caller's reward
 /how-it-works  eight mechanics + the oracle note
 
 footer
 ```
 
-Two columns from 1024 px, one below. Every page fits a 360 px screen without horizontal scrolling; the positions table
-scrolls inside its own frame (`e2e/layout.spec.ts`).
+Two columns from 1024 px, one below; on a phone the terminal stacks as market bar, chart, trade box, account panel.
+Every page fits a 360 px screen without horizontal scrolling; tables scroll inside their own frame
+(`e2e/layout.spec.ts`).
 
 ## Rules
 
@@ -93,5 +102,7 @@ scrolls inside its own frame (`e2e/layout.spec.ts`).
   happened and what to do.
 - Numbered markers only for a real sequence (the four steps of a priced call). Status pills only where an action
   depends on them (liquidatable, take profit reached).
-- Motion only where something changed: ledger bars and open interest ease to new widths, the ratio markers slide. All of
-  it stops under reduced motion.
+- Motion only where something changed: ledger bars ease to new widths, the ratio markers slide. All of it stops under
+  reduced motion.
+- The chart says what it is: the oracle's rounds, which move when the feed publishes, not a tick per second. It keeps
+  TradingView's attribution logo, as the Lightweight Charts licence asks (`NOTICE`).

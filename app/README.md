@@ -11,21 +11,37 @@ Proof of concept, not audited. The USDC is a testnet stand-in with no value.
 
 ## What it shows
 
-- **The vault against every open trade.** What the vault holds (its USDC) against what it owes: liquidity providers at
-  1.0 per share, plus the traders' net open profit when it is positive (winners minus losers, at the edge of the price
-  band highest for them), which is what the share price subtracts. The rest is the providers' surplus, or a hatched
-  shortfall. Under it, the NAV ratio and the realised ratio sit on one scale with the thresholds the
-  SolvencyManager acts on: 95% realised (bonding), 100% and 110% NAV (reserve top-up, healthy).
+- **A trading terminal.** The layout of a perpetuals exchange: a pair selector and the market's figures on top (oracle
+  price, 24 hour change, open interest per side, funding, spread, leverage), the chart with the trade box at its right,
+  and the account panel underneath with Positions, Orders and History.
+- **The chart is the oracle.** Candles are built from the Chainlink rounds of the pair on the chain
+  (`getRoundData`, `src/hooks/usePriceHistory.ts`, `src/lib/chart.ts`), the prices the protocol executes at, not an
+  exchange's. They move when the feed publishes a round: in the 24 hours read on 22 October 2026 the Base Sepolia feeds
+  published 208 rounds for BTC/USD, 201 for ETH/USD and 184 for LINK/USD. The account's entry, liquidation, take profit
+  and stop loss are drawn on it, and the position being typed is previewed with dashed lines. The chart is TradingView's
+  Lightweight Charts (Apache License 2.0), with its attribution logo and the notice in [`NOTICE`](./NOTICE).
 - **Positions as the contracts see them.** Entry price with the spread, funding projected to the latest block, the payout
   if closed now with the close fee, and the liquidation price found by searching the Chainlink answers the app would push
   through the contract's own formulas. All of it mirrors the contracts' scales and rounding (`src/lib/trading.ts`,
   `src/lib/vault.ts`), checked to the wei against a local deployment (`scripts/parity.test.ts`).
-- **Previews before every call.** The trade ticket shows entry price, size, fee, liquidation price, funding for the side
-  and the payout cap; a deposit shows the shares at the NAV after the refresh and the reserve top-up the deposit runs
-  first. Every call is simulated before the wallet asks for a signature, so a revert arrives as a sentence
-  (`src/lib/errors.ts`) instead of a failed transaction.
-- **Keepers' work.** Every open position, with a liquidate or execute button where one applies and the reward the caller
-  earns. The page reads the latest 500 trade ids.
+- **Orders are the TP and SL.** The protocol has no limit orders to open a position (ROADMAP 13.8). The Orders tab lists
+  each position's take profit and stop loss as trigger orders, with the distance to the price, and lets the trader edit,
+  cancel or, once reached, execute them.
+- **History in the browser.** As a proof of concept, the app runs no indexer, and the public Base Sepolia RPC answers log
+  queries over 200 blocks at most (`eth_getLogs is limited to a 200 range`), about 40 seconds of chain. So the History tab
+  keeps its records in the visitor's browser: the settlements of the calls sent from it, exact, from their receipts, and
+  positions that close while the page is open (liquidated or executed by someone else), found by their settlement event.
+  A position that closed while the page was closed is listed without amounts, with a link to the explorer. A production
+  frontend would read the history from an indexer.
+- **Previews before every call.** The trade box shows entry price, size, fee, liquidation price, funding for the side and
+  the payout cap; a deposit shows the shares at the NAV after the refresh and the reserve top-up the deposit runs first.
+  Every call is simulated before the wallet asks for a signature, so a revert arrives as a sentence (`src/lib/errors.ts`)
+  instead of a failed transaction.
+- **Earn.** The vault against every open trade (what it holds against what it owes to liquidity providers and traders,
+  with the NAV and realised ratios on the solvency thresholds), deposits and withdrawals, the solvency layers and bonds.
+- **Liquidations by hand.** Every open position, with a liquidate or execute button where one applies and the reward the
+  caller earns. Here they are manual, as a teaching device; in production a keeper or liquidation bot watches every
+  position and calls them as soon as they qualify, for the same reward. The page reads the latest 500 trade ids.
 
 ## Where prices come from
 
@@ -98,16 +114,18 @@ npm ci
 npm run dev                  # reads the Base Sepolia deployment, or shows that there is none yet
 ```
 
-Against a local chain instead (anvil, three mock Chainlink feeds, the full deployment and the seed trades):
+Against a local chain instead (anvil, three local Chainlink feeds with a week of rounds for the chart, the full deployment
+and the seed trades):
 
 ```bash
 ./app/scripts/local-chain.sh                 # from the repo root; writes src/config/deployments/31337.json
 cd app && VITE_CHAIN_ID=31337 npm run dev
 ```
 
-The script sends from anvil's first account, unlocked by the node, so no private key is involved. The mock feeds keep the
-time they were last set at, so after an hour the oracle treats the anchors as stale and priced calls revert, as they would
-on a real network. Rerun the script for a fresh deployment.
+The script sends from anvil's first account, unlocked by the node, so no private key is involved. The local feeds
+([`LocalChainlinkFeed`](../script/testnet/LocalChainlinkFeed.sol), local only) start with 600 past rounds 1,200 s apart,
+so the chart has history. They keep the time they were last set at, so after an hour the oracle treats the anchors as
+stale and priced calls revert, as they would on a real network. Rerun the script for a fresh deployment.
 
 Checks:
 
@@ -180,7 +198,7 @@ FOUNDRY_PROFILE=testnet forge test
 ## Deploy the app to Cloudflare Workers
 
 The app runs as `synthetic-trading-poc`, an assets-only Worker: there is no Worker script. `wrangler.jsonc` points it at
-`dist/` and holds the SPA fallback, which serves `index.html` for every page path (`/vault`, `/positions`,
+`dist/` and holds the SPA fallback, which serves `index.html` for every page path (`/earn`, `/liquidations`,
 `/how-it-works`). `public/_headers` holds the cache and security headers; Vite copies it into `dist/`.
 
 First deploy, from a terminal in `app/`:
@@ -204,8 +222,8 @@ restrict it to the site's domain at the provider.
 src/
   abi/          generated from the Foundry build (npm run abi after forge build)
   config/       chain, links, and the deployment files written by the script
-  lib/          protocol math, price update encoding, error messages, formatting, the derived model
-  hooks/        chain reads, the model, transactions, toasts, the current page
+  lib/          protocol math, chart candles, history records, price update encoding, error messages, formatting, the model
+  hooks/        chain reads, price history, the browser history, the model, transactions, toasts, the current page
   components/   the interface
 scripts/
   local-chain.sh     local rehearsal of the testnet deployment
