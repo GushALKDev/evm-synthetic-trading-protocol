@@ -1,7 +1,7 @@
 // Assets-only Worker for the static Vite build: there is no Worker script. The SPA fallback serves
 // index.html for every path that matches no file, which is how /vault, /positions and /how-it-works load.
 {
-  "name": "synthetic-trading-poc",
+  "name": "trading-poc",
   "compatibility_date": "2026-10-21",
   "assets": {
     "directory": "./dist",

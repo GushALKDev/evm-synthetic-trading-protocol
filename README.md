@@ -14,7 +14,7 @@ counterparty, oracle execution, separate storage and trading contracts).
 > **Proof of concept. Not audited and not deployed on any mainnet.** The findings of the internal review
 > rounds are fixed or documented. It is an educational project and must not be used with real funds.
 
-<!-- Live demo on Base Sepolia, once deployed: https://synthetic-trading-poc.<account>.workers.dev -->
+<!-- Live demo on Base Sepolia, once deployed: https://trading-poc.<account>.workers.dev -->
 
 ---
 

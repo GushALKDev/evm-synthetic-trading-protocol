@@ -7,7 +7,7 @@ execute withdrawals, and bond when a bonding round opens.
 
 Proof of concept, not audited. The USDC is a testnet stand-in with no value.
 
-<!-- Live: https://synthetic-trading-poc.<account>.workers.dev -->
+<!-- Live: https://trading-poc.<account>.workers.dev -->
 
 ## What it shows
 
@@ -214,7 +214,7 @@ FOUNDRY_PROFILE=testnet forge test
 
 ## Deploy the app to Cloudflare Workers
 
-The app runs as `synthetic-trading-poc`, an assets-only Worker: there is no Worker script. `wrangler.jsonc` points it at
+The app runs as `trading-poc`, an assets-only Worker: there is no Worker script. `wrangler.jsonc` points it at
 `dist/` and holds the SPA fallback, which serves `index.html` for every page path (`/earn`, `/liquidations`,
 `/how-it-works`). `public/_headers` holds the cache and security headers; Vite copies it into `dist/`.
 
