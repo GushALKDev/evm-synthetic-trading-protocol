@@ -13,7 +13,7 @@
     "test": "vitest run",
     "typecheck": "tsc -b",
     "abi": "node scripts/sync-abi.mjs",
-    "e2e": "playwright test e2e/app.spec.ts e2e/layout.spec.ts",
+    "e2e": "playwright test e2e/app.spec.ts e2e/layout.spec.ts e2e/market.spec.ts",
     "parity": "vitest run scripts"
   },
   "dependencies": {
