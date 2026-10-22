@@ -79,15 +79,26 @@ export function MarketBar({ model, pair, change, onSelect }: { model: Model; pai
           </dd>
         </div>
         <div>
-          <dt>Open interest, USD</dt>
+          <dt>Long OI, USD</dt>
           <dd>
             <span className="oi-text" data-side="long">
-              Long {formatCompact(pair.oiLong, 18)}
-            </span>{' '}
+              {formatCompact(pair.oiLong, 18)}
+            </span>
+          </dd>
+        </div>
+        <div>
+          <dt>Short OI, USD</dt>
+          <dd>
             <span className="oi-text" data-side="short">
-              Short {formatCompact(pair.oiShort, 18)}
-            </span>{' '}
-            <span className="faint">of {formatCompact(pair.maxOI, 18)}</span>
+              {formatCompact(pair.oiShort, 18)}
+            </span>
+          </dd>
+        </div>
+        <div>
+          {/* The cap applies to both sides together */}
+          <dt>OI cap, both sides</dt>
+          <dd>
+            {formatCompact(pair.oiLong + pair.oiShort, 18)} <span className="faint">of {formatCompact(pair.maxOI, 18)}</span>
           </dd>
         </div>
         <div>
