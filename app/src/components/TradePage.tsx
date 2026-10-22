@@ -1,7 +1,10 @@
 import { useMemo, useState } from 'react'
+import { chartSource } from '../config/chain'
+import { useMarketCandles } from '../hooks/useMarketCandles'
 import { usePriceHistory } from '../hooks/usePriceHistory'
 import { TIMEFRAMES, candlesFromRounds, change24h, type Timeframe } from '../lib/chart'
 import type { HistoryEntry } from '../lib/history'
+import { MARKET_TIMEFRAMES, oracleSteps, productOf } from '../lib/market'
 import type { Model } from '../lib/model'
 import { AccountPanel } from './AccountPanel'
 import { MarketBar } from './MarketBar'
@@ -10,10 +13,15 @@ import { TradeBox, type OpenPreview } from './TradeBox'
 
 export function TradePage({ model, history, onConnect, onFaucet }: { model: Model; history: HistoryEntry[]; onConnect: () => void; onFaucet: () => void }) {
   const [pairIndex, setPairIndex] = useState(0)
-  const [timeframe, setTimeframe] = useState<Timeframe>(TIMEFRAMES[0])
+  const market = chartSource === 'market'
+  const timeframes = market ? MARKET_TIMEFRAMES : TIMEFRAMES
+  const [timeframe, setTimeframe] = useState<Timeframe>(timeframes[0])
   const [preview, setPreview] = useState<OpenPreview | null>(null)
   const pair = model.pairs[pairIndex] ?? model.pairs[0]
-  const rounds = usePriceHistory(pair.chainlinkFeed, timeframe, model.chainTime)
+  // The rounds cover a day at least, for the 24h change
+  const rounds = usePriceHistory(pair.chainlinkFeed, { ...timeframe, horizon: Math.max(timeframe.horizon, 86_400) }, model.chainTime)
+  const product = productOf(pair.symbol)
+  const marketCandles = useMarketCandles(product, timeframe, market)
   const now = Number(model.chainTime)
 
   // The live reads carry the latest round between two history refreshes
@@ -21,10 +29,12 @@ export function TradePage({ model, history, onConnect, onFaucet }: { model: Mode
     () => [...(rounds.data ?? []), { answer: pair.answer, updatedAt: pair.updatedAt }],
     [rounds.data, pair.answer, pair.updatedAt],
   )
-  const candles = useMemo(
+  const oracleCandles = useMemo(
     () => (rounds.data ? candlesFromRounds(allRounds, pair.decimals, timeframe.bucket, now - timeframe.horizon, now) : []),
     [rounds.data, allRounds, pair.decimals, timeframe, now],
   )
+  const candles = market ? marketCandles.candles : oracleCandles
+  const steps = useMemo(() => (market ? oracleSteps(oracleCandles, marketCandles.candles) : []), [market, oracleCandles, marketCandles.candles])
   const change = useMemo(() => (rounds.data ? change24h(allRounds, now) : null), [rounds.data, allRounds, now])
 
   const lines = useMemo((): ChartLine[] => {
@@ -49,11 +59,14 @@ export function TradePage({ model, history, onConnect, onFaucet }: { model: Mode
         <PriceChart
           pair={pair}
           candles={candles}
+          oracle={steps}
+          product={market ? product : null}
           lines={lines}
+          timeframes={timeframes}
           timeframe={timeframe}
           onTimeframe={setTimeframe}
-          loading={rounds.isLoading}
-          failed={!!rounds.error && !rounds.data}
+          loading={market ? marketCandles.loading : rounds.isLoading}
+          failed={market ? marketCandles.failed : !!rounds.error && !rounds.data}
         />
         <TradeBox model={model} pair={pair} onPreview={setPreview} onConnect={onConnect} onFaucet={onFaucet} />
       </div>

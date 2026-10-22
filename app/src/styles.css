@@ -1458,6 +1458,10 @@ td .sub {
   border-top-style: solid;
 }
 
+.chart-legend span[data-kind='oracle'] i {
+  border-top: 2px solid var(--ink);
+}
+
 .chart-legend span[data-kind='liquidation'] i {
   border-top-color: var(--danger);
 }
