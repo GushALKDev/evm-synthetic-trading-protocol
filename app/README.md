@@ -5,7 +5,7 @@ read the whole protocol without a wallet, and with one they can open and close l
 LINK, set take profit and stop loss, liquidate or execute other traders' positions, deposit into the vault, request and
 execute withdrawals, and bond when a bonding round opens.
 
-Proof of concept, not audited. The USDC is a testnet stand-in with no value.
+Proof of concept, not audited, for educational purposes. The USDC is a testnet stand-in with no value.
 
 **Live:** https://trading-poc.gushalk.workers.dev
 

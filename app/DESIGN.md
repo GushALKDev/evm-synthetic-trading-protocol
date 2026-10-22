@@ -79,7 +79,7 @@ with no all-caps labels.
 ```
 header        wordmark, network, pages, test USDC, wallet
               pages: Trade, Earn, Liquidations, How it works; on a second header row below 1024 px
-notice        one line: testnet, tokens without value, not audited, where prices come from
+notice        one line: testnet, for educational purposes, tokens without value, not audited, where prices come from
 
 /              trading terminal, up to 1480 px wide:
                market bar: pair selector (left) | oracle price, 24h change, long OI, short OI, OI cap, funding, spread, leverage
