@@ -3,7 +3,7 @@
 **Prerequisites:** [Guide 3: Technical Architecture](./03-architecture.md)
 **Next:** [Guide 5: Implementation](./05-implementation.md)
 
-**Status:** Proof of concept. Not audited and not deployed on any mainnet.
+**Status:** Proof of concept for educational purposes. Not audited and not deployed on any mainnet.
 
 ---
 

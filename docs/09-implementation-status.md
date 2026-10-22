@@ -3,7 +3,7 @@
 **Prerequisites:** [Guide 8: Security](./08-security.md)
 **Next:** [Guide 10: Review Notes](./10-review-notes.md)
 
-**Status:** Proof of concept. Not audited and not deployed on any mainnet.
+**Status:** Proof of concept for educational purposes. Not audited and not deployed on any mainnet.
 
 ---
 

@@ -11,8 +11,8 @@ oracle-priced markets using USDC collateral. A single ERC-4626 vault, funded by 
 trader profits are paid out of it. The architecture follows gTrade by Gains Network (single vault as
 counterparty, oracle execution, separate storage and trading contracts).
 
-> **Proof of concept. Not audited and not deployed on any mainnet.** The findings of the internal review
-> rounds are fixed or documented. It is an educational project and must not be used with real funds.
+> **Proof of concept for educational purposes. Not audited and not deployed on any mainnet.** The findings
+> of the internal review rounds are fixed or documented. It must not be used with real funds.
 
 **Live demo on Base Sepolia:** https://trading-poc.gushalk.workers.dev
 

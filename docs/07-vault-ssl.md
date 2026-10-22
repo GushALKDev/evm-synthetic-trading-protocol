@@ -3,7 +3,7 @@
 **Prerequisites:** [Guide 1: Fundamentals](./01-fundamentals.md)
 **Next:** [Guide 8: Security](./08-security.md)
 
-**Status:** Proof of concept. Not audited and not deployed on any mainnet.
+**Status:** Proof of concept for educational purposes. Not audited and not deployed on any mainnet.
 
 ---
 

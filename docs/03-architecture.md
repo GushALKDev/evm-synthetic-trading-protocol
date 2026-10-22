@@ -3,7 +3,7 @@
 **Prerequisites:** [Guide 2: Protocol Mathematics](./02-mathematics.md)
 **Next:** [Guide 4: Trade-offs and Risks](./04-tradeoffs.md)
 
-**Status:** Proof of concept. Not audited and not deployed on any mainnet.
+**Status:** Proof of concept for educational purposes. Not audited and not deployed on any mainnet.
 
 ---
 

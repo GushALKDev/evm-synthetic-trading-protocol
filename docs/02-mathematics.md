@@ -3,7 +3,7 @@
 **Prerequisites:** [Guide 1: Fundamentals](./01-fundamentals.md)
 **Next:** [Guide 3: Technical Architecture](./03-architecture.md)
 
-**Status:** Proof of concept. Not audited and not deployed on any mainnet.
+**Status:** Proof of concept for educational purposes. Not audited and not deployed on any mainnet.
 
 Every formula here is written as the code computes it, with the rounding direction. `floor` is Solidity
 integer division on non-negative values; `trunc` is integer division on signed values (rounds toward

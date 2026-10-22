@@ -2,8 +2,8 @@
 
 **Purpose:** Build log by phase. Checked items are implemented as described in the item text.
 
-**Status:** Proof of concept. Not audited and not deployed on any mainnet. [Guide 9](./09-implementation-status.md) has the
-implementation status table, which also lists what is only designed.
+**Status:** Proof of concept for educational purposes. Not audited and not deployed on any mainnet.
+[Guide 9](./09-implementation-status.md) has the implementation status table, which also lists what is only designed.
 
 ---
 
