@@ -13,7 +13,8 @@ export const DEPLOYER = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' as Address
 export const WHALE = '0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc' as Address
 
 export const d = JSON.parse(readFileSync(new URL('../src/config/deployments/31337.json', import.meta.url), 'utf8')) as Record<string, Address>
-export const pub = createPublicClient({ chain: foundry, transport: http(rpc) })
+// anvil can answer a send before it mines the block; a 50 ms poll keeps a missed first look from costing 4 s
+export const pub = createPublicClient({ chain: foundry, transport: http(rpc), pollingInterval: 50 })
 const wallet = createWalletClient({ chain: foundry, transport: http(rpc) })
 const mockFeedAbi = parseAbi(['function setAnswer(int256 answer)', 'function setUpdatedAt(uint256 updatedAt)'])
 
@@ -89,6 +90,11 @@ async function update(pair: number): Promise<Hex[]> {
   const f = await feedOf(pair)
   const decimals = await pub.readContract({ address: f.chainlinkFeed, abi: chainlinkAbi, functionName: 'decimals' })
   return buildPriceUpdate([{ pythFeedId: f.pythFeedId, answer: await answerOf(pair), decimals }], 5n, await latestTime())
+}
+
+/** Liquidates a position from the deployer's account, outside the app, as a keeper or bot would */
+export async function liquidateAs(tradeId: number, pair: number) {
+  await send(DEPLOYER, d.engine, tradingEngineAbi, 'liquidate', [BigInt(tradeId), await update(pair)], 1n)
 }
 
 /** A large BTC long that wins 7% and closes, taking more than 5% of the vault: the realised ratio drops under 95% */
