@@ -13,6 +13,8 @@ const UINT64_MAX = 2n ** 64n - 1n
 
 /** Entry and liquidation of the position being typed, drawn on the chart as a preview */
 export interface OpenPreview {
+  isLong: boolean
+  leverage: bigint
   entry: bigint
   liquidation: bigint | null
 }
@@ -71,8 +73,8 @@ export function TradeBox({ model, pair, onPreview, onConnect, onFaucet }: { mode
 
   const previewEntry = quote && !error ? quote.executionPrice : null
   useEffect(() => {
-    onPreview(previewEntry === null ? null : { entry: previewEntry, liquidation: liqPrice })
-  }, [previewEntry, liqPrice, onPreview])
+    onPreview(previewEntry === null ? null : { isLong, leverage, entry: previewEntry, liquidation: liqPrice })
+  }, [isLong, leverage, previewEntry, liqPrice, onPreview])
 
   const connected = status === 'connected' && chainId === chain.id
   const noGas = !!acc && acc.data.eth === 0n

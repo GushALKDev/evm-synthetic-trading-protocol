@@ -32,7 +32,7 @@ figures and bars are labelled with the side, and PnL figures carry an explicit s
 of the holdings grey rather than a fill of its own.
 
 The price chart uses the same tokens: rising candles in the long color and falling ones in danger, with a legend under
-the chart that says so. Price lines carry their own label (Entry #4, Liq #4, TP #4, SL #4): entry in ink-2, liquidation
+the chart that says so. Price lines carry their own label (Long 5x #4, Liq #4, TP #4, SL #4; the entry names the side and leverage): entry in ink-2, liquidation
 in danger, take profit in accent, stop loss in warn; dashed for the position being typed.
 
 Contrast against the backgrounds, from `node scripts/contrast.mjs`:

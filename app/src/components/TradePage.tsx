@@ -39,13 +39,13 @@ export function TradePage({ model, history, onConnect, onFaucet }: { model: Mode
   const lines = useMemo((): ChartLine[] => {
     const own = (model.account?.trades ?? []).filter((t) => t.pair.index === pair.index)
     const out: ChartLine[] = own.flatMap((t) => [
-      { price: t.position.openPrice, title: `Entry #${t.id}`, kind: 'entry' as const },
+      { price: t.position.openPrice, title: `${t.position.isLong ? 'Long' : 'Short'} ${t.position.leverage}x #${t.id}`, kind: 'entry' as const },
       ...(t.liquidationPrice !== null ? [{ price: t.liquidationPrice, title: `Liq #${t.id}`, kind: 'liquidation' as const }] : []),
       ...(t.position.tp > 0n ? [{ price: t.position.tp, title: `TP #${t.id}`, kind: 'tp' as const }] : []),
       ...(t.position.sl > 0n ? [{ price: t.position.sl, title: `SL #${t.id}`, kind: 'sl' as const }] : []),
     ])
     if (preview) {
-      out.push({ price: preview.entry, title: 'Entry', kind: 'entry', preview: true })
+      out.push({ price: preview.entry, title: `${preview.isLong ? 'Long' : 'Short'} ${preview.leverage}x`, kind: 'entry', preview: true })
       if (preview.liquidation !== null) out.push({ price: preview.liquidation, title: 'Liq', kind: 'liquidation', preview: true })
     }
     return out
