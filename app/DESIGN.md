@@ -2,28 +2,33 @@
 
 ## Accent and data colors
 
-This app is the Mulberry member of the demo family. The accent replaces the family's verdigris everywhere it appears:
-primary buttons, links styled as buttons, selected chips, focus rings, the NAV ratio headline figure, the success toast
+The accent is a green in the manner of Hyperliquid's mint (`#97FCE3` on hyperliquid.xyz, read from its page source),
+the one change from the demo family's palette, chosen by the owner over the family's Mulberry. In the dark theme it is
+that mint; in the light theme a deep green of the same hue, since the mint on white falls far under 3:1. The accent
+replaces the family's verdigris everywhere it appears:
+primary buttons (as text on the accent soft fill with a faint accent border, the fill of the selected pair in the pair
+menu, rather than a solid accent fill), links styled as buttons, selected chips, focus rings, the NAV ratio headline figure, the success toast
 icon, and the mark and favicon.
 
 | Role | Light | Dark |
 | :-- | :-- | :-- |
-| Accent | #78506A | #C399B4 |
-| Accent hover | #613F56 | #D1ABC3 |
-| Accent soft | #EEE2EA | #3B2935 |
-| Text on accent | #FFFFFF | #0E1412 |
+| Accent | #0A7566 | #97FCE4 |
+| Accent hover | #08665A | #B5FDEC |
+| Accent soft | #DCF1EC | #10322C |
+| Text on accent | #FFFFFF | #03211C |
 
-Data colors this app adds, each distinct from the accent, danger and warn:
+Data colors this app adds. Long shares the accent, as on Hyperliquid, where buying is the brand green; the others are
+distinct from the accent, danger and warn:
 
 | Role | Light | Dark | Used for |
 | :-- | :-- | :-- | :-- |
-| Long | #1D6E68 | #6CB8B0 | Long side tags, long open interest |
+| Long | #0A7566 | #97FCE4 | Long side tags, long open interest, rising candles |
 | Short | #46668A | #8AA6C7 | Short side tags, short open interest |
 | Vault holdings | #4B5753 | #A6B1AC | The ledger's "the vault holds" bar |
 | Owed to liquidity providers | #7C8883 | #6E7B76 | The ledger's "it owes" bar |
 
-Long and short never rely on color alone: every side tag carries the word Long or Short and an arrow, open interest bars
-are labelled with the side and amount, and PnL figures carry an explicit sign. Traders' net open profit is drawn as a hatch
+Long and short never rely on color alone: every side tag carries the word Long or Short and an arrow, open interest
+figures and bars are labelled with the side, and PnL figures carry an explicit sign. Traders' net open profit is drawn as a hatch
 of the holdings grey rather than a fill of its own.
 
 The price chart uses the same tokens: rising candles in the long color and falling ones in danger, with a legend under
@@ -34,8 +39,8 @@ Contrast against the backgrounds, from `node scripts/contrast.mjs`:
 
 | Token | Light: ground, surface, sunken | Dark: ground, surface, sunken |
 | :-- | :-- | :-- |
-| accent | 5.80, 6.66, 6.13 | 7.57, 7.04, 7.32 |
-| long | 5.25, 6.03, 5.56 | 8.09, 7.52, 7.82 |
+| accent | 4.88, 5.60, 5.16 | 15.40, 14.31, 14.89 |
+| long | 4.88, 5.60, 5.16 | 15.40, 14.31, 14.89 |
 | short | 5.19, 5.95, 5.48 | 7.41, 6.89, 7.17 |
 | seg-held | 6.57, 7.53, 6.94 | 8.43, 7.84, 8.15 |
 | seg-lp | 3.21, 3.68, 3.39 | 4.22, 3.92, 4.08 |
@@ -77,7 +82,7 @@ header        wordmark, network, pages, test USDC, wallet
 notice        one line: testnet, tokens without value, not audited, where prices come from
 
 /              trading terminal, up to 1480 px wide:
-               market bar: pair selector (left) | oracle price, 24h change, open interest, funding, spread, leverage
+               market bar: pair selector (left) | oracle price, 24h change, long OI, short OI, OI cap, funding, spread, leverage
                chart: market candles with the account's levels (left) | trade box (right, 360 px)
                account panel: Positions, Orders (TP and SL), History
 /earn          hero: headline + the vault ledger

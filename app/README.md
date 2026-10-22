@@ -12,8 +12,9 @@ Proof of concept, not audited. The USDC is a testnet stand-in with no value.
 ## What it shows
 
 - **A trading terminal.** The layout of a perpetuals exchange: a pair selector and the market's figures on top (oracle
-  price, 24 hour change, open interest per side, funding, spread, leverage), the chart with the trade box at its right,
-  and the account panel underneath with Positions, Orders and History.
+  price, 24 hour change, long and short open interest in their own columns, the cap they share, funding, spread,
+  leverage), the chart with the trade box at its right, and the account panel underneath with Positions, Orders and
+  History.
 - **The chart shows the market.** The candles are Coinbase Exchange's BTC-USD, ETH-USD and LINK-USD trades
   (`src/lib/market.ts`, `src/hooks/useMarketCandles.ts`): the history from its public REST candles and the candle in
   progress from its public websocket ticker, neither of which needs a key. The protocol executes at the Chainlink price,

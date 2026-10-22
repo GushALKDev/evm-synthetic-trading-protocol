@@ -9,18 +9,18 @@
   --ink-3: #74807b;
   --rule: #d6dcd9;
   --rule-strong: #b7c1bc;
-  --accent: #78506a;
-  --accent-hover: #613f56;
-  --accent-soft: #eee2ea;
+  --accent: #0a7566;
+  --accent-hover: #08665a;
+  --accent-soft: #dcf1ec;
   --accent-ink: #ffffff;
   --warn: #9a6614;
   --warn-soft: #f4e8d2;
   --danger: #b23b2a;
   --danger-soft: #f6e1dc;
-  --focus: #78506a;
+  --focus: #0a7566;
   /* Data colors of this app (DESIGN.md): long and short, each paired with the word or an arrow */
-  --long: #1d6e68;
-  --long-soft: #dcecea;
+  --long: #0a7566;
+  --long-soft: #dcf1ec;
   --short: #46668a;
   --short-soft: #e1e8f0;
   /* Ledger segments */
@@ -31,7 +31,7 @@
   /* Mark, on the ink tile */
   --mark-held: #a6b1ac;
   --mark-owed: #6e7b76;
-  --mark-accent: #c399b4;
+  --mark-accent: #97fce4;
 
   --font: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
   --mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
@@ -53,17 +53,17 @@
     --ink-3: #78847f;
     --rule: #26312d;
     --rule-strong: #3a4842;
-    --accent: #c399b4;
-    --accent-hover: #d1abc3;
-    --accent-soft: #3b2935;
-    --accent-ink: #0e1412;
+    --accent: #97fce4;
+    --accent-hover: #b5fdec;
+    --accent-soft: #10322c;
+    --accent-ink: #03211c;
     --warn: #d9a54a;
     --warn-soft: #3a2e17;
     --danger: #e07a66;
     --danger-soft: #3d201b;
-    --focus: #c399b4;
-    --long: #6cb8b0;
-    --long-soft: #1a3330;
+    --focus: #97fce4;
+    --long: #97fce4;
+    --long-soft: #10322c;
     --short: #8aa6c7;
     --short-soft: #1d2a38;
     --seg-held: #a6b1ac;
@@ -72,7 +72,7 @@
     --seg-profit: #a6b1ac;
     --mark-held: #a6b1ac;
     --mark-owed: #6e7b76;
-    --mark-accent: #c399b4;
+    --mark-accent: #97fce4;
   }
 }
 
@@ -276,15 +276,16 @@ select {
   opacity: 0.5;
 }
 
+/* The selected pair's soft fill with the accent as text, rather than a solid accent fill */
 .btn-primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-ink);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent);
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: var(--accent-hover);
-  border-color: var(--accent-hover);
+  background: color-mix(in srgb, var(--accent) 18%, var(--accent-soft));
+  border-color: var(--accent);
 }
 
 .btn-block {

@@ -172,13 +172,13 @@ export function PriceChart({
         <p className="chart-note">
           Candles: {product} trades on Coinbase Exchange, live. The protocol executes at the Chainlink {pair.name} price on {chain.name},
           shown above the chart as the oracle price. The feed publishes a round when the price moves past its deviation threshold or its
-          heartbeat passes, so your fill can differ from the last candle. Rising candles are teal and falling ones red; dashed lines preview
+          heartbeat passes, so your fill can differ from the last candle. Rising candles are green and falling ones red; dashed lines preview
           the position you are typing.
         </p>
       ) : (
         <p className="chart-note">
           Chainlink {pair.name} on {chain.name}, the price the protocol executes at. It moves when the feed publishes a new round, not every
-          second. Rising candles are teal and falling ones red; dashed lines preview the position you are typing.
+          second. Rising candles are green and falling ones red; dashed lines preview the position you are typing.
         </p>
       )}
     </section>
