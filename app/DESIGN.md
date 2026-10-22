@@ -28,7 +28,8 @@ of the holdings grey rather than a fill of its own.
 
 The price chart uses the same tokens: rising candles in the long color and falling ones in danger, with a legend under
 the chart that says so. Price lines carry their own label (Entry #4, Liq #4, TP #4, SL #4): entry in ink-2, liquidation
-in danger, take profit in accent, stop loss in warn; dashed for the position being typed.
+in danger, take profit in accent, stop loss in warn; dashed for the position being typed. The oracle's stepped line is
+ink, 2 px, labelled Oracle on the price axis and in the legend.
 
 Contrast against the backgrounds, from `node scripts/contrast.mjs`:
 
@@ -78,7 +79,7 @@ notice        one line: testnet, tokens without value, not audited, where prices
 
 /              trading terminal, up to 1480 px wide:
                market bar: pair selector (left) | oracle price, 24h change, open interest, funding, spread, leverage
-               chart of the Chainlink rounds with the account's levels (left) | trade box (right, 360 px)
+               chart: market candles, the Chainlink price as steps, the account's levels (left) | trade box (right, 360 px)
                account panel: Positions, Orders (TP and SL), History
 /earn          hero: headline + the vault ledger
                grid: your liquidity (deposit, request, cancel, withdraw) | solvency layers, bonds
@@ -104,5 +105,7 @@ Every page fits a 360 px screen without horizontal scrolling; tables scroll insi
   depends on them (liquidatable, take profit reached).
 - Motion only where something changed: ledger bars ease to new widths, the ratio markers slide. All of it stops under
   reduced motion.
-- The chart says what it is: the oracle's rounds, which move when the feed publishes, not a tick per second. It keeps
-  TradingView's attribution logo, as the Lightweight Charts licence asks (`NOTICE`).
+- The chart says what it is: market candles from Coinbase, live, with the oracle as a stepped line that moves when the
+  feed publishes, so the gap between the market and the price the protocol executes at is visible. On a local chain the
+  candles are the oracle's rounds. It keeps TradingView's attribution logo, as the Lightweight Charts licence asks
+  (`NOTICE`).

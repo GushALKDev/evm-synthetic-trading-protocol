@@ -14,13 +14,24 @@ Proof of concept, not audited. The USDC is a testnet stand-in with no value.
 - **A trading terminal.** The layout of a perpetuals exchange: a pair selector and the market's figures on top (oracle
   price, 24 hour change, open interest per side, funding, spread, leverage), the chart with the trade box at its right,
   and the account panel underneath with Positions, Orders and History.
-- **The chart is the oracle.** Candles are built from the Chainlink rounds of the pair on the chain
-  (`getRoundData`, `src/hooks/usePriceHistory.ts`, `src/lib/chart.ts`), the prices the protocol executes at, not an
-  exchange's. They move when the feed publishes a round: in the 24 hours before the latest round on 22 October 2026, the
-  Base Sepolia feeds published 210 rounds for BTC/USD, 201 for ETH/USD and 185 for LINK/USD (`node
-  scripts/count-rounds.mjs`, read-only). The account's entry, liquidation, take profit
-  and stop loss are drawn on it, and the position being typed is previewed with dashed lines. The chart is TradingView's
-  Lightweight Charts (Apache License 2.0), with its attribution logo and the notice in [`NOTICE`](./NOTICE).
+- **The chart shows the market and the oracle.** On Base Sepolia the candles are Coinbase Exchange's BTC-USD, ETH-USD
+  and LINK-USD trades (`src/lib/market.ts`, `src/hooks/useMarketCandles.ts`): the history from its public REST candles
+  and the candle in progress from its public websocket ticker, neither of which needs a key. Over them, a stepped line
+  is the Chainlink price the protocol executes at, read from the feed's rounds (`getRoundData`,
+  `src/hooks/usePriceHistory.ts`, `src/lib/chart.ts`). The line moves only when the feed publishes a round: in the 24
+  hours before the latest round on 22 October 2026, the Base Sepolia feeds published 210 rounds for BTC/USD, 201 for
+  ETH/USD and 185 for LINK/USD (`node scripts/count-rounds.mjs`, read-only), so it trails the candles, and a fill can
+  differ from the last candle. On a local chain, where the feed prices are set by hand, the candles are the oracle's own
+  rounds (`chartSource` in `src/config/chain.ts`, which `VITE_CHART_SOURCE=market|oracle` overrides). The account's
+  entry, liquidation, take profit and stop loss are drawn on it, and the position being typed is previewed with dashed
+  lines. The chart is TradingView's Lightweight Charts (Apache License 2.0), with its attribution logo and the notice in
+  [`NOTICE`](./NOTICE).
+- **One outside service.** The market candles are the only data the app reads from outside the chain. Coinbase
+  documents its candles endpoint as public, at most 300 candles per request, and asks that it not be polled often: the
+  app asks for one view at a time and refreshes it once a minute
+  ([candles](https://docs.cdp.coinbase.com/exchange/reference/exchangerestapi_getproductcandles),
+  [websocket](https://docs.cdp.coinbase.com/exchange/websocket-feed/overview)). If Coinbase cannot be reached, the
+  chart says so; trading reads only the chain and keeps working.
 - **Positions as the contracts see them.** Entry price with the spread, funding projected to the latest block, the payout
   if closed now with the close fee, and the liquidation price found by searching the Chainlink answers the app would push
   through the contract's own formulas. All of it mirrors the contracts' scales and rounding (`src/lib/trading.ts`,
