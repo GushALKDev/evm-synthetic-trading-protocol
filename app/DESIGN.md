@@ -106,6 +106,5 @@ Every page fits a 360 px screen without horizontal scrolling; tables scroll insi
 - Motion only where something changed: ledger bars ease to new widths, the ratio markers slide. All of it stops under
   reduced motion.
 - The chart says what it is: market candles from Coinbase, live, with the oracle as a stepped line that moves when the
-  feed publishes, so the gap between the market and the price the protocol executes at is visible. On a local chain the
-  candles are the oracle's rounds. It keeps TradingView's attribution logo, as the Lightweight Charts licence asks
+  feed publishes, so the gap between the market and the price the protocol executes at is visible. It keeps TradingView's attribution logo, as the Lightweight Charts licence asks
   (`NOTICE`).

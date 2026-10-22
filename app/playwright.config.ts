@@ -18,14 +18,14 @@ export default defineConfig({
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: [
     {
-      command: `VITE_CHAIN_ID=31337 VITE_E2E_ACCOUNT=${E2E_ACCOUNT} npx vite --port ${PORT} --strictPort --host 127.0.0.1`,
+      command: `VITE_CHAIN_ID=31337 VITE_CHART_SOURCE=oracle VITE_E2E_ACCOUNT=${E2E_ACCOUNT} npx vite --port ${PORT} --strictPort --host 127.0.0.1`,
       url: `http://127.0.0.1:${PORT}`,
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,
     },
     // The same app with the market chart a public network shows, for e2e/market.spec.ts (Coinbase is stubbed there)
     {
-      command: `VITE_CHAIN_ID=31337 VITE_CHART_SOURCE=market npx vite --port ${MARKET_PORT} --strictPort --host 127.0.0.1`,
+      command: `VITE_CHAIN_ID=31337 npx vite --port ${MARKET_PORT} --strictPort --host 127.0.0.1`,
       url: `http://127.0.0.1:${MARKET_PORT}`,
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,

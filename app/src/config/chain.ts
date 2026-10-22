@@ -18,15 +18,11 @@ export const rpcUrl: string = import.meta.env.VITE_RPC_URL || chain.rpcUrls.defa
 export const deployment = loadDeployment(chain.id)
 
 /**
- * What the chart's candles show. On a public network, the market (Coinbase), with the oracle as a stepped line on top;
- * on a local chain, the oracle's own rounds, since its prices are set by hand. VITE_CHART_SOURCE overrides it for tests.
+ * What the chart's candles show: the market (Coinbase), with the oracle as a stepped line on top. The local feeds follow
+ * the market too (scripts/local-chain.sh). VITE_CHART_SOURCE=oracle draws the oracle's own rounds as candles instead,
+ * for the end-to-end tests, which move prices by hand and reach no outside service.
  */
-export const chartSource: 'market' | 'oracle' =
-  import.meta.env.VITE_CHART_SOURCE === 'market' || import.meta.env.VITE_CHART_SOURCE === 'oracle'
-    ? import.meta.env.VITE_CHART_SOURCE
-    : chain.id === localChain.id
-      ? 'oracle'
-      : 'market'
+export const chartSource: 'market' | 'oracle' = import.meta.env.VITE_CHART_SOURCE === 'oracle' ? 'oracle' : 'market'
 
 export const explorer = chain.blockExplorers?.default.url
 

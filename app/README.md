@@ -14,15 +14,16 @@ Proof of concept, not audited. The USDC is a testnet stand-in with no value.
 - **A trading terminal.** The layout of a perpetuals exchange: a pair selector and the market's figures on top (oracle
   price, 24 hour change, open interest per side, funding, spread, leverage), the chart with the trade box at its right,
   and the account panel underneath with Positions, Orders and History.
-- **The chart shows the market and the oracle.** On Base Sepolia the candles are Coinbase Exchange's BTC-USD, ETH-USD
+- **The chart shows the market and the oracle.** The candles are Coinbase Exchange's BTC-USD, ETH-USD
   and LINK-USD trades (`src/lib/market.ts`, `src/hooks/useMarketCandles.ts`): the history from its public REST candles
   and the candle in progress from its public websocket ticker, neither of which needs a key. Over them, a stepped line
   is the Chainlink price the protocol executes at, read from the feed's rounds (`getRoundData`,
   `src/hooks/usePriceHistory.ts`, `src/lib/chart.ts`). The line moves only when the feed publishes a round: in the 24
   hours before the latest round on 22 October 2026, the Base Sepolia feeds published 210 rounds for BTC/USD, 201 for
   ETH/USD and 185 for LINK/USD (`node scripts/count-rounds.mjs`, read-only), so it trails the candles, and a fill can
-  differ from the last candle. On a local chain, where the feed prices are set by hand, the candles are the oracle's own
-  rounds (`chartSource` in `src/config/chain.ts`, which `VITE_CHART_SOURCE=market|oracle` overrides). The account's
+  differ from the last candle. On a local chain the feeds start from the market's last week and price (see below), and
+  a price set by hand moves the line away from the candles. `VITE_CHART_SOURCE=oracle` draws the oracle's own rounds as
+  candles instead, as the end-to-end tests do (`chartSource` in `src/config/chain.ts`). The account's
   entry, liquidation, take profit and stop loss are drawn on it, and the position being typed is previewed with dashed
   lines. The chart is TradingView's Lightweight Charts (Apache License 2.0), with its attribution logo and the notice in
   [`NOTICE`](./NOTICE).
@@ -126,8 +127,8 @@ npm ci
 npm run dev                  # reads the Base Sepolia deployment, or shows that there is none yet
 ```
 
-Against a local chain instead (anvil, three local Chainlink feeds with a week of rounds for the chart, the full deployment
-and the seed trades):
+Against a local chain instead (anvil, three local Chainlink feeds with a week of rounds that follow the market, the full
+deployment and the seed trades):
 
 ```bash
 ./app/scripts/local-chain.sh                 # from the repo root; writes src/config/deployments/31337.json
@@ -135,8 +136,11 @@ cd app && VITE_CHAIN_ID=31337 npm run dev
 ```
 
 The script sends from anvil's first account, unlocked by the node, so no private key is involved. The local feeds
-([`LocalChainlinkFeed`](../script/testnet/LocalChainlinkFeed.sol), local only) start with 600 past rounds 1,200 s apart,
-so the chart has history. They keep the time they were last set at, so after an hour the oracle treats the anchors as
+([`LocalChainlinkFeed`](../script/testnet/LocalChainlinkFeed.sol), local only) start at Coinbase's current price, with
+three past rounds per hour over the last week taken from its hourly candles (`scripts/market-rounds.mjs`), so the oracle
+line starts on the market candles. They do not follow the market after that: the line moves when you call `setAnswer`.
+With `LOCAL_PRICES=fixed`, as CI runs it, or when Coinbase does not answer, they start at fixed prices with 600 past
+rounds 1,200 s apart as a random walk. They keep the time they were last set at, so after an hour the oracle treats the anchors as
 stale and priced calls revert, as they would on a real network. Rerun the script for a fresh deployment.
 
 Checks:
