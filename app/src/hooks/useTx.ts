@@ -7,6 +7,7 @@ import { estimateGas, getBlock, readContracts, simulateContract, waitForTransact
 import { explorerTx } from '../config/chain'
 import { chainlinkAbi } from '../lib/abi'
 import { describeError, LandedRevertError, type ErrorContext } from '../lib/errors'
+import { RECEIPT_EVENT, type ReceiptDetail } from './useHistory'
 import type { PairView } from '../lib/model'
 import { buildPriceUpdate } from '../lib/pyth'
 import { wagmiConfig } from '../wagmi'
@@ -126,6 +127,10 @@ export function useTx(errorContext: ErrorContext) {
         }
         if (receipt.status !== 'success') throw new LandedRevertError()
         toasts.update(id, { tone: 'success', title: done, body: undefined })
+        // The history records the settlements in this call's logs, at its block's time
+        const settled = await getBlock(wagmiConfig, { blockNumber: receipt.blockNumber }).catch(() => null)
+        const detail: ReceiptDetail = { account: address, logs: receipt.logs, timestamp: Number(settled?.timestamp ?? BigInt(Math.floor(Date.now() / 1000))) }
+        window.dispatchEvent(new CustomEvent(RECEIPT_EVENT, { detail }))
         await queryClient.invalidateQueries()
         return true
       } catch (err) {

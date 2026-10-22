@@ -121,6 +121,8 @@ export interface Model {
   vault: VaultView
   account: AccountView | null
   chainTime: bigint
+  /** The latest block, which the projections are made at */
+  blockNumber: bigint
   openPaused: boolean
   settlePaused: boolean
   tradeCounter: bigint
@@ -238,6 +240,7 @@ export function buildModel(
   live: LiveData,
   account: { address: Address; data: AccountData; trades: RawTrade[] } | null,
   chainTime: bigint,
+  blockNumber = 0n,
 ): Model {
   const pairs = buildPairs(config, live, chainTime)
   const vault = buildVault(config, live, pairs, chainTime)
@@ -272,6 +275,7 @@ export function buildModel(
     vault,
     account: accountView,
     chainTime,
+    blockNumber,
     openPaused: (live.enginePauseFlags & PAUSE_OPEN) !== 0,
     settlePaused: (live.enginePauseFlags & PAUSE_SETTLE) !== 0,
     tradeCounter: live.tradeCounter,

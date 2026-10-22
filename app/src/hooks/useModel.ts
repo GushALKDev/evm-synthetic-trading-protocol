@@ -15,7 +15,7 @@ export function useModel(): { model: Model | null; error: Error | null; isLoadin
   const model = useMemo(() => {
     if (!data.config || !data.live || chainTime === undefined) return null
     const account = address && data.account && data.accountTrades ? { address, data: data.account, trades: data.accountTrades } : null
-    return buildModel(data.deployment, data.config, data.live, account, chainTime)
-  }, [data.deployment, data.config, data.live, data.account, data.accountTrades, address, chainTime])
+    return buildModel(data.deployment, data.config, data.live, account, chainTime, block.data?.number)
+  }, [data.deployment, data.config, data.live, data.account, data.accountTrades, address, chainTime, block.data?.number])
   return { model, error: (data.error as Error | null) ?? (block.error as Error | null) ?? null, isLoading: data.isLoading }
 }
