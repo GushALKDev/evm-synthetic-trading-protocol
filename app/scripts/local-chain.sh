@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Local rehearsal of the testnet deployment: anvil, three mock Chainlink feeds, DeployTestnet, SeedTrades.
+# Local rehearsal of the testnet deployment: anvil, three local Chainlink feeds with a week of rounds, DeployTestnet,
+# SeedTrades.
 # Writes app/src/config/deployments/31337.json; start the app with VITE_CHAIN_ID=31337.
 # Sends from anvil's first account, unlocked by anvil itself, so no private key is involved.
 # The mock feeds keep the timestamp they were last set at: the oracle treats them as stale an hour later,
@@ -20,10 +21,13 @@ if ! cast chain-id --rpc-url "$RPC" >/dev/null 2>&1; then
   for _ in $(seq 1 50); do cast chain-id --rpc-url "$RPC" >/dev/null 2>&1 && break; sleep 0.2; done
 fi
 
+# Each feed gets 600 past rounds, 1,200 s apart (about a week, the chart's longest view), as a random walk of at most
+# 0.25% per round that ends at the starting answer, then the current round.
 feed() {
   local address
-  address=$(forge create test/mocks/MockChainlinkFeed.sol:MockChainlinkFeed --rpc-url "$RPC" --unlocked --from "$SENDER" \
+  address=$(forge create script/testnet/LocalChainlinkFeed.sol:LocalChainlinkFeed --rpc-url "$RPC" --unlocked --from "$SENDER" \
     --broadcast --constructor-args 8 | awk '/Deployed to:/ {print $3}')
+  cast send "$address" "seedHistory(int256,uint256,uint256,uint256)" "$1" 600 1200 25 --rpc-url "$RPC" --unlocked --from "$SENDER" >/dev/null
   cast send "$address" "setAnswer(int256)" "$1" --rpc-url "$RPC" --unlocked --from "$SENDER" >/dev/null
   echo "$address"
 }
