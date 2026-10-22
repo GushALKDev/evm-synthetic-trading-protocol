@@ -421,13 +421,13 @@ function Solvency({ model, onConnect }: { model: Model; onConnect: () => void })
   )
 }
 
-export function VaultPage({ model, onConnect, onFaucet }: { model: Model; onConnect: () => void; onFaucet: () => void }) {
+export function EarnPage({ model, onConnect, onFaucet }: { model: Model; onConnect: () => void; onFaucet: () => void }) {
   return (
     <>
       <section className="hero">
         <div className="wrap">
           <div className="hero-head">
-            <h1>The vault takes the other side of every trade.</h1>
+            <h1>Earn with the vault that takes the other side of every trade.</h1>
             <p className="hero-sub">
               Liquidity providers deposit USDC and hold sUSDC shares. Their share price subtracts the traders' net open profit and never adds a net
               open loss. When it falls below 1.0 a reserve fund tops it up, and a bond sale follows if the realised ratio drops under 95%.

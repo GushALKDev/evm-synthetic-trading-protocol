@@ -23,10 +23,13 @@ export function Link({ href, ...rest }: ComponentProps<'a'> & { href: string }) 
   )
 }
 
+/** The trade page is a wider terminal; the header, notice and footer line up with it there */
+const wrapFor = (page: Page) => (page === 'trade' ? 'wrap wrap-wide' : 'wrap')
+
 export function Header({ page, onConnect, onFaucet }: { page: Page; onConnect: () => void; onFaucet: () => void }) {
   return (
     <header className="site-header">
-      <div className="wrap">
+      <div className={wrapFor(page)}>
         <Link className="wordmark" href="/">
           <Mark />
           Synthetic Trading
@@ -53,10 +56,10 @@ export function Header({ page, onConnect, onFaucet }: { page: Page; onConnect: (
   )
 }
 
-export function Notice() {
+export function Notice({ page }: { page: Page }) {
   return (
     <div className="notice">
-      <div className="wrap">
+      <div className={wrapFor(page)}>
         Testnet proof of concept with tokens that have no value. Not audited. Prices are Chainlink's, mirrored through a Pyth stand-in:{' '}
         <Link href="/how-it-works#oracle">how and why</Link>.
       </div>
@@ -227,10 +230,10 @@ export function HowItWorks({ model }: { model: Model }) {
   )
 }
 
-export function Footer({ model }: { model: Model | null }) {
+export function Footer({ model, page }: { model: Model | null; page: Page }) {
   return (
     <footer className="site-footer">
-      <div className="wrap">
+      <div className={wrapFor(page)}>
         <p>Proof of concept, not audited. Testnet tokens have no value.</p>
         <nav className="footer-links" aria-label="Links">
           <a href={links.repo} target="_blank" rel="noreferrer">

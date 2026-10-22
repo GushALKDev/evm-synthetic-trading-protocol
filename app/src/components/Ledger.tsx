@@ -146,7 +146,7 @@ export function Ledger({ model }: { model: Model }) {
           {v.bondActive
             ? 'A bonding round is open: deposits are closed until bonds bring the realised ratio back to 100%. '
             : 'The realised ratio is below 95%, so a bonding round is due and deposits are closed. '}
-          <Link href="/vault#solvency">See the solvency layers</Link>.
+          <Link href="/earn#solvency">See the solvency layers</Link>.
         </div>
       ) : null}
       {model.pairs.some((p) => !p.anchorFresh) ? (

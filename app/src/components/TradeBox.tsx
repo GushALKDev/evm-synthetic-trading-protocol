@@ -1,9 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useConnection, useSwitchChain } from 'wagmi'
 import { chain, links } from '../config/chain'
 import { useActions } from '../hooks/useActions'
 import { formatBps, formatFixed, formatPrice, formatRatePerHour, formatUsd, parseAmount, toInput } from '../lib/format'
-import type { Model } from '../lib/model'
+import type { Model, PairView } from '../lib/model'
 import { MAX_PROFIT_MULTIPLIER, MIN_COLLATERAL, fundingRates, liquidationAnswer, quoteOpen } from '../lib/trading'
 import { SideTag } from './icons'
 
@@ -11,7 +11,13 @@ const SLIPPAGES = [10n, 50n, 100n]
 const LEVERAGE_CHIPS = [2n, 5n, 10n, 25n, 50n, 100n]
 const UINT64_MAX = 2n ** 64n - 1n
 
-export function TradeTicket({ model, pairIndex, onPair, onConnect, onFaucet }: { model: Model; pairIndex: number; onPair: (i: number) => void; onConnect: () => void; onFaucet: () => void }) {
+/** Entry and liquidation of the position being typed, drawn on the chart as a preview */
+export interface OpenPreview {
+  entry: bigint
+  liquidation: bigint | null
+}
+
+export function TradeBox({ model, pair, onPreview, onConnect, onFaucet }: { model: Model; pair: PairView; onPreview: (p: OpenPreview | null) => void; onConnect: () => void; onFaucet: () => void }) {
   const { status, chainId } = useConnection()
   const switchChain = useSwitchChain()
   const actions = useActions(model)
@@ -23,7 +29,6 @@ export function TradeTicket({ model, pairIndex, onPair, onConnect, onFaucet }: {
   const [tpInput, setTpInput] = useState('')
   const [slInput, setSlInput] = useState('')
 
-  const pair = model.pairs[pairIndex]
   const acc = model.account
   const wallet = acc?.data.usdc ?? 0n
   const collateral = parseAmount(input, 6)
@@ -64,6 +69,11 @@ export function TradeTicket({ model, pairIndex, onPair, onConnect, onFaucet }: {
   }
   const invalidInput = input.trim() !== '' && collateral === null
 
+  const previewEntry = quote && !error ? quote.executionPrice : null
+  useEffect(() => {
+    onPreview(previewEntry === null ? null : { entry: previewEntry, liquidation: liqPrice })
+  }, [previewEntry, liqPrice, onPreview])
+
   const connected = status === 'connected' && chainId === chain.id
   const noGas = !!acc && acc.data.eth === 0n
   const needsApproval = !!acc && !!collateral && acc.data.allowance.engine < collateral
@@ -84,34 +94,26 @@ export function TradeTicket({ model, pairIndex, onPair, onConnect, onFaucet }: {
   }
 
   return (
-    <div className="card" id="trade">
-      <div className="card-title">
-        <h2>Open a position</h2>
-        {connected && acc && wallet === 0n ? (
-          <button className="link-button" onClick={onFaucet}>
-            Get test USDC
-          </button>
-        ) : null}
+    <div className="card tradebox" id="trade">
+      <div className="sides" role="group" aria-label="Side">
+        <button className="side" data-side="long" aria-pressed={isLong} onClick={() => setIsLong(true)}>
+          <SideTag isLong />
+          <span className="side-sub">Gains if {pair.symbol} rises</span>
+        </button>
+        <button className="side" data-side="short" aria-pressed={!isLong} onClick={() => setIsLong(false)}>
+          <SideTag isLong={false} />
+          <span className="side-sub">Gains if {pair.symbol} falls</span>
+        </button>
       </div>
 
       <div className="action">
-        <div className="choice" aria-label="Pair">
-          {model.pairs.map((p) => (
-            <button key={p.index} className="chip" aria-pressed={p.index === pairIndex} onClick={() => onPair(p.index)}>
-              {p.name}
+        <div className="tradebox-head">
+          <span className="muted">Market order on {pair.name}</span>
+          {connected && acc && wallet === 0n ? (
+            <button className="link-button" onClick={onFaucet}>
+              Get test USDC
             </button>
-          ))}
-        </div>
-
-        <div className="sides" role="group" aria-label="Side">
-          <button className="side" data-side="long" aria-pressed={isLong} onClick={() => setIsLong(true)}>
-            <SideTag isLong />
-            <span className="side-sub">Gains if {pair.symbol} rises</span>
-          </button>
-          <button className="side" data-side="short" aria-pressed={!isLong} onClick={() => setIsLong(false)}>
-            <SideTag isLong={false} />
-            <span className="side-sub">Gains if {pair.symbol} falls</span>
-          </button>
+          ) : null}
         </div>
 
         <div className="field">

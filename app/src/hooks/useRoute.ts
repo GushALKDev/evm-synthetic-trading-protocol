@@ -1,11 +1,11 @@
 import { useSyncExternalStore } from 'react'
 
-export type Page = 'trade' | 'vault' | 'positions' | 'how'
+export type Page = 'trade' | 'earn' | 'liquidations' | 'how'
 
 export const pages: { page: Page; path: string; label: string }[] = [
   { page: 'trade', path: '/', label: 'Trade' },
-  { page: 'vault', path: '/vault', label: 'Vault' },
-  { page: 'positions', path: '/positions', label: 'All positions' },
+  { page: 'earn', path: '/earn', label: 'Earn' },
+  { page: 'liquidations', path: '/liquidations', label: 'Liquidations' },
   { page: 'how', path: '/how-it-works', label: 'How it works' },
 ]
 

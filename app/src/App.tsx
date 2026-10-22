@@ -1,17 +1,15 @@
 import { useEffect, useState } from 'react'
+import { EarnPage } from './components/EarnPage'
 import { FaucetDialog } from './components/FaucetDialog'
-import { Ledger } from './components/Ledger'
-import { Markets } from './components/Markets'
-import { AllPositions, YourPositions } from './components/Positions'
+import { LiquidationsPage } from './components/LiquidationsPage'
 import { Footer, Header, HowItWorks, Notice } from './components/Sections'
 import { Toasts } from './components/Toasts'
-import { TradeTicket } from './components/TradeTicket'
-import { VaultPage } from './components/VaultPage'
+import { TradePage } from './components/TradePage'
 import { ConnectDialog } from './components/Wallet'
 import { chain, deployment, links } from './config/chain'
+import { useHistory } from './hooks/useHistory'
 import { useModel } from './hooks/useModel'
 import { scrollToTarget, useRoute } from './hooks/useRoute'
-import type { Model } from './lib/model'
 
 function NotDeployed() {
   return (
@@ -27,38 +25,10 @@ function NotDeployed() {
   )
 }
 
-function TradePage({ model, onConnect, onFaucet }: { model: Model; onConnect: () => void; onFaucet: () => void }) {
-  const [pairIndex, setPairIndex] = useState(0)
-  return (
-    <>
-      <section className="hero">
-        <div className="wrap">
-          <div className="hero-head">
-            <h1>Go long or short on {model.pairs.map((p) => p.symbol).join(', ').replace(/, ([^,]*)$/, ' and $1')} against one USDC vault.</h1>
-            <p className="hero-sub">
-              Synthetic perpetuals with up to {model.pairs.reduce((m, p) => (p.maxLeverage > m ? p.maxLeverage : m), 0n).toString()}x leverage, running on{' '}
-              {chain.name} with testnet USDC. The vault is the counterparty to every position, and every figure here is computed from the contracts'
-              live state.
-            </p>
-          </div>
-          <Ledger model={model} />
-        </div>
-      </section>
-      <div className="wrap main-grid">
-        <div className="stack">
-          <TradeTicket model={model} pairIndex={pairIndex} onPair={setPairIndex} onConnect={onConnect} onFaucet={onFaucet} />
-          <YourPositions model={model} />
-        </div>
-        <div className="stack">
-          <Markets model={model} selected={pairIndex} onSelect={setPairIndex} />
-        </div>
-      </div>
-    </>
-  )
-}
-
 function Protocol() {
   const { model, error } = useModel()
+  // Mounted on every page, so a settlement sent from any of them reaches the history
+  const history = useHistory(model)
   const { page, url } = useRoute()
   const ready = model !== null
   // A fragment's target only exists once the protocol has rendered, so a direct link waits for the first read.
@@ -74,12 +44,12 @@ function Protocol() {
   return (
     <>
       <Header page={page} onConnect={openConnect} onFaucet={openFaucet} />
-      <Notice />
+      <Notice page={page} />
       {model ? (
         <main>
-          {page === 'trade' ? <TradePage model={model} onConnect={openConnect} onFaucet={openFaucet} /> : null}
-          {page === 'vault' ? <VaultPage model={model} onConnect={openConnect} onFaucet={openFaucet} /> : null}
-          {page === 'positions' ? <AllPositions model={model} onConnect={openConnect} /> : null}
+          {page === 'trade' ? <TradePage model={model} history={history} onConnect={openConnect} onFaucet={openFaucet} /> : null}
+          {page === 'earn' ? <EarnPage model={model} onConnect={openConnect} onFaucet={openFaucet} /> : null}
+          {page === 'liquidations' ? <LiquidationsPage model={model} onConnect={openConnect} /> : null}
           {page === 'how' ? <HowItWorks model={model} /> : null}
         </main>
       ) : (
@@ -93,7 +63,7 @@ function Protocol() {
           )}
         </main>
       )}
-      <Footer model={model} />
+      <Footer model={model} page={page} />
       {connectOpen ? <ConnectDialog onClose={() => setConnectOpen(false)} /> : null}
       {faucetOpen && model ? <FaucetDialog model={model} onClose={() => setFaucetOpen(false)} onConnect={openConnect} /> : null}
       <Toasts />
