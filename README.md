@@ -16,6 +16,8 @@ counterparty, oracle execution, separate storage and trading contracts).
 
 **Live demo on Base Sepolia:** https://trading-poc.gushalk.workers.dev
 
+[![The demo app's trade page, with live market candles and the protocol's figures read from Base Sepolia](docs/images/demo-app.png)](https://trading-poc.gushalk.workers.dev)
+
 ---
 
 ## Highlights
