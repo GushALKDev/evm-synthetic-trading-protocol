@@ -139,7 +139,8 @@ jobs:
         run: |
           anvil --silent --chain-id 31337 > /dev/null 2>&1 &
           for _ in $(seq 1 50); do cast chain-id >/dev/null 2>&1 && break; sleep 0.2; done
-          ./scripts/local-chain.sh
+          # Fixed starting prices, so a run does not depend on the market
+          LOCAL_PRICES=fixed ./scripts/local-chain.sh
           LOCAL_RPC=http://127.0.0.1:8545 npm run parity
           npx playwright install --with-deps chromium
           npm run e2e

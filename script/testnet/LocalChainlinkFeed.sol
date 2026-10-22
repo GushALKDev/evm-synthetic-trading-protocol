@@ -7,7 +7,7 @@ pragma solidity 0.8.24;
  * @notice Local-only stand-in for a Chainlink aggregator, with round history, for the anvil rehearsal of the demo
  *         (app/scripts/local-chain.sh). It is never deployed to Base Sepolia, where the app reads the real feeds.
  * @dev Anyone can set the answer: on the local chain, the scripts and the app's tests move prices with it. It checks
- *      nothing. Round ids count up from 1 in a single phase, and getRoundData reverts for an id with no round, as a
+ *      nothing beyond the order of seeded round times. Round ids count up from 1 in a single phase, and getRoundData reverts for an id with no round, as a
  *      Chainlink aggregator does, so the app's end of history path runs locally too.
  */
 contract LocalChainlinkFeed {
@@ -35,6 +35,8 @@ contract LocalChainlinkFeed {
 
     error NoDataPresent(uint80 roundId);
     error HistoryAlreadySeeded(uint256 rounds);
+    error LengthMismatch(uint256 answers, uint256 times);
+    error RoundTimeOutOfOrder(uint256 index, uint256 time);
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -84,6 +86,22 @@ contract LocalChainlinkFeed {
         for (uint256 i; i < _count; ++i) {
             // forge-lint: disable-next-line(unsafe-typecast) safe: local prices are far inside int192, timestamps fit uint64
             _rounds.push(Round({answer: int192(answers[i]), updatedAt: uint64(block.timestamp - (_count - i) * _interval)}));
+        }
+    }
+
+    /**
+     * @notice Writes past rounds as given, so the local history can follow recorded market prices. Times must rise and
+     *         stay before the current block. Only on an empty feed, like seedHistory.
+     */
+    function seedRounds(int256[] calldata _answers, uint256[] calldata _times) external {
+        if (_rounds.length != 0) revert HistoryAlreadySeeded(_rounds.length);
+        if (_answers.length != _times.length) revert LengthMismatch(_answers.length, _times.length);
+        uint256 previous;
+        for (uint256 i; i < _answers.length; ++i) {
+            if (_times[i] <= previous || _times[i] >= block.timestamp) revert RoundTimeOutOfOrder(i, _times[i]);
+            previous = _times[i];
+            // forge-lint: disable-next-line(unsafe-typecast) safe: local prices are far inside int192, timestamps fit uint64
+            _rounds.push(Round({answer: int192(_answers[i]), updatedAt: uint64(_times[i])}));
         }
     }
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Local rehearsal of the testnet deployment: anvil, three local Chainlink feeds with a week of rounds, DeployTestnet,
-# SeedTrades.
+# Local rehearsal of the testnet deployment: anvil, three local Chainlink feeds with a week of rounds that follow the
+# market, DeployTestnet, SeedTrades.
 # Writes app/src/config/deployments/31337.json; start the app with VITE_CHAIN_ID=31337.
 # Sends from anvil's first account, unlocked by anvil itself, so no private key is involved.
 # The mock feeds keep the timestamp they were last set at: the oracle treats them as stale an hour later,
@@ -21,19 +21,30 @@ if ! cast chain-id --rpc-url "$RPC" >/dev/null 2>&1; then
   for _ in $(seq 1 50); do cast chain-id --rpc-url "$RPC" >/dev/null 2>&1 && break; sleep 0.2; done
 fi
 
-# Each feed gets 600 past rounds, 1,200 s apart (about a week, the chart's longest view), as a random walk of at most
-# 0.25% per round that ends at the starting answer, then the current round.
+# Each feed follows the market (Coinbase, 8 decimals like the Chainlink USD feeds), so the oracle line sits on the market
+# candles the app draws: a week of past rounds from hourly candles (scripts/market-rounds.mjs), then the current price.
+# With LOCAL_PRICES=fixed, or no answer from Coinbase, it gets a fixed price and 600 past rounds 1,200 s apart as a random
+# walk of at most 0.25% per round that ends there.
 feed() {
-  local address
+  local symbol="$1" fixed="$2" address usd rounds
   address=$(forge create script/testnet/LocalChainlinkFeed.sol:LocalChainlinkFeed --rpc-url "$RPC" --unlocked --from "$SENDER" \
     --broadcast --constructor-args 8 | awk '/Deployed to:/ {print $3}')
-  cast send "$address" "seedHistory(int256,uint256,uint256,uint256)" "$1" 600 1200 25 --rpc-url "$RPC" --unlocked --from "$SENDER" >/dev/null
-  cast send "$address" "setAnswer(int256)" "$1" --rpc-url "$RPC" --unlocked --from "$SENDER" >/dev/null
+  if [ "${LOCAL_PRICES:-market}" != "fixed" ] \
+    && usd=$(curl -sf -m 5 "https://api.exchange.coinbase.com/products/$symbol-USD/ticker" | sed -n 's/.*"price":"\([0-9.]*\)".*/\1/p') \
+    && [ -n "$usd" ] \
+    && rounds=$(node "$ROOT/app/scripts/market-rounds.mjs" "$symbol" "$(cast block latest -f timestamp --rpc-url "$RPC")"); then
+    cast send "$address" "seedRounds(int256[],uint256[])" $rounds --rpc-url "$RPC" --unlocked --from "$SENDER" >/dev/null
+    cast send "$address" "setAnswer(int256)" "$(awk -v p="$usd" 'BEGIN { printf "%.0f", p * 1e8 }')" --rpc-url "$RPC" --unlocked \
+      --from "$SENDER" >/dev/null
+  else
+    cast send "$address" "seedHistory(int256,uint256,uint256,uint256)" "$fixed" 600 1200 25 --rpc-url "$RPC" --unlocked --from "$SENDER" >/dev/null
+    cast send "$address" "setAnswer(int256)" "$fixed" --rpc-url "$RPC" --unlocked --from "$SENDER" >/dev/null
+  fi
   echo "$address"
 }
-export BTC_CL_FEED=$(feed 10000000000000)
-export ETH_CL_FEED=$(feed 400000000000)
-export LINK_CL_FEED=$(feed 2000000000)
+export BTC_CL_FEED=$(feed BTC 10000000000000)
+export ETH_CL_FEED=$(feed ETH 400000000000)
+export LINK_CL_FEED=$(feed LINK 2000000000)
 echo "Feeds: BTC $BTC_CL_FEED, ETH $ETH_CL_FEED, LINK $LINK_CL_FEED"
 
 # --slow sends each transaction once the previous one is mined: sent all at once, anvil has been seen to keep a

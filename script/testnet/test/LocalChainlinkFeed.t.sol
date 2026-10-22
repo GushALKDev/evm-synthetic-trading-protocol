@@ -72,6 +72,43 @@ contract LocalChainlinkFeedTest is Test {
         assertEq(id_, 601, "current round after the history");
     }
 
+    function test_seedRounds_writesTheGivenRoundsInOrder() public {
+        int256[] memory answers = new int256[](3);
+        uint256[] memory times = new uint256[](3);
+        (answers[0], answers[1], answers[2]) = (81_000e8, 81_500e8, 81_200e8);
+        (times[0], times[1], times[2]) = (block.timestamp - 3_600, block.timestamp - 2_400, block.timestamp - 1_200);
+        feed.seedRounds(answers, times);
+        feed.setAnswer(81_300e8);
+
+        for (uint80 id = 1; id <= 3; ++id) {
+            (, int256 answer,, uint256 updatedAt,) = feed.getRoundData(id);
+            assertEq(answer, answers[id - 1], "answer");
+            assertEq(updatedAt, times[id - 1], "time");
+        }
+        (uint80 latest, int256 current,,,) = feed.latestRoundData();
+        assertEq(latest, 4, "current round after the history");
+        assertEq(current, 81_300e8, "current answer");
+    }
+
+    function test_seedRounds_rejectsTimesOutOfOrderOrNotInThePast() public {
+        int256[] memory answers = new int256[](2);
+        uint256[] memory times = new uint256[](2);
+        (times[0], times[1]) = (block.timestamp - 60, block.timestamp - 60);
+        vm.expectRevert(abi.encodeWithSelector(LocalChainlinkFeed.RoundTimeOutOfOrder.selector, 1, block.timestamp - 60));
+        feed.seedRounds(answers, times);
+
+        (times[0], times[1]) = (block.timestamp - 60, block.timestamp);
+        vm.expectRevert(abi.encodeWithSelector(LocalChainlinkFeed.RoundTimeOutOfOrder.selector, 1, block.timestamp));
+        feed.seedRounds(answers, times);
+
+        vm.expectRevert(abi.encodeWithSelector(LocalChainlinkFeed.LengthMismatch.selector, 2, 1));
+        feed.seedRounds(answers, new uint256[](1));
+
+        feed.setAnswer(100e8);
+        vm.expectRevert(abi.encodeWithSelector(LocalChainlinkFeed.HistoryAlreadySeeded.selector, 1));
+        feed.seedRounds(new int256[](0), new uint256[](0));
+    }
+
     function test_seedHistory_onlyOnAnEmptyFeed() public {
         feed.setAnswer(100e8);
         vm.expectRevert(abi.encodeWithSelector(LocalChainlinkFeed.HistoryAlreadySeeded.selector, 1));
