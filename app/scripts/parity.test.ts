@@ -79,7 +79,9 @@ describe.skipIf(!rpc)('parity with the contracts on a local chain', () => {
   let spreadParams: SpreadParams
   let confBps: bigint
   let fundingFactor: bigint
-  const pub = createPublicClient({ chain: foundry, transport: http(rpc) })
+  // anvil can answer a send before it mines the block; a 50 ms poll keeps a missed first look from costing viem's
+  // default 4 s, which with vitest's 5 s limit timed tests out
+  const pub = createPublicClient({ chain: foundry, transport: http(rpc), pollingInterval: 50 })
   const wallet = createWalletClient({ chain: foundry, transport: http(rpc), account: deployer })
 
   beforeAll(async () => {
