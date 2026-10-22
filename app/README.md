@@ -16,8 +16,9 @@ Proof of concept, not audited. The USDC is a testnet stand-in with no value.
   and the account panel underneath with Positions, Orders and History.
 - **The chart is the oracle.** Candles are built from the Chainlink rounds of the pair on the chain
   (`getRoundData`, `src/hooks/usePriceHistory.ts`, `src/lib/chart.ts`), the prices the protocol executes at, not an
-  exchange's. They move when the feed publishes a round: in the 24 hours read on 22 October 2026 the Base Sepolia feeds
-  published 208 rounds for BTC/USD, 201 for ETH/USD and 184 for LINK/USD. The account's entry, liquidation, take profit
+  exchange's. They move when the feed publishes a round: in the 24 hours before the latest round on 22 October 2026, the
+  Base Sepolia feeds published 210 rounds for BTC/USD, 201 for ETH/USD and 185 for LINK/USD (`node
+  scripts/count-rounds.mjs`, read-only). The account's entry, liquidation, take profit
   and stop loss are drawn on it, and the position being typed is previewed with dashed lines. The chart is TradingView's
   Lightweight Charts (Apache License 2.0), with its attribution logo and the notice in [`NOTICE`](./NOTICE).
 - **Positions as the contracts see them.** Entry price with the spread, funding projected to the latest block, the payout
@@ -230,6 +231,7 @@ scripts/
   parity.test.ts     app math against a local deployment
   sync-abi.mjs       regenerates src/abi
   contrast.mjs       contrast of the color tokens, for DESIGN.md
+  count-rounds.mjs   rounds the Base Sepolia feeds published in the last 24 hours
 e2e/            Playwright: every user action, layout at 360 px, optional screenshots
 ```
 
