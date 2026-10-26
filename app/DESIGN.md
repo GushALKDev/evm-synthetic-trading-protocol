@@ -89,6 +89,7 @@ notice        one line: testnet, for educational purposes, tokens without value,
                grid: your liquidity (deposit, request, cancel, withdraw) | solvency layers, bonds
 /liquidations  every open position, with liquidate and execute buttons and the caller's reward
 /how-it-works  eight mechanics + the oracle note
+/legal        legal notice: owner (LSSI-CE), purpose, liability, data and cookies; linked from the footer only
 
 footer
 ```

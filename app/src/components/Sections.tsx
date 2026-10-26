@@ -1,6 +1,6 @@
 import type { ComponentProps } from 'react'
 import { chain, explorerAddress, links } from '../config/chain'
-import { navigate, pages, type Page } from '../hooks/useRoute'
+import { LEGAL_PATH, navigate, pages, type Page } from '../hooks/useRoute'
 import { formatBps, formatCompact, formatFixed, formatPct } from '../lib/format'
 import type { Model } from '../lib/model'
 import { CLOSE_FEE_BPS, EXEC_REWARD_BPS, FEE_VAULT_SPLIT_BPS, LIQUIDATION_THRESHOLD_BPS, LIQUIDATOR_MIN_REWARD_BPS, LIQUIDATOR_REWARD_BPS, MAX_FUNDING_RATE_PER_HOUR, MAX_PROFIT_MULTIPLIER, OI_PRECISION, OPEN_FEE_BPS } from '../lib/trading'
@@ -250,6 +250,7 @@ export function Footer({ model, page }: { model: Model | null; page: Page }) {
           <a href={links.author} target="_blank" rel="noreferrer">
             Built by Gustavo Martín
           </a>
+          <Link href={LEGAL_PATH}>Legal notice</Link>
         </nav>
       </div>
     </footer>

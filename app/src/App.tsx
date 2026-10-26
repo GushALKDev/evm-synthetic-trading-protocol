@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { EarnPage } from './components/EarnPage'
 import { FaucetDialog } from './components/FaucetDialog'
+import { LegalNotice } from './components/Legal'
 import { LiquidationsPage } from './components/LiquidationsPage'
 import { Footer, Header, HowItWorks, Notice } from './components/Sections'
 import { Toasts } from './components/Toasts'
@@ -45,7 +46,9 @@ function Protocol() {
     <>
       <Header page={page} onConnect={openConnect} onFaucet={openFaucet} />
       <Notice page={page} />
-      {model ? (
+      {page === 'legal' ? (
+        <LegalNotice />
+      ) : model ? (
         <main>
           {page === 'trade' ? <TradePage model={model} history={history} onConnect={openConnect} onFaucet={openFaucet} /> : null}
           {page === 'earn' ? <EarnPage model={model} onConnect={openConnect} onFaucet={openFaucet} /> : null}
