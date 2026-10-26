@@ -7,7 +7,7 @@ execute withdrawals, and bond when a bonding round opens.
 
 Proof of concept, not audited, for educational purposes. The USDC is a testnet stand-in with no value.
 
-**Live:** https://trading-poc.gushalk.workers.dev
+**Live:** https://trading-poc.tesselium.com
 
 ## What it shows
 

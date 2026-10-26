@@ -14,9 +14,9 @@ counterparty, oracle execution, separate storage and trading contracts).
 > **Proof of concept for educational purposes. Not audited and not deployed on any mainnet.** The findings
 > of the internal review rounds are fixed or documented. It must not be used with real funds.
 
-**Live demo on Base Sepolia:** https://trading-poc.gushalk.workers.dev
+**Live demo on Base Sepolia:** https://trading-poc.tesselium.com
 
-[![The demo app's trade page, with live market candles and the protocol's figures read from Base Sepolia](docs/images/demo-app.png)](https://trading-poc.gushalk.workers.dev)
+[![The demo app's trade page, with live market candles and the protocol's figures read from Base Sepolia](docs/images/demo-app.png)](https://trading-poc.tesselium.com)
 
 ---
 
