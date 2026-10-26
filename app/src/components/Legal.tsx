@@ -20,13 +20,12 @@ export function LegalNotice() {
             <dt>Trade name</dt>
             <dd>Tesselium Labs</dd>
             <dt>Owner</dt>
-            <dd>Gustavo Martín, self-employed professional (autónomo) established in Spain</dd>
+            <dd>Gustavo Martín</dd>
             <dt>Email</dt>
             <dd>
               <a href={`mailto:${OWNER_EMAIL}`}>{OWNER_EMAIL}</a>
             </dd>
           </dl>
-          <p>Tesselium Labs is a trade name, not a registered company.</p>
 
           <h2>2. Purpose</h2>
           <p>
@@ -75,7 +74,7 @@ export function LegalNotice() {
             jurisdiction under the applicable law.
           </p>
 
-          <p className="legal-updated">Last updated: 26 October 2026</p>
+          <p className="legal-updated">Last updated: 27 October 2026</p>
         </div>
       </section>
     </main>
