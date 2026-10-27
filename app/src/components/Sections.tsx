@@ -244,7 +244,7 @@ export function Footer({ model, page }: { model: Model | null; page: Page }) {
           </a>
           {model ? (
             <a href={explorerAddress(model.deployment.engine)} target="_blank" rel="noreferrer">
-              Engine contract
+              Contract
             </a>
           ) : null}
           <span>
@@ -257,7 +257,7 @@ export function Footer({ model, page }: { model: Model | null; page: Page }) {
               Tesselium Labs
             </a>
           </span>
-          <Link href={LEGAL_PATH}>Legal notice</Link>
+          <Link href={LEGAL_PATH}>Legal</Link>
         </nav>
       </div>
     </footer>
