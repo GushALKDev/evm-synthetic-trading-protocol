@@ -23,9 +23,11 @@ export default defineConfig({
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,
     },
-    // The same app with the market chart a public network shows, for e2e/market.spec.ts (Coinbase is stubbed there)
+    // The same app with the market chart a public network shows, for e2e/market.spec.ts (Coinbase is stubbed there).
+    // Its mode gives it its own optimizer cache (vite.config.ts): sharing the first server's, it replaced the deps that
+    // server had handed out, and a chunk the page loads later (viem's ccip, on the first revert) answered 504.
     {
-      command: `VITE_CHAIN_ID=31337 npx vite --port ${MARKET_PORT} --strictPort --host 127.0.0.1`,
+      command: `VITE_CHAIN_ID=31337 npx vite --mode market --port ${MARKET_PORT} --strictPort --host 127.0.0.1`,
       url: `http://127.0.0.1:${MARKET_PORT}`,
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,
