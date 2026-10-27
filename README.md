@@ -278,7 +278,7 @@ MIT, see [LICENSE](./LICENSE).
 
 ## Author
 
-[@GushALKDev](https://github.com/GushALKDev), Gustavo Martín ([LinkedIn](https://www.linkedin.com/in/gustavomaral/)).
+[@GushALKDev](https://github.com/GushALKDev), Gustavo Martín ([LinkedIn](https://www.linkedin.com/in/gustavomaral/)) at [Tesselium Labs](https://tesselium.com).
 
 ## Acknowledgments
 

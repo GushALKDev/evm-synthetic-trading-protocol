@@ -247,9 +247,16 @@ export function Footer({ model, page }: { model: Model | null; page: Page }) {
               Engine contract
             </a>
           ) : null}
-          <a href={links.author} target="_blank" rel="noreferrer">
-            Built by Gustavo Martín
-          </a>
+          <span>
+            Built by{' '}
+            <a href={links.author} target="_blank" rel="noreferrer">
+              Gustavo Martín
+            </a>{' '}
+            at{' '}
+            <a href={links.tesselium} target="_blank" rel="noopener">
+              Tesselium Labs
+            </a>
+          </span>
           <Link href={LEGAL_PATH}>Legal notice</Link>
         </nav>
       </div>
