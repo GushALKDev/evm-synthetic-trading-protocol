@@ -1,5 +1,5 @@
-/assets/*
-  Cache-Control: public, max-age=31536000, immutable
+# No year-long cache for /assets/*: a request for a hashed file that is not deployed yet, or no longer, gets
+# index.html (single-page-application fallback), and a browser that cached it would show a blank page.
 
 /*
   X-Content-Type-Options: nosniff

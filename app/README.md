@@ -216,7 +216,7 @@ FOUNDRY_PROFILE=testnet forge test
 
 The app runs as `trading-poc`, an assets-only Worker: there is no Worker script. `wrangler.jsonc` points it at
 `dist/` and holds the SPA fallback, which serves `index.html` for every page path (`/earn`, `/liquidations`,
-`/how-it-works`). `public/_headers` holds the cache and security headers; Vite copies it into `dist/`.
+`/how-it-works`). `public/_headers` holds the security headers; Vite copies it into `dist/`.
 
 First deploy, from a terminal in `app/`:
 
